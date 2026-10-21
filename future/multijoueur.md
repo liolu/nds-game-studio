@@ -1,5 +1,12 @@
 # Multijoueur (à faire)
 
+**Code** : [multijoueur/](multijoueur/)
+- `multijoueur/spacespore/` : le code de SpaceSpore tel quel (`net.rs`, `net_ui.rs`,
+  `net_models.rs`, `chat_cmd.rs`, commit d28b4d7 du 2026-10-10), pour référence. Il n'est pas
+  compilé.
+- `multijoueur/nds-net/` : l'étape 1 faite, le transport adapté au studio. C'est un crate du
+  workspace, compilé et testé (`cargo test -p nds-net`), mais pas encore utilisé par le moteur.
+
 Jouer à plusieurs à un jeu du studio, comme dans SpaceSpore : réseau local tout seul, et Internet
 avec un code d'invitation. Aucun service externe (pas de Steam, pas de serveur à louer).
 
@@ -75,9 +82,10 @@ Ce que le moteur donnerait aux jeux :
 
 ## Étapes
 
-1. Transport : copier depuis SpaceSpore le socket UDP, `Msg` (avec `serde_json` pour commencer),
-   `Hello` / `Welcome` / `Reject`, la découverte en réseau local, `encode_invite` /
-   `decode_invite`, UPnP et STUN. Mettre tout ça dans `crates/engine/src/net/`.
+1. **Fait** (`nds-net`) — transport : socket UDP, `Msg` en JSON, `Hello` / `Welcome` / `Reject`
+   (protocole, version du studio, jeu), relais de l'état par l'hôte, chat confirmé, départs et
+   coupures, découverte en réseau local (`discover_lan`), code d'invitation, UPnP + STUN
+   (`InternetAccess`). Reste : le brancher sur le moteur (ressource `DsNet` dans `crates/engine`).
 2. Panneau F2 + salle d'attente sur l'écran du bas + chat.
 3. Mode `state` (le plus proche de SpaceSpore), avec une démo : le jeu de plateforme en coopération,
    chaque joueur voit les autres.
