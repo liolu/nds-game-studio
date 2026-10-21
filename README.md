@@ -76,3 +76,8 @@ Le système de mise à jour vient de SpaceSpore : `tools/launcher` (fenêtre egu
   release `vX.Y.Z` (zips, installeurs, `version.json`).
 - Numéro de version : seulement `[workspace.package] version` dans `Cargo.toml`. Si cette version
   existe déjà, la CI augmente le dernier chiffre.
+
+## Pour plus tard
+
+Le dossier [future/](future/README.md) liste les fonctions prévues, par exemple le
+[multijoueur](future/multijoueur.md) en réseau local et par Internet, comme dans SpaceSpore.
