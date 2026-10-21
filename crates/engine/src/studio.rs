@@ -105,6 +105,7 @@ impl Plugin for StudioPlugin {
 
 fn apply_spec(world: &mut World, spec: &GameSpec, title: &str) {
     world.resource_mut::<DsScreens>().main_on = spec.screens.main;
+    world.insert_resource(spec.screens.render);
     world.resource_mut::<ScreenLink>().gap = spec.screens.gap;
     world.insert_resource(spec.key_map());
     world.resource_mut::<Time<Fixed>>().set_timestep_hz(spec.timing.fps.clamp(1.0, 240.0));

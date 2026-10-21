@@ -21,7 +21,7 @@ use bevy::window::{ExitCondition, WindowResolution};
 pub mod prelude {
     pub use crate::input::{DsButton, DsInput, Stylus};
     pub use crate::link::ScreenLink;
-    pub use crate::screens::{ds_to_world, world_to_ds, DsScreens, Engine, EngineCamera3d, Screen, SCREEN_H, SCREEN_W};
+    pub use crate::screens::{ds_to_world, world_to_ds, DsScreens, Engine, EngineCamera3d, RenderStyle, Screen, SCREEN_H, SCREEN_W};
     pub use crate::spec::{GameSpec, ScreenMode};
     pub use crate::studio::{in_game, playing, ActiveGame, AppGameExt, AutoStart, StudioFooter, StudioState};
     pub use crate::NdsEnginePlugin;
@@ -45,7 +45,6 @@ impl Plugin for NdsEnginePlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(
             DefaultPlugins
-                .set(ImagePlugin::default_nearest())
                 .set(WindowPlugin {
                     // La fenêtre principale = l'écran du haut ; celle du bas est créée par `screens`
                     primary_window: Some(Window {

@@ -1,8 +1,9 @@
 # Nds Game Studio
 
 Moteur de jeux DS natifs pour PC, en Rust avec [Bevy](https://bevy.org) 0.20.
-Il fait tourner sur PC des jeux pensés comme des jeux DS : deux écrans 256x192, boutons DS,
-stylet, 2D et 3D. Il n'y a pas d'émulation.
+Il fait tourner sur PC des jeux pensés comme des jeux DS : deux écrans, boutons DS, stylet,
+2D et 3D. Il n'y a pas d'émulation. Les jeux comptent en pixels DS (256x192), mais le rendu est
+natif en qualité maximale : résolution réelle de la fenêtre, anticrénelage MSAA x4, texte net.
 
 ## Les deux écrans
 
@@ -20,6 +21,7 @@ Chaque jeu a un `game.toml` qui dit ce qu'il attend de la console :
 | Clé | Rôle |
 | --- | --- |
 | `screens.main` | écran du moteur principal (`top` / `bottom`), échangeable en jeu |
+| `screens.render` | `hd` (défaut, qualité maximale) ou `pixel` (256x192 agrandi, rendu rétro) |
 | `screens.main_mode` / `sub_mode` | `2d` ou `3d` pour chaque moteur (3D avec la 2D par-dessus) |
 | `screens.scale`, `screens.gap` | taille des fenêtres, écart entre les écrans liés |
 | `screens.main_clear` / `sub_clear` | couleur de fond |
