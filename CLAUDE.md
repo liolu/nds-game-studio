@@ -10,7 +10,7 @@
 ## Structure
 
 - `crates/engine` (nds-engine) : le moteur Bevy. `screens` (moteurs Main/Sub -> canvas 256x192 -> fenetres),
-  `link` (ecrans lies/separes), `input` (boutons DS + stylet, lus dans FixedPreUpdate), `spec` (game.toml),
+  `link` (fusionnes = 1 fenetre, separes = 2 fenetres, F9/F8, glisser Alt+clic), `input` (boutons DS + stylet, lus dans FixedPreUpdate), `spec` (game.toml),
   `studio` (registre des jeux, menu, application de la spec).
 - `app` (nds-game-studio) : le binaire + jeux de demo dans `app/src/games/<id>/` (game.toml + mod.rs).
 - `tools/` : common / installer / updater / launcher (repris de SpaceSpore).

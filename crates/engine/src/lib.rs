@@ -20,8 +20,7 @@ use bevy::window::{ExitCondition, WindowResolution};
 
 pub mod prelude {
     pub use crate::input::{DsButton, DsInput, Stylus};
-    pub use crate::link::ScreenLink;
-    pub use crate::screens::{ds_to_world, world_to_ds, DsScreens, Engine, EngineCamera3d, RenderStyle, Screen, SCREEN_H, SCREEN_W};
+    pub use crate::screens::{ds_to_world, world_to_ds, Aspect, DsScreens, Engine, EngineCamera3d, RenderStyle, Screen, ScreenLayout, SCREEN_H, SCREEN_W};
     pub use crate::spec::{GameSpec, ScreenMode};
     pub use crate::studio::{in_game, playing, ActiveGame, AppGameExt, AutoStart, StudioFooter, StudioState};
     pub use crate::NdsEnginePlugin;
@@ -46,10 +45,10 @@ impl Plugin for NdsEnginePlugin {
         app.add_plugins(
             DefaultPlugins
                 .set(WindowPlugin {
-                    // La fenêtre principale = l'écran du haut ; celle du bas est créée par `screens`
+                    // La fenêtre principale : les deux écrans fusionnés au départ (voir `link`)
                     primary_window: Some(Window {
                         title: self.title.clone(),
-                        resolution: WindowResolution::new(screens::SCREEN_W * DEFAULT_SCALE, screens::SCREEN_H * DEFAULT_SCALE),
+                        resolution: WindowResolution::new(screens::SCREEN_W * DEFAULT_SCALE, 2 * screens::SCREEN_H * DEFAULT_SCALE),
                         position: WindowPosition::Centered(MonitorSelection::Primary),
                         ..default()
                     }),

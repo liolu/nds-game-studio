@@ -7,12 +7,15 @@ natif en qualité maximale : résolution réelle de la fenêtre, anticrénelage 
 
 ## Les deux écrans
 
-- L'écran du haut et l'écran du bas sont deux fenêtres.
-- **Liés** (au démarrage) : l'écran du bas n'a pas de barre de titre et reste collé sous l'écran
-  du haut. Quand on déplace ou redimensionne l'écran du haut, l'écran du bas suit.
-- **Séparer** : clic molette, ou Alt + clic gauche, sur l'écran du bas, puis glisser.
-- **Lier** : glisser l'écran du bas contre le bas de l'écran du haut et lâcher : il s'aimante.
-- **F9** lie ou sépare sans la souris. Fermer une des deux fenêtres quitte le studio.
+- **Fusionnés** (au démarrage) : une seule fenêtre montre l'écran du haut et l'écran du bas l'un
+  sous l'autre. C'est une fenêtre normale : on la déplace, on l'aimante à une moitié d'écran,
+  on la redimensionne par n'importe quel bord, on la réduit.
+- **Séparer** : Alt + clic gauche (ou clic molette) sur l'écran du bas, puis glisser. L'écran du
+  bas part dans sa propre fenêtre, qui suit la souris.
+- **Fusionner** : lâcher la fenêtre de l'écran du bas juste sous l'écran du haut.
+- **F9** fusionne ou sépare. **F8** change le format : remplir la fenêtre, 4:3 (DS), 16:9, 16:10.
+  En format large, les jeux voient plus de choses sur les côtés.
+- Fermer une des fenêtres quitte le studio.
 
 ## Un moteur pour des jeux différents
 
@@ -23,7 +26,8 @@ Chaque jeu a un `game.toml` qui dit ce qu'il attend de la console :
 | `screens.main` | écran du moteur principal (`top` / `bottom`), échangeable en jeu |
 | `screens.render` | `hd` (défaut, qualité maximale) ou `pixel` (256x192 agrandi, rendu rétro) |
 | `screens.main_mode` / `sub_mode` | `2d` ou `3d` pour chaque moteur (3D avec la 2D par-dessus) |
-| `screens.scale`, `screens.gap` | taille des fenêtres, écart entre les écrans liés |
+| `screens.aspect` | format imposé (`4:3`, `16:9`, `16:10`, `fill`) ; sans, celui choisi avec F8 |
+| `screens.scale`, `screens.gap` | taille imposée aux fenêtres (sinon celle du joueur), écart entre les écrans fusionnés |
 | `screens.main_clear` / `sub_clear` | couleur de fond |
 | `input.touch`, `input.keys` | stylet utilisé, touches remplacées |
 | `timing.fps` | cadence de la logique (`FixedUpdate`) |

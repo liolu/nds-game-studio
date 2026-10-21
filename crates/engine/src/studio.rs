@@ -18,8 +18,7 @@ use bevy::sprite::Anchor;
 use bevy::text::TextBounds;
 
 use crate::input::{DsButton, DsInput, KeyMap, Stylus};
-use crate::link::ScreenLink;
-use crate::screens::{ds_to_world, DsScreens, Engine, EngineCamera2d, EngineCamera3d, Screen, SCREEN_H, SCREEN_W};
+use crate::screens::{ds_to_world, DsScreens, Engine, EngineCamera2d, EngineCamera3d, Screen, ScreenLayout, SCREEN_H, SCREEN_W};
 use crate::spec::{GameSpec, ScreenMode};
 
 #[derive(States, Default, Clone, PartialEq, Eq, Hash, Debug)]
@@ -106,7 +105,14 @@ impl Plugin for StudioPlugin {
 fn apply_spec(world: &mut World, spec: &GameSpec, title: &str) {
     world.resource_mut::<DsScreens>().main_on = spec.screens.main;
     world.insert_resource(spec.screens.render);
-    world.resource_mut::<ScreenLink>().gap = spec.screens.gap;
+    {
+        let mut layout = world.resource_mut::<ScreenLayout>();
+        layout.gap = spec.screens.gap;
+        // Sans format imposé par le jeu, on garde celui choisi par le joueur (F8)
+        if let Some(aspect) = spec.screens.aspect {
+            layout.aspect = aspect;
+        }
+    }
     world.insert_resource(spec.key_map());
     world.resource_mut::<Time<Fixed>>().set_timestep_hz(spec.timing.fps.clamp(1.0, 240.0));
     // Un jeu précédent a pu déplacer les caméras 2D (défilement)
@@ -115,18 +121,20 @@ fn apply_spec(world: &mut World, spec: &GameSpec, title: &str) {
         *transform = Transform::default();
     }
 
-    let scale = spec.screens.scale.clamp(1, 8) as f32;
-    let linked = world.resource::<ScreenLink>().linked;
-    let windows = Screen::ALL.map(|s| world.resource::<DsScreens>().window(s));
-    for (screen, entity) in Screen::ALL.into_iter().zip(windows) {
-        let Some(mut window) = world.get_mut::<Window>(entity) else { continue };
-        window.title = match screen {
-            Screen::Top => title.to_string(),
-            Screen::Bottom => format!("{title} - ecran tactile"),
-        };
-        // Écrans liés : l'écran du bas prend la taille de celui du haut tout seul
-        if screen == Screen::Top || !linked {
-            window.resolution.set(SCREEN_W as f32 * scale, SCREEN_H as f32 * scale);
+    // Taille des fenêtres : seulement si le jeu en impose une (sinon on garde celle du joueur,
+    // fenêtre aimantée à une moitié d'écran par exemple)
+    let (main, bottom) = {
+        let screens = world.resource::<DsScreens>();
+        (screens.window(Screen::Top), screens.bottom_window)
+    };
+    let gap = spec.screens.gap as f32;
+    for (entity, rows) in [(Some(main), if bottom.is_some() { 1.0 } else { 2.0 }), (bottom, 1.0)] {
+        let Some(mut window) = entity.and_then(|e| world.get_mut::<Window>(e)) else { continue };
+        window.title = if Some(main) == entity { title.to_string() } else { format!("{title} - ecran tactile") };
+        if let Some(scale) = spec.screens.scale {
+            let scale = scale.clamp(1, 8) as f32;
+            let height = if rows == 2.0 { 2.0 * SCREEN_H as f32 + gap } else { SCREEN_H as f32 };
+            window.resolution.set(SCREEN_W as f32 * scale, height * scale);
         }
     }
 

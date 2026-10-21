@@ -30,7 +30,7 @@ use bevy::prelude::*;
 use serde::Deserialize;
 
 use crate::input::{DsButton, KeyMap};
-use crate::screens::{RenderStyle, Screen};
+use crate::screens::{Aspect, RenderStyle, Screen};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -47,7 +47,10 @@ pub enum ScreenMode {
 pub struct ScreensSpec {
     pub main: Screen,
     pub render: RenderStyle,
-    pub scale: u32,
+    /// Format imposé par le jeu ; sans, celui choisi par le joueur (F8, « remplir » au départ).
+    pub aspect: Option<Aspect>,
+    /// Taille imposée aux fenêtres (x 256x192) ; sans, on garde la taille choisie par le joueur.
+    pub scale: Option<u32>,
     pub gap: u32,
     pub main_mode: ScreenMode,
     pub sub_mode: ScreenMode,
@@ -60,7 +63,8 @@ impl Default for ScreensSpec {
         Self {
             main: Screen::Top,
             render: RenderStyle::Hd,
-            scale: crate::DEFAULT_SCALE,
+            aspect: None,
+            scale: None,
             gap: 0,
             main_mode: ScreenMode::TwoD,
             sub_mode: ScreenMode::TwoD,
@@ -195,6 +199,7 @@ mod tests {
             [screens]
             main = "bottom"
             render = "pixel"
+            aspect = "16:9"
             main_mode = "3d"
             gap = 12
             main_clear = "#ff0000"
@@ -209,10 +214,11 @@ mod tests {
         .unwrap();
         assert_eq!(spec.screens.main, Screen::Bottom);
         assert_eq!(spec.screens.render, RenderStyle::Pixel);
+        assert_eq!(spec.screens.aspect, Some(Aspect::Wide16x9));
         assert_eq!(spec.mode(true), ScreenMode::ThreeD);
         assert_eq!(spec.mode(false), ScreenMode::TwoD);
         assert_eq!(spec.screens.gap, 12);
-        assert_eq!(spec.screens.scale, crate::DEFAULT_SCALE);
+        assert_eq!(spec.screens.scale, None);
         assert_eq!(spec.timing.fps, 30.0);
         assert_eq!(spec.key_map().0[&DsButton::A], vec![KeyCode::Space, KeyCode::KeyK]);
         assert_eq!(spec.key_map().0[&DsButton::B], vec![KeyCode::KeyZ]);

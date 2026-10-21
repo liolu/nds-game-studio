@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 
-use crate::screens::{letterbox, DsScreens, Screen, SCREEN_H, SCREEN_W};
+use crate::screens::{Screen, ScreenPlaces};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -122,7 +122,8 @@ impl DsInput {
     }
 }
 
-/// Stylet sur l'écran du bas, en pixels DS (0,0 en haut à gauche).
+/// Stylet sur l'écran du bas, en pixels DS (0,0 en haut à gauche de la zone 256x192 ; en format
+/// large, x peut sortir de 0..256 sur les côtés).
 #[derive(Resource, Default)]
 pub struct Stylus {
     /// Dernière position du stylet sur l'écran (même relevé).
@@ -188,18 +189,15 @@ fn read_buttons(map: Res<KeyMap>, keys: Res<ButtonInput<KeyCode>>, pads: Query<&
 fn read_stylus(
     buttons: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
-    screens: Res<DsScreens>,
+    places: Res<ScreenPlaces>,
     windows: Query<&Window>,
     mut stylus: ResMut<Stylus>,
 ) {
     stylus.was_down = stylus.down;
-    let Ok(window) = windows.get(screens.window(Screen::Bottom)) else { return };
+    let Some(place) = places.get(Screen::Bottom) else { return };
+    let Ok(window) = windows.get(place.window) else { return };
     let alt = keys.any_pressed([KeyCode::AltLeft, KeyCode::AltRight]); // Alt + clic = déplacer la fenêtre
-    let inside = window.cursor_position().and_then(|cursor| {
-        let (offset, scale) = letterbox(window.size());
-        let p = (cursor - offset) / scale;
-        (p.x >= 0.0 && p.y >= 0.0 && p.x < SCREEN_W as f32 && p.y < SCREEN_H as f32).then_some(p)
-    });
+    let inside = window.cursor_position().and_then(|cursor| place.to_ds(cursor));
     match inside {
         Some(p) => {
             stylus.position = p;
