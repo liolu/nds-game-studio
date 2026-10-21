@@ -1,0 +1,15 @@
+id = "bubbles"
+name = "Bulles Tactiles"
+genre = "Arcade au stylet"
+description = "Eclatez les bulles avec le stylet (clic sur l'ecran du bas) avant qu'elles s'envolent. 45 secondes. Select : echanger les ecrans."
+
+# Le moteur principal est sur l'ecran tactile, comme beaucoup de jeux au stylet
+[screens]
+main = "bottom"
+main_mode = "2d"
+sub_mode = "2d"
+main_clear = "#0b3954"
+sub_clear = "#2b2d42"
+
+[input]
+touch = true

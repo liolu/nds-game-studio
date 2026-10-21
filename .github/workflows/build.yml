@@ -1,0 +1,185 @@
+# Compilation Windows / Linux / macOS, utilisée par stable.yml et unstable.yml.
+# Ne se lance pas toute seule.
+name: Build
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Version, ex. 0.6.5"
+        type: string
+        required: true
+      channel:
+        description: "stable ou experimental"
+        type: string
+        required: true
+      build:
+        description: "Numero de build (experimental)"
+        type: string
+        default: "0"
+      name:
+        description: "Prefixe des zips, ex. nds-game-studio-v0.1.0"
+        type: string
+        required: true
+      installers:
+        description: "Construire aussi les installeurs"
+        type: boolean
+        default: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # Lus à la compilation par tools/common (version / canal affichés et mises à jour)
+  NDSGS_VERSION: ${{ inputs.version }}
+  NDSGS_CHANNEL: ${{ inputs.channel }}
+  NDSGS_BUILD: ${{ inputs.build }}
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows
+            os: windows-latest
+          # Ubuntu 22.04 : glibc plus ancienne = binaire compatible avec plus de distributions
+          - platform: linux
+            os: ubuntu-22.04
+          - platform: macos
+            os: macos-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Install Linux dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libssl-dev libasound2-dev libudev-dev \
+            libwayland-dev libxkbcommon-dev zip
+
+      - name: Cache cargo
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      # ── Windows ──────────────────────────────────────────────────────
+      - name: Build (Windows)
+        if: matrix.platform == 'windows'
+        run: cargo build --release -p nds-game-studio -p nds-game-studio-updater -p nds-game-studio-launcher -p nds-game-studio-installer
+
+      - name: Package (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $dir = "${{ inputs.name }}-windows"
+          New-Item -ItemType Directory -Path $dir
+          Copy-Item target/release/nds-game-studio.exe $dir/
+          Copy-Item target/release/nds-game-studio-updater.exe $dir/
+          Copy-Item target/release/nds-game-studio-launcher.exe $dir/
+          Compress-Archive -Path $dir -DestinationPath "$dir.zip"
+          New-Item -ItemType Directory -Path dist
+          Move-Item "$dir.zip" dist/
+          if ("${{ inputs.installers }}" -eq "true") { Copy-Item target/release/nds-game-studio-installer.exe dist/ }
+
+      # ── Linux ────────────────────────────────────────────────────────
+      - name: Build (Linux)
+        if: matrix.platform == 'linux'
+        run: cargo build --release -p nds-game-studio -p nds-game-studio-updater -p nds-game-studio-launcher -p nds-game-studio-installer
+
+      - name: Package (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          dir="${{ inputs.name }}-linux"
+          mkdir -p "$dir" dist
+          cp target/release/nds-game-studio target/release/nds-game-studio-updater target/release/nds-game-studio-launcher "$dir/"
+          cp run.sh "$dir/"
+          chmod +x "$dir"/*
+          zip -r "dist/$dir.zip" "$dir"
+          if [ "${{ inputs.installers }}" = "true" ]; then
+            # tar.gz : conserve le droit d'exécution après téléchargement
+            mkdir -p installer && cp target/release/nds-game-studio-installer installer/
+            chmod +x installer/nds-game-studio-installer
+            tar -czf dist/nds-game-studio-installer-linux.tar.gz -C installer nds-game-studio-installer
+          fi
+
+      # ── macOS (binaire universel Apple Silicon + Intel) ──────────────
+      - name: Build (macOS)
+        if: matrix.platform == 'macos'
+        env:
+          MACOSX_DEPLOYMENT_TARGET: '11.0'
+        run: |
+          for t in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --release --target $t -p nds-game-studio -p nds-game-studio-updater -p nds-game-studio-launcher -p nds-game-studio-installer
+          done
+          mkdir -p target/universal
+          for bin in nds-game-studio nds-game-studio-updater nds-game-studio-launcher nds-game-studio-installer; do
+            lipo -create \
+              target/aarch64-apple-darwin/release/$bin \
+              target/x86_64-apple-darwin/release/$bin \
+              -output target/universal/$bin
+          done
+
+      - name: Package (macOS)
+        if: matrix.platform == 'macos'
+        run: |
+          VER="${{ inputs.version }}"
+          # make_app <dossier .app> <nom> <identifiant>
+          make_app() {
+            mkdir -p "$1/Contents/MacOS"
+            cat > "$1/Contents/Info.plist" << EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleName</key><string>$2</string>
+              <key>CFBundleDisplayName</key><string>$2</string>
+              <key>CFBundleIdentifier</key><string>$3</string>
+              <key>CFBundleVersion</key><string>$VER</string>
+              <key>CFBundleShortVersionString</key><string>$VER</string>
+              <key>CFBundlePackageType</key><string>APPL</string>
+              <key>CFBundleExecutable</key><string>$2</string>
+              <key>LSMinimumSystemVersion</key><string>11.0</string>
+              <key>NSHighResolutionCapable</key><true/>
+          </dict>
+          </plist>
+          EOF
+          }
+
+          dir="${{ inputs.name }}-macos"
+          mkdir -p "$dir" dist
+          cp target/universal/nds-game-studio target/universal/nds-game-studio-updater target/universal/nds-game-studio-launcher "$dir/"
+          # NdsGameStudio.app : double-clic dans le Finder -> lance le launcher (sans Terminal)
+          make_app "$dir/NdsGameStudio.app" NdsGameStudio io.github.liolu.nds-game-studio
+          printf '#!/bin/bash\ncd "$(dirname "$0")/../../.."\nexec ./nds-game-studio-launcher\n' > "$dir/NdsGameStudio.app/Contents/MacOS/NdsGameStudio"
+          chmod +x "$dir"/nds-game-studio* "$dir/NdsGameStudio.app/Contents/MacOS/NdsGameStudio"
+          # Signature ad-hoc : obligatoire pour exécuter sur Apple Silicon
+          for f in "$dir"/nds-game-studio*; do codesign --force --sign - "$f"; done
+          zip -ry "dist/$dir.zip" "$dir"
+
+          # Installeur : "Nds Game Studio Installer.app"
+          if [ "${{ inputs.installers }}" = "true" ]; then
+            inst="installer/Nds Game Studio Installer.app"
+            make_app "$inst" "Nds Game Studio Installer" io.github.liolu.nds-game-studio.installer
+            cp target/universal/nds-game-studio-installer "$inst/Contents/MacOS/Nds Game Studio Installer"
+            codesign --force --deep --sign - "$inst"
+            (cd installer && zip -ry ../dist/nds-game-studio-installer-macos.zip "Nds Game Studio Installer.app")
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist-${{ matrix.platform }}
+          path: dist/*
+

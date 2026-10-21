@@ -1,0 +1,19 @@
+id = "orbit"
+name = "Orbite 3D"
+genre = "Demo 3D"
+description = "Ecran du haut en 3D (avec texte 2D par-dessus), ecran du bas tactile : glissez le stylet pour tourner, L/R pour zoomer. Les ecrans lies ont un ecart, comme sur la console."
+
+[screens]
+main = "top"
+main_mode = "3d"
+sub_mode = "2d"
+gap = 16
+scale = 2  # x2 (512x384 par ecran)
+main_clear = "#050510"
+sub_clear = "#22223b"
+
+[input]
+touch = true
+
+[timing]
+fps = 60

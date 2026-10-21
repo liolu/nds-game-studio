@@ -1,0 +1,97 @@
+# VERSION EXPERIMENTALE : se lance automatiquement a chaque push sur "experimental".
+# Pas de vraie release : les zips sont mis dans la pre-release "experimental"
+# (toujours la meme, remplacee a chaque fois) avec experimental.json, que le
+# launcher lit en mode "Experimentale".
+name: Experimental
+
+on:
+  push:
+    branches: [experimental]
+    paths-ignore:
+      - '**.md'
+  workflow_dispatch:
+
+# Si deux push arrivent vite, seul le plus recent est publie.
+concurrency:
+  group: experimental
+  cancel-in-progress: true
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.VERSION }}
+      code: ${{ steps.v.outputs.CODE }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Numero de version
+        id: v
+        shell: bash
+        run: |
+          BASE=$(sed -n '/^\[workspace.package\]/,/^\[/ s/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
+          LAST=$(git tag -l 'v[0-9]*' | sed 's/^v//' | sort -V | tail -1)
+          VER=$(printf '%s\n%s\n' "$BASE" "${LAST:-0.0.0}" | sort -V | tail -1)
+          IFS='.' read -r major minor patch <<< "$VER"
+          echo "VERSION=$VER" >> $GITHUB_OUTPUT
+          echo "CODE=$(( major * 10000 + minor * 100 + patch ))" >> $GITHUB_OUTPUT
+
+  build:
+    needs: version
+    uses: ./.github/workflows/build.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
+      channel: experimental
+      build: ${{ github.run_number }}
+      name: nds-game-studio-experimental
+
+  publish:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VER: ${{ needs.version.outputs.version }}
+      CODE: ${{ needs.version.outputs.code }}
+      BUILD: ${{ github.run_number }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish to the "experimental" pre-release
+        shell: bash
+        run: |
+          MSG=$(git log -1 --no-merges --format=%s)
+          NOTES="Build $BUILD : $MSG"
+          BASE="https://github.com/${{ github.repository }}/releases/download/experimental/nds-game-studio-experimental"
+          jq -n --arg v "$VER" --argjson code "$CODE" --argjson build "$BUILD" \
+                --arg base "$BASE" --arg notes "$NOTES" '{
+            version: $v, version_code: $code, build: $build,
+            download_url: ($base + "-windows.zip"),
+            download_url_linux: ($base + "-linux.zip"),
+            download_url_macos: ($base + "-macos.zip"),
+            release_notes: $notes, min_updater_version: 1 }' > experimental.json
+          cat experimental.json
+
+          # Deplace le tag "experimental" sur ce commit
+          git tag -f experimental "$GITHUB_SHA"
+          git push -f origin refs/tags/experimental
+
+          if ! gh release view experimental > /dev/null 2>&1; then
+            gh release create experimental --prerelease --latest=false \
+              --title "Version experimentale" --notes "$NOTES"
+          fi
+          gh release edit experimental --prerelease --latest=false \
+            --title "Version experimentale (build $BUILD)" \
+            --notes "Version de test mise a jour automatiquement a chaque push sur experimental. $NOTES"
+          # Les zips d'abord, experimental.json en dernier : le launcher ne voit
+          # le nouveau build qu'une fois tous les fichiers en ligne.
+          gh release upload experimental dist/*.zip --clobber
+          gh release upload experimental experimental.json --clobber

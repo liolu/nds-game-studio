@@ -1,0 +1,98 @@
+# VERSION STABLE : se lance a chaque push sur la branche "stable".
+# Cree une vraie release GitHub (zips + installeurs + version.json). Le
+# launcher lit releases/latest/download/version.json en mode "Stable".
+#
+# Numero de version : celui de Cargo.toml ([workspace.package] version) s'il
+# n'a pas encore ete publie, sinon le dernier chiffre augmente tout seul
+# (0.1.0 -> 0.1.1 -> 0.1.2 ...).
+name: Stable
+
+on:
+  push:
+    branches: [stable]
+  workflow_dispatch:
+
+concurrency:
+  group: stable
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.VERSION }}
+      code: ${{ steps.v.outputs.CODE }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Choisir le numero de version
+        id: v
+        shell: bash
+        run: |
+          BASE=$(sed -n '/^\[workspace.package\]/,/^\[/ s/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
+          LAST=$(git tag -l 'v[0-9]*' | sed 's/^v//' | sort -V | tail -1)
+          LAST=${LAST:-0.0.0}
+          if [ "$(printf '%s\n%s\n' "$BASE" "$LAST" | sort -V | tail -1)" = "$BASE" ] && [ "$BASE" != "$LAST" ]; then
+            VER="$BASE"
+          else
+            IFS='.' read -r a b c <<< "$LAST"
+            VER="$a.$b.$((c + 1))"
+          fi
+          IFS='.' read -r major minor patch <<< "$VER"
+          echo "VERSION=$VER" >> $GITHUB_OUTPUT
+          echo "CODE=$(( major * 10000 + minor * 100 + patch ))" >> $GITHUB_OUTPUT
+          echo "Version stable : $VER (Cargo.toml: $BASE, derniere publiee: $LAST)"
+
+  build:
+    needs: version
+    uses: ./.github/workflows/build.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
+      channel: stable
+      name: nds-game-studio-v${{ needs.version.outputs.version }}
+      installers: true
+
+  release:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VER: ${{ needs.version.outputs.version }}
+      CODE: ${{ needs.version.outputs.code }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: version.json (lu par le launcher et l'installeur)
+        shell: bash
+        run: |
+          NOTES=$(git log -1 --no-merges --format=%s)
+          BASE="https://github.com/${{ github.repository }}/releases/download/v$VER/nds-game-studio-v$VER"
+          jq -n --arg v "$VER" --argjson code "$CODE" --arg date "$(date -u +%Y-%m-%d)" \
+                --arg base "$BASE" --arg notes "$NOTES" '{
+            version: $v, version_code: $code, release_date: $date,
+            download_url: ($base + "-windows.zip"),
+            download_url_linux: ($base + "-linux.zip"),
+            download_url_macos: ($base + "-macos.zip"),
+            release_notes: $notes, min_updater_version: 1 }' > dist/version.json
+          cat dist/version.json
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: v${{ env.VER }}
+          target_commitish: ${{ github.sha }}
+          name: Nds Game Studio v${{ env.VER }}
+          files: dist/*
+          make_latest: true
+          generate_release_notes: true

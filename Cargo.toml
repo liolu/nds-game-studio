@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = ["crates/engine", "app", "tools/common", "tools/installer", "tools/updater", "tools/launcher"]
+
+# Version du studio : c'est la SEULE a modifier pour changer de version
+# (ex. 0.2.0). Sinon la CI augmente automatiquement le dernier chiffre.
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+bevy = "0.20.0"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

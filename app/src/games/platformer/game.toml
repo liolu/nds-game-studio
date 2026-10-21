@@ -1,0 +1,14 @@
+id = "platformer"
+name = "Mini Plateforme"
+genre = "Plateforme 2D"
+description = "Croix : courir, A ou B : sauter. Le niveau defile en haut, la carte et le score sont en bas."
+
+[screens]
+main = "top"
+main_mode = "2d"
+sub_mode = "2d"
+main_clear = "#5fb4e8"
+sub_clear = "#1d2b53"
+
+[input]
+touch = false

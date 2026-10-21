@@ -1,0 +1,9 @@
+[package]
+name = "nds-game-studio"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nds-engine = { path = "../crates/engine" }
+ndsgs-common = { path = "../tools/common" }
+bevy.workspace = true
