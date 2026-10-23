@@ -14,6 +14,7 @@ pub mod link;
 pub mod screens;
 pub mod spec;
 pub mod studio;
+pub mod titlebar;
 
 use bevy::prelude::*;
 use bevy::window::{ExitCondition, WindowResolution};
@@ -48,8 +49,10 @@ impl Plugin for NdsEnginePlugin {
                     // La fenêtre principale : les deux écrans fusionnés au départ (voir `link`)
                     primary_window: Some(Window {
                         title: self.title.clone(),
-                        resolution: WindowResolution::new(screens::SCREEN_W * DEFAULT_SCALE, 2 * screens::SCREEN_H * DEFAULT_SCALE),
+                        resolution: WindowResolution::new(screens::SCREEN_W * DEFAULT_SCALE, 2 * screens::SCREEN_H * DEFAULT_SCALE + titlebar::TITLE_H as u32),
                         position: WindowPosition::Centered(MonitorSelection::Primary),
+                        // Barre de titre dessinée par le studio (bouton fusion à côté de « réduire »)
+                        decorations: false,
                         ..default()
                     }),
                     // Fermer l'une des deux fenêtres quitte tout (voir `link::close_all`)
@@ -58,6 +61,6 @@ impl Plugin for NdsEnginePlugin {
                     ..default()
                 }),
         )
-        .add_plugins((screens::ScreensPlugin, link::LinkPlugin, input::InputPlugin, studio::StudioPlugin));
+        .add_plugins((screens::ScreensPlugin, link::LinkPlugin, input::InputPlugin, studio::StudioPlugin, titlebar::TitleBarPlugin));
     }
 }

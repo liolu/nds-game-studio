@@ -134,7 +134,7 @@ fn apply_spec(world: &mut World, spec: &GameSpec, title: &str) {
         if let Some(scale) = spec.screens.scale {
             let scale = scale.clamp(1, 8) as f32;
             let height = if rows == 2.0 { 2.0 * SCREEN_H as f32 + gap } else { SCREEN_H as f32 };
-            window.resolution.set(SCREEN_W as f32 * scale, height * scale);
+            window.resolution.set(SCREEN_W as f32 * scale, height * scale + crate::titlebar::TITLE_H);
         }
     }
 

@@ -20,6 +20,7 @@ use bevy::sprite::Anchor;
 use bevy::window::{WindowCloseRequested, WindowMoved, WindowResolution};
 use bevy::winit::WINIT_WINDOWS;
 
+use crate::titlebar::TITLE_H;
 use crate::screens::{display_camera, DisplayCamera, DsScreens, Screen, ScreenLayout, ScreenPlaces, SCREEN_H};
 
 /// Distance (pixels physiques) sous laquelle une fenêtre lâchée se fusionne.
@@ -89,6 +90,11 @@ fn move_inner_to(entity: Entity, inner: IVec2) {
             window.set_outer_position(winit::dpi::PhysicalPosition::new(target.x, target.y));
         }
     });
+}
+
+/// Hauteur de la zone client en pixels logiques (pour convertir la barre de titre en physique).
+fn main_window_logical_h(entity: Entity) -> f32 {
+    WINIT_WINDOWS.with_borrow(|w| w.get_window(entity).map_or(0.0, |w| w.inner_size().height as f32 / w.scale_factor() as f32))
 }
 
 fn is_maximized(entity: Entity) -> bool {
@@ -167,7 +173,7 @@ fn gestures(
             info!("ecran du bas detache");
             layout.merged = false;
             // Même largeur de fenêtre : x garde sa place, y se compte depuis le haut de l'écran du bas
-            let grab = Vec2::new(cursor.x, cursor.y - place.rect.min.y);
+            let grab = Vec2::new(cursor.x, cursor.y - place.rect.min.y + TITLE_H);
             *drag = Drag { window: None, grab: (grab * window.scale_factor()).as_ivec2(), button: Some(button) };
             return;
         }
@@ -209,14 +215,15 @@ fn reconcile(
             screens.bottom_window = None;
             if !is_maximized(main) {
                 let (w, h) = (main_window.width(), main_window.height());
-                main_window.resolution.set(w, h * rows);
+                main_window.resolution.set(w, (h - TITLE_H) * rows + TITLE_H);
             }
             info!("ecrans fusionnes");
         }
         (false, None) => {
             // Séparation : la fenêtre principale garde l'écran du haut, l'écran du bas a sa fenêtre
             let (w, h) = (main_window.width(), main_window.height());
-            let single_h = (h / rows).max(96.0);
+            // Hauteur d'une fenêtre à un écran, barre de titre comprise
+            let single_h = ((h - TITLE_H) / rows).max(96.0) + TITLE_H;
             if !is_maximized(main) {
                 main_window.resolution.set(w, single_h);
             }
@@ -229,7 +236,7 @@ fn reconcile(
             let title = format!("{} - ecran tactile", main_window.title);
             let mut resolution = WindowResolution::new(w.max(128.0) as u32, single_h as u32);
             resolution.set_scale_factor_override(main_window.resolution.scale_factor_override());
-            let bottom = commands.spawn(Window { title, resolution, position, ..default() }).id();
+            let bottom = commands.spawn(Window { title, resolution, position, decorations: false, ..default() }).id();
             commands.spawn(display_camera(bottom, 1));
             screens.bottom_window = Some(bottom);
             *watch = DropWatch { ignore: 0.5, ..default() };
@@ -295,7 +302,8 @@ fn snap_on_drop(
         return; // fenêtre réduite : sa position (-32000) ne veut rien dire
     }
     // La fenêtre principale ne montre que l'écran du haut : sa hauteur = 192 pixels DS
-    let gap = (layout.gap as f32 * main_size.y as f32 / SCREEN_H as f32) as i32;
+    let title = (TITLE_H * main_size.y as f32 / main_window_logical_h(main).max(1.0)) as i32;
+    let gap = (layout.gap as f32 * (main_size.y as i32 - title) as f32 / SCREEN_H as f32) as i32;
     let docked = main_inner + IVec2::new(0, main_size.y as i32 + gap);
     let distance = (bottom_inner - docked).as_vec2().length();
     if distance <= SNAP_DISTANCE {
@@ -322,7 +330,7 @@ fn show_toast(time: Res<Time>, screens: Res<DsScreens>, windows: Query<&Window>,
     for (mut toast, mut transform, mut visibility) in &mut toasts {
         toast.left -= time.delta_secs();
         *visibility = if toast.left > 0.0 { Visibility::Visible } else { Visibility::Hidden };
-        transform.translation = Vec3::new(-window.width() / 2.0 + 12.0, window.height() / 2.0 - 10.0, 10.0);
+        transform.translation = Vec3::new(-window.width() / 2.0 + 12.0, window.height() / 2.0 - TITLE_H - 10.0, 10.0);
     }
 }
 

@@ -13,7 +13,10 @@ natif en qualité maximale : résolution réelle de la fenêtre, anticrénelage 
 - **Séparer** : Alt + clic gauche (ou clic molette) sur l'écran du bas, puis glisser. L'écran du
   bas part dans sa propre fenêtre, qui suit la souris.
 - **Fusionner** : lâcher la fenêtre de l'écran du bas juste sous l'écran du haut.
-- **F9** fusionne ou sépare. **F8** change le format : remplir la fenêtre, 4:3 (DS), 16:9, 16:10.
+- **Bouton fusion** dans la barre de titre, à côté de « réduire » : fusionne ou sépare. La barre de
+  titre est dessinée par le studio (glisser pour déplacer, double-clic pour agrandir, bords pour
+  redimensionner).
+- **F9** fusionne ou sépare aussi. **F8** change le format : remplir la fenêtre, 4:3 (DS), 16:9, 16:10.
   En format large, les jeux voient plus de choses sur les côtés.
 - Fermer une des fenêtres quitte le studio.
 

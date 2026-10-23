@@ -333,15 +333,13 @@ fn place_screens(
     for screen in Screen::ALL {
         let window_entity = screens.window(screen);
         let Ok(window) = windows.get(window_entity) else { continue };
-        let size = window.size();
+        // Sous la barre de titre du studio (voir `titlebar`)
+        let title = crate::titlebar::TITLE_H;
+        let size = (window.size() - Vec2::new(0.0, title)).max(Vec2::ONE);
         let rows = if merged { 2 } else { 1 };
         let (ds_width, scale, first) = layout(size, rows, layout_cfg.gap, layout_cfg.aspect);
-        let rect = if merged && screen == Screen::Bottom {
-            let dy = (SCREEN_H + layout_cfg.gap) as f32 * scale;
-            Rect::from_corners(first.min + Vec2::Y * dy, first.max + Vec2::Y * dy)
-        } else {
-            first
-        };
+        let dy = title + if merged && screen == Screen::Bottom { (SCREEN_H + layout_cfg.gap) as f32 * scale } else { 0.0 };
+        let rect = Rect::from_corners(first.min + Vec2::Y * dy, first.max + Vec2::Y * dy);
         new_places[screen as usize] = Some(ScreenPlace { window: window_entity, rect, scale, ds_width });
     }
     places.0 = new_places;
