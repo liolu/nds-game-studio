@@ -132,6 +132,7 @@ fn click(
     _main_thread: NonSendMarker,
 ) {
     let Ok(button) = buttons.get(activate.entity) else { return };
+    debug!("barre de titre : bouton {:?}", button.action);
     match button.action {
         Action::Fusion => {
             layout.merged = !layout.merged;
@@ -263,6 +264,7 @@ fn window_chrome(
         if !buttons.just_pressed(MouseButton::Left) || keys.any_pressed([KeyCode::AltLeft, KeyCode::AltRight]) {
             continue;
         }
+        debug!("barre de titre : clic a {cursor} (bord {edge:?}, bouton {over_button})");
         if let Some(octant) = edge {
             window.start_drag_resize(octant);
         } else if cursor.y < TITLE_H && !over_button {
