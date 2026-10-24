@@ -5,6 +5,7 @@
 //!   dessin de la manette choisie ; la touche pressée sur la vraie manette s'allume et son nom
 //!   s'affiche (un clic sur une touche dessinée l'affiche aussi) ;
 //! - **Clavier** : touches du clavier et de la manette pour chaque bouton DS ;
+//! - **Sauvegardes** : les sauvegardes des jeux (`saves_page`) ;
 //! - **Développement** : recompiler et relancer à l'enregistrement, fenêtre Code.
 
 use bevy::camera::RenderTarget;
@@ -33,17 +34,19 @@ enum Page {
     Display,
     Controllers,
     Keyboard,
+    Saves,
     Dev,
 }
 
 impl Page {
-    const ALL: [Page; 4] = [Page::Display, Page::Controllers, Page::Keyboard, Page::Dev];
+    const ALL: [Page; 5] = [Page::Display, Page::Controllers, Page::Keyboard, Page::Saves, Page::Dev];
 
     fn label(self) -> &'static str {
         match self {
             Page::Display => "Affichage",
             Page::Controllers => "Manettes",
             Page::Keyboard => "Clavier",
+            Page::Saves => "Sauvegardes",
             Page::Dev => "Developpement",
         }
     }
@@ -265,6 +268,7 @@ fn build_page(mut commands: Commands, mut view: ResMut<OptionsView>, keymap: Res
                 });
             }
         }
+        Page::Saves => crate::saves_page::spawn_page(c),
         Page::Dev => {
             c.spawn(label("Developpement", 24.0, TEXT));
             choice_row(c, "Recompiler et relancer quand un fichier est enregistre", Setting::AutoReload, &["Oui", "Non"]);

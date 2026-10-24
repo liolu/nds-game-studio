@@ -15,7 +15,10 @@ pub mod devtools;
 pub mod input;
 pub mod link;
 pub mod options;
+pub mod save;
+pub mod saves_page;
 pub mod screens;
+pub mod settings;
 pub mod spec;
 pub mod studio;
 pub mod titlebar;
@@ -25,6 +28,7 @@ use bevy::window::{ExitCondition, WindowResolution};
 
 pub mod prelude {
     pub use crate::input::{DsButton, DsInput, Stylus};
+    pub use crate::save::GameSaves;
     pub use crate::screens::{ds_to_world, world_to_ds, Aspect, DsScreens, Engine, EngineCamera3d, RenderStyle, Screen, ScreenLayout, SCREEN_H, SCREEN_W};
     pub use crate::spec::{GameSpec, ScreenMode};
     pub use crate::studio::{in_game, playing, ActiveGame, AppGameExt, AutoStart, StudioFooter, StudioState};
@@ -69,7 +73,8 @@ impl Plugin for NdsEnginePlugin {
                     ..default()
                 }),
         )
-        .add_plugins((screens::ScreensPlugin, link::LinkPlugin, input::InputPlugin, studio::StudioPlugin, titlebar::TitleBarPlugin, devtools::DevToolsPlugin, options::OptionsPlugin));
+        .add_plugins((screens::ScreensPlugin, link::LinkPlugin, input::InputPlugin, studio::StudioPlugin, titlebar::TitleBarPlugin, devtools::DevToolsPlugin, options::OptionsPlugin))
+            .add_plugins((save::SavePlugin, settings::SettingsPlugin, saves_page::SavesPagePlugin));
         options.apply_to_app(app);
     }
 }

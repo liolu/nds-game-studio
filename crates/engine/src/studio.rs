@@ -174,6 +174,7 @@ fn studio_spec() -> GameSpec {
 
 fn reset_to_studio(world: &mut World) {
     world.resource_mut::<ActiveGame>().0 = None;
+    world.insert_resource(crate::save::GameSaves::default());
     let spec = studio_spec();
     apply_spec(world, &spec, "Nds Game Studio");
     world.insert_resource(KeyMap::default());
@@ -187,6 +188,8 @@ fn start_game(world: &mut World) {
         return;
     };
     info!("lancement de {} ({})", spec.name, spec.summary());
+    // Les sauvegardes du jeu (voir `save`) vont dans son dossier
+    world.insert_resource(crate::save::GameSaves::for_game(&id));
     apply_spec(world, &spec, &format!("Nds Game Studio - {}", spec.name));
     if let Err(e) = world.run_system(setup) {
         error!("{id} : setup a echoue : {e}");

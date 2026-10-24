@@ -8,6 +8,8 @@ description = "Moteur de jeux DS natifs (Bevy) : deux ecrans 256x192, fenetres l
 bevy.workspace = true
 serde = { version = "1", features = ["derive"] }
 toml = "1.1"
+serde_json = "1"
+dirs = "5"
 # Meme version que bevy_winit : positionner la fenetre du bas directement
 winit = { version = "0.30", default-features = false }
 
