@@ -20,6 +20,16 @@ natif en qualité maximale : résolution réelle de la fenêtre, anticrénelage 
   En format large, les jeux voient plus de choses sur les côtés.
 - Fermer une des fenêtres quitte le studio.
 
+## Voir et changer le code en direct
+
+- **F5** ouvre la fenêtre « Code » : les fichiers du jeu en cours (un onglet par fichier, molette
+  pour défiler), relus dès qu'ils changent sur le disque.
+- **Enregistrer un fichier** du jeu ou du moteur (dans n'importe quel éditeur) : le studio
+  recompile en arrière-plan puis se relance tout seul sur le même jeu, avec les fenêtres à la même
+  place et la fenêtre Code rouverte. S'il y a une erreur, elle s'affiche en rouge dans la fenêtre
+  Code et le jeu continue avec l'ancien code.
+- Marche avec le dépôt sur le PC (compilation locale), pas dans une version installée.
+
 ## Un moteur pour des jeux différents
 
 Chaque jeu a un `game.toml` qui dit ce qu'il attend de la console :

@@ -7,8 +7,10 @@
 //! - entrées DS (`input`) : boutons A B X Y L R Start Select + croix, stylet sur l'écran du bas ;
 //! - chaque jeu a sa spécification (`spec`, fichier game.toml) : écran principal, 2D ou 3D par
 //!   écran, échelle, écart entre les écrans, cadence, touches ;
-//! - le studio (`studio`) liste les jeux enregistrés, applique leur spécification et les lance.
+//! - le studio (`studio`) liste les jeux enregistrés, applique leur spécification et les lance ;
+//! - F5 montre le code du jeu, et enregistrer un fichier recompile et relance le studio (`devtools`).
 
+pub mod devtools;
 pub mod input;
 pub mod link;
 pub mod screens;
@@ -43,24 +45,29 @@ impl Default for NdsEnginePlugin {
 
 impl Plugin for NdsEnginePlugin {
     fn build(&self, app: &mut App) {
+        // Jeu, place des fenêtres... passés en ligne de commande (aussi pour se relancer, voir `devtools`)
+        let options = devtools::LaunchOptions::from_args();
+        let mut primary = Window {
+            title: self.title.clone(),
+            resolution: WindowResolution::new(screens::SCREEN_W * DEFAULT_SCALE, 2 * screens::SCREEN_H * DEFAULT_SCALE + titlebar::TITLE_H as u32),
+            position: WindowPosition::Centered(MonitorSelection::Primary),
+            // Barre de titre dessinée par le studio (bouton fusion à côté de « réduire »)
+            decorations: false,
+            ..default()
+        };
+        options.apply_to_window(&mut primary);
         app.add_plugins(
             DefaultPlugins
                 .set(WindowPlugin {
                     // La fenêtre principale : les deux écrans fusionnés au départ (voir `link`)
-                    primary_window: Some(Window {
-                        title: self.title.clone(),
-                        resolution: WindowResolution::new(screens::SCREEN_W * DEFAULT_SCALE, 2 * screens::SCREEN_H * DEFAULT_SCALE + titlebar::TITLE_H as u32),
-                        position: WindowPosition::Centered(MonitorSelection::Primary),
-                        // Barre de titre dessinée par le studio (bouton fusion à côté de « réduire »)
-                        decorations: false,
-                        ..default()
-                    }),
+                    primary_window: Some(primary),
                     // Fermer l'une des deux fenêtres quitte tout (voir `link::close_all`)
                     exit_condition: ExitCondition::DontExit,
                     close_when_requested: false,
                     ..default()
                 }),
         )
-        .add_plugins((screens::ScreensPlugin, link::LinkPlugin, input::InputPlugin, studio::StudioPlugin, titlebar::TitleBarPlugin));
+        .add_plugins((screens::ScreensPlugin, link::LinkPlugin, input::InputPlugin, studio::StudioPlugin, titlebar::TitleBarPlugin, devtools::DevToolsPlugin));
+        options.apply_to_app(app);
     }
 }

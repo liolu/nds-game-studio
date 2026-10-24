@@ -38,7 +38,8 @@ impl Plugin for LinkPlugin {
             .init_resource::<DropWatch>()
             .add_systems(Startup, spawn_toast)
             .add_systems(Update, (keys, gestures, reconcile, manual_drag, snap_on_drop).chain())
-            .add_systems(Update, (show_toast, close_all));
+            .add_message::<ShowToast>()
+            .add_systems(Update, (toast_messages, show_toast, close_all).chain());
     }
 }
 
@@ -58,6 +59,10 @@ struct DropWatch {
     /// Temps pendant lequel on ignore les déplacements (fenêtre que le moteur vient de placer).
     ignore: f32,
 }
+
+/// Afficher un message quelques secondes en haut à gauche de la fenêtre principale.
+#[derive(Message, Clone)]
+pub struct ShowToast(pub String);
 
 /// Message en haut à gauche de la fenêtre principale.
 #[derive(Component)]
@@ -334,8 +339,25 @@ fn show_toast(time: Res<Time>, screens: Res<DsScreens>, windows: Query<&Window>,
     }
 }
 
-fn close_all(mut requests: MessageReader<WindowCloseRequested>, mut exit: MessageWriter<AppExit>) {
-    if requests.read().next().is_some() {
-        exit.write(AppExit::Success);
+fn toast_messages(mut messages: MessageReader<ShowToast>, mut toasts: Query<(&mut Text2d, &mut Toast)>) {
+    if let (Some(message), Ok((mut text, mut toast))) = (messages.read().last(), toasts.single_mut()) {
+        text.0 = message.0.clone();
+        toast.left = 3.0;
+    }
+}
+
+/// Fermer un écran quitte le studio ; fermer la fenêtre du code (F5) ne ferme qu'elle.
+fn close_all(
+    mut commands: Commands,
+    mut requests: MessageReader<WindowCloseRequested>,
+    code_windows: Query<(), With<crate::devtools::CodeWindow>>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    for request in requests.read() {
+        if code_windows.get(request.window).is_ok() {
+            commands.entity(request.window).despawn();
+        } else {
+            exit.write(AppExit::Success);
+        }
     }
 }
