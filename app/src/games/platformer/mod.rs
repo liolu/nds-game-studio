@@ -1,5 +1,8 @@
 //! Plateforme : le niveau (3 écrans de large) défile sur l'écran du haut, l'écran du bas montre la
 //! carte du niveau et le score. Boutons seulement, pas de stylet.
+//!
+//! Progression sauvegardée dans l'emplacement "progression" : pièces déjà ramassées, meilleur
+//! temps pour toutes les ramasser, nombre de parties finies.
 
 use bevy::prelude::*;
 use nds_engine::prelude::*;
@@ -28,13 +31,54 @@ const PLATFORMS: [(f32, f32, f32, f32); 9] = [
     (700.0, 64.0, 60.0, 8.0),
 ];
 const COINS: [(f32, f32); 7] = [(120.0, 124.0), (220.0, 92.0), (320.0, 128.0), (455.0, 108.0), (560.0, 76.0), (655.0, 116.0), (730.0, 52.0)];
+const SLOT: &str = "progression";
+
+/// Ce qui est écrit sur le disque : (pièces ramassées par indice dans COINS, meilleur temps en
+/// secondes, parties finies, temps de la partie en cours). Types std seulement (serde vient du moteur).
+type Saved = (Vec<usize>, Option<f32>, u32, f32);
+
+/// Progression de la partie en cours, relue au lancement du jeu.
+#[derive(Resource, Default)]
+struct Progress {
+    coins: Vec<usize>,
+    best: Option<f32>,
+    runs: u32,
+    /// Temps de la partie en cours (compté seulement tant qu'il reste des pièces).
+    time: f32,
+}
+
+impl Progress {
+    fn done(&self) -> bool {
+        self.coins.len() >= COINS.len()
+    }
+
+    fn save(&self, saves: &GameSaves) {
+        let saved: Saved = (self.coins.clone(), self.best, self.runs, self.time);
+        if let Err(e) = saves.save(SLOT, &saved) {
+            warn!("sauvegarde de la progression impossible : {e}");
+        }
+    }
+
+    fn score_text(&self) -> String {
+        if self.done() {
+            format!("Toutes les pieces en {:.1} s !\nSTART : rejouer", self.time)
+        } else {
+            format!("Pieces : {} / {}", self.coins.len(), COINS.len())
+        }
+    }
+
+    fn record_text(&self) -> String {
+        let best = self.best.map_or("-".to_string(), |b| format!("{b:.1} s"));
+        format!("Record : {best}   Parties finies : {}", self.runs)
+    }
+}
 
 pub struct Platformer;
 
 impl Plugin for Platformer {
     fn build(&self, app: &mut App) {
         app.add_ds_game(include_str!("game.toml"), setup)
-            .add_systems(FixedUpdate, (physics, collect, follow_camera, update_map).chain().run_if(playing(ID)));
+            .add_systems(FixedUpdate, (physics, collect, restart, follow_camera, update_map).chain().run_if(playing(ID)));
     }
 }
 
@@ -46,14 +90,19 @@ struct Player {
     grounded: bool,
 }
 
+/// Pièce : position dans le niveau et indice dans COINS.
 #[derive(Component)]
-struct Coin(Vec2);
+struct Coin(Vec2, usize);
 
 #[derive(Component)]
 struct MapDot;
 
 #[derive(Component)]
-struct Score(u32);
+struct Score;
+
+/// Texte du record et des parties finies (écran du bas).
+#[derive(Component)]
+struct RecordText;
 
 /// Centre d'un rectangle du niveau dans le repère de la caméra 2D (caméra au début du niveau).
 fn level_to_world(x: f32, y: f32, size: Vec2) -> Vec3 {
@@ -64,8 +113,25 @@ fn map_point(x: f32, y: f32) -> Vec2 {
     ds_to_world(x * MAP_SCALE, MAP_TOP + y * MAP_SCALE)
 }
 
-fn setup(mut commands: Commands) {
+fn spawn_coin(commands: &mut Commands, index: usize) {
+    let (x, y) = COINS[index];
+    commands.spawn((
+        Sprite::from_color(Color::srgb(1.0, 0.85, 0.2), Vec2::splat(6.0)),
+        Transform::from_translation(level_to_world(x - 3.0, y - 3.0, Vec2::splat(6.0))),
+        Coin(Vec2::new(x, y), index),
+        Engine::Main.layers(),
+        in_game(),
+    ));
+}
+
+fn setup(mut commands: Commands, saves: Res<GameSaves>) {
     let (main, sub) = (Engine::Main.layers(), Engine::Sub.layers());
+    // Progression sauvegardée (indices invalides ignorés si le niveau a changé)
+    let (mut coins, best, runs, time): Saved = saves.load(SLOT).unwrap_or_default();
+    coins.retain(|&i| i < COINS.len());
+    coins.sort_unstable();
+    coins.dedup();
+    let progress = Progress { coins, best, runs, time };
     for (x, y, w, h) in PLATFORMS {
         let size = Vec2::new(w, h);
         commands.spawn((Sprite::from_color(Color::srgb(0.35, 0.6, 0.25), size), Transform::from_translation(level_to_world(x, y, size)), main.clone(), in_game()));
@@ -76,14 +142,9 @@ fn setup(mut commands: Commands) {
             in_game(),
         ));
     }
-    for (x, y) in COINS {
-        commands.spawn((
-            Sprite::from_color(Color::srgb(1.0, 0.85, 0.2), Vec2::splat(6.0)),
-            Transform::from_translation(level_to_world(x - 3.0, y - 3.0, Vec2::splat(6.0))),
-            Coin(Vec2::new(x, y)),
-            main.clone(),
-            in_game(),
-        ));
+    // Les pièces déjà ramassées ne reviennent pas
+    for index in (0..COINS.len()).filter(|i| !progress.coins.contains(i)) {
+        spawn_coin(&mut commands, index);
     }
     commands.spawn((
         Sprite::from_color(Color::srgb(0.9, 0.2, 0.3), PLAYER),
@@ -94,20 +155,29 @@ fn setup(mut commands: Commands) {
     ));
     commands.spawn((Sprite::from_color(Color::srgb(0.9, 0.2, 0.3), Vec2::splat(4.0)), Transform::default(), MapDot, sub.clone(), in_game()));
     commands.spawn((
-        Text2d::new(format!("Pieces : 0 / {}", COINS.len())),
-        TextFont::from_font_size(14.0),
-        Transform::from_translation(ds_to_world(128.0, 24.0).extend(1.0)),
-        Score(0),
+        Text2d::new(progress.score_text()),
+        TextFont::from_font_size(12.0),
+        Transform::from_translation(ds_to_world(128.0, 20.0).extend(1.0)),
+        Score,
+        sub.clone(),
+        in_game(),
+    ));
+    commands.spawn((
+        Text2d::new(progress.record_text()),
+        TextFont::from_font_size(9.0),
+        Transform::from_translation(ds_to_world(128.0, 40.0).extend(1.0)),
+        RecordText,
         sub.clone(),
         in_game(),
     ));
     commands.spawn((
         Text2d::new("Croix : courir   A/B : sauter   Echap : menu"),
         TextFont::from_font_size(9.0),
-        Transform::from_translation(ds_to_world(128.0, 50.0).extend(1.0)),
+        Transform::from_translation(ds_to_world(128.0, 56.0).extend(1.0)),
         sub,
         in_game(),
     ));
+    commands.insert_resource(progress);
 }
 
 fn overlaps(a: Vec2, a_size: Vec2, b: Vec2, b_size: Vec2) -> bool {
@@ -156,20 +226,69 @@ fn physics(time: Res<Time>, input: Res<DsInput>, mut players: Query<(&mut Player
     }
 }
 
-fn collect(mut commands: Commands, players: Query<&Player>, coins: Query<(Entity, &Coin)>, mut score: Query<(&mut Score, &mut Text2d)>) {
+fn collect(
+    mut commands: Commands,
+    time: Res<Time>,
+    saves: Res<GameSaves>,
+    mut progress: ResMut<Progress>,
+    players: Query<&Player>,
+    coins: Query<(Entity, &Coin)>,
+    mut score: Query<&mut Text2d, (With<Score>, Without<RecordText>)>,
+    mut record: Query<&mut Text2d, (With<RecordText>, Without<Score>)>,
+) {
+    if progress.done() {
+        return;
+    }
+    progress.time += time.delta_secs();
     let Ok(player) = players.single() else { return };
+    let mut changed = false;
     for (entity, coin) in &coins {
         if overlaps(player.pos, PLAYER, coin.0 - Vec2::splat(3.0), Vec2::splat(6.0)) {
             commands.entity(entity).despawn();
-            if let Ok((mut score, mut text)) = score.single_mut() {
-                score.0 += 1;
-                text.0 = if score.0 as usize == COINS.len() {
-                    "Toutes les pieces ! Bravo".into()
-                } else {
-                    format!("Pieces : {} / {}", score.0, COINS.len())
-                };
+            if !progress.coins.contains(&coin.1) {
+                progress.coins.push(coin.1);
             }
+            changed = true;
         }
+    }
+    if !changed {
+        return;
+    }
+    // Partie finie : le record est gardé s'il est meilleur
+    if progress.done() {
+        progress.runs += 1;
+        let t = progress.time;
+        progress.best = Some(progress.best.map_or(t, |b| b.min(t)));
+    }
+    // Sauvegarde tout de suite, à chaque pièce
+    progress.save(&saves);
+    if let Ok(mut text) = score.single_mut() {
+        text.0 = progress.score_text();
+    }
+    if let Ok(mut text) = record.single_mut() {
+        text.0 = progress.record_text();
+    }
+}
+
+/// Partie finie : START remet toutes les pièces (le record et les parties finies restent).
+fn restart(
+    mut commands: Commands,
+    input: Res<DsInput>,
+    saves: Res<GameSaves>,
+    mut progress: ResMut<Progress>,
+    mut score: Query<&mut Text2d, With<Score>>,
+) {
+    if !progress.done() || !input.just_pressed(DsButton::Start) {
+        return;
+    }
+    progress.coins.clear();
+    progress.time = 0.0;
+    progress.save(&saves);
+    for index in 0..COINS.len() {
+        spawn_coin(&mut commands, index);
+    }
+    if let Ok(mut text) = score.single_mut() {
+        text.0 = progress.score_text();
     }
 }
 

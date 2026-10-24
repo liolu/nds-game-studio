@@ -1,6 +1,7 @@
 //! Fenêtre Options (F1, ou le bouton à gauche de la barre de titre).
 //!
-//! - **Affichage** : format, écrans fusionnés ou séparés, plein écran, rendu HD ou pixel ;
+//! - **Affichage** : format, écrans fusionnés ou séparés, plein écran, rendu HD ou pixel, et
+//!   « Reinitialiser les options » (toutes les options gardées, voir `settings`) ;
 //! - **Manettes** : manettes branchées et leur modèle reconnu, menu déroulant de tous les modèles,
 //!   dessin de la manette choisie ; la touche pressée sur la vraie manette s'allume et son nom
 //!   s'affiche (un clic sur une touche dessinée l'affiche aussi) ;
@@ -19,6 +20,7 @@ use crate::controllers::{self, first_gamepad, ControllerDef, PadButtonView};
 use crate::devtools::{DevSettings, ToggleCodeWindow};
 use crate::input::{pad_buttons_of, DsButton, KeyMap};
 use crate::screens::{Aspect, DsScreens, RenderStyle, ScreenLayout};
+use crate::settings::ResetSettings;
 
 /// La fenêtre des options (la fermer ne quitte pas le studio).
 #[derive(Component)]
@@ -62,14 +64,15 @@ enum Setting {
 }
 
 #[derive(Resource, Default)]
-struct OptionsView {
+pub(crate) struct OptionsView {
     window: Option<Entity>,
     parts: Vec<Entity>,
     content: Option<Entity>,
     page: Page,
     /// Modèle de manette montré (id) ; choisi par le joueur ou reconnu sur la manette branchée.
-    model: Option<String>,
-    model_chosen: bool,
+    pub(crate) model: Option<String>,
+    /// Choisi à la main dans la liste (gardé dans options.toml, voir `settings`).
+    pub(crate) model_chosen: bool,
     dropdown_open: bool,
     /// Ce qui est construit dans le panneau (pour savoir quand le refaire).
     built: Option<(Page, Option<String>, bool)>,
@@ -94,6 +97,9 @@ struct DropdownButton;
 
 #[derive(Component)]
 struct CodeWindowButton;
+
+#[derive(Component)]
+struct ResetButton;
 
 #[derive(Component)]
 struct ConnectedText;
@@ -225,6 +231,12 @@ fn build_page(mut commands: Commands, mut view: ResMut<OptionsView>, keymap: Res
             choice_row(c, "Plein ecran", Setting::Fullscreen, &["Non", "Oui"]);
             choice_row(c, "Rendu", Setting::Render, &["HD (qualite maximale)", "Pixel (comme la console)"]);
             c.spawn(label("Le jeu suivant peut imposer son format ou son rendu dans son game.toml.", 13.0, DIM));
+            // Toutes les options (aussi manettes, developpement, place de la fenetre) : options.toml efface
+            c.spawn((Button, Hovered::default(), Node { align_self: AlignSelf::FlexStart, margin: UiRect::top(px(10)), ..item_node() }, BackgroundColor(ITEM), ResetButton))
+                .observe(|_: On<Activate>, mut reset: MessageWriter<ResetSettings>| {
+                    reset.write(ResetSettings);
+                })
+                .with_child(label("Reinitialiser les options", 15.0, TEXT));
         }
         Page::Controllers => {
             c.spawn(label("Manettes", 24.0, TEXT));
@@ -415,7 +427,7 @@ fn refresh_press(mut view: ResMut<OptionsView>, clicked: Query<(&PadButtonView, 
     }
 }
 
-fn item_looks(view: Res<OptionsView>, mut items: Query<(&Hovered, Has<Pressed>, &mut BackgroundColor, Option<&PageButton>, Option<&ModelItem>), Or<(With<PageButton>, With<ModelItem>, With<DropdownButton>, With<CodeWindowButton>)>>) {
+fn item_looks(view: Res<OptionsView>, mut items: Query<(&Hovered, Has<Pressed>, &mut BackgroundColor, Option<&PageButton>, Option<&ModelItem>), Or<(With<PageButton>, With<ModelItem>, With<DropdownButton>, With<CodeWindowButton>, With<ResetButton>)>>) {
     for (hovered, pressed, mut color, page, model) in &mut items {
         let selected = page.is_some_and(|p| p.0 == view.page) || model.is_some_and(|m| view.model.as_deref() == Some(m.0.as_str()));
         let wanted = if selected || pressed { ITEM_ON } else if hovered.get() { ITEM_HOVER } else { ITEM };

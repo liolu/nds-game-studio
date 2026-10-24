@@ -7,6 +7,9 @@ use nds_engine::prelude::*;
 
 const ID: &str = "bubbles";
 const DURATION: f32 = 45.0;
+/// Emplacement de sauvegarde du tableau des records.
+const RECORDS: &str = "records";
+const TOP: usize = 5;
 
 pub struct Bubbles;
 
@@ -46,11 +49,49 @@ struct Bubble {
 #[derive(Component)]
 struct Hud;
 
-fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>) {
+/// Texte du record (pendant la partie) ou du tableau des meilleurs scores (à la fin).
+#[derive(Component)]
+struct RecordsText;
+
+/// Les 5 meilleurs scores (score, bulles ratées), triés par score décroissant puis ratées
+/// croissantes. Types std seulement : sauvegardés tels quels en JSON.
+#[derive(Resource, Default)]
+struct Records {
+    top: Vec<(u32, u32)>,
+    /// Place de la partie qui vient de finir dans le tableau (pour la marquer).
+    new_entry: Option<usize>,
+    /// La fin de la partie en cours a déjà été comptée.
+    counted: bool,
+}
+
+impl Records {
+    /// Insère le résultat s'il entre dans le top 5 ; renvoie sa place.
+    fn insert(&mut self, score: u32, missed: u32) -> Option<usize> {
+        if score == 0 {
+            return None;
+        }
+        // Après les égalités exactes : à résultat égal, le plus ancien garde sa place
+        let pos = self.top.iter().position(|&(s, m)| score > s || (score == s && missed < m)).unwrap_or(self.top.len());
+        if pos >= TOP {
+            return None;
+        }
+        self.top.insert(pos, (score, missed));
+        self.top.truncate(TOP);
+        Some(pos)
+    }
+}
+
+fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, saves: Res<GameSaves>) {
+    // Sauvegarde relue et remise en ordre (au cas où le fichier a été modifié à la main)
+    let mut top: Vec<(u32, u32)> = saves.load(RECORDS).unwrap_or_default();
+    top.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    top.truncate(TOP);
+    commands.insert_resource(Records { top, new_entry: None, counted: false });
     commands.insert_resource(Round { score: 0, missed: 0, left: DURATION, until_next: 0.0, seed: 0x9e37_79b9, mesh: meshes.add(Circle::new(1.0)) });
     let sub = Engine::Sub.layers();
     commands.spawn((Text2d::new("Bulles Tactiles"), TextFont::from_font_size(18.0), Transform::from_translation(ds_to_world(128.0, 24.0).extend(1.0)), sub.clone(), in_game()));
-    commands.spawn((Text2d::new(""), TextFont::from_font_size(13.0), Transform::from_translation(ds_to_world(128.0, 90.0).extend(1.0)), Hud, sub.clone(), in_game()));
+    commands.spawn((Text2d::new(""), TextFont::from_font_size(13.0), Transform::from_translation(ds_to_world(128.0, 62.0).extend(1.0)), Hud, sub.clone(), in_game()));
+    commands.spawn((Text2d::new(""), TextFont::from_font_size(10.0), Transform::from_translation(ds_to_world(128.0, 122.0).extend(1.0)), RecordsText, sub.clone(), in_game()));
     commands.spawn((
         Text2d::new("Stylet : eclater   Select : echanger les ecrans\nA : rejouer   Echap : menu"),
         TextFont::from_font_size(9.0),
@@ -105,11 +146,51 @@ fn pop(stylus: Res<Stylus>, screens: Res<DsScreens>, mut round: ResMut<Round>, b
     }
 }
 
-fn tick(time: Res<Time>, input: Res<DsInput>, mut round: ResMut<Round>, mut hud: Query<&mut Text2d, With<Hud>>, bubbles: Query<Entity, With<Bubble>>, mut commands: Commands) {
+#[allow(clippy::too_many_arguments)]
+fn tick(
+    time: Res<Time>,
+    input: Res<DsInput>,
+    saves: Res<GameSaves>,
+    mut round: ResMut<Round>,
+    mut records: ResMut<Records>,
+    mut hud: Query<&mut Text2d, (With<Hud>, Without<RecordsText>)>,
+    mut records_text: Query<&mut Text2d, (With<RecordsText>, Without<Hud>)>,
+    bubbles: Query<Entity, With<Bubble>>,
+    mut commands: Commands,
+) {
     round.left = (round.left - time.delta_secs()).max(0.0);
+    // Fin de partie : comptée une seule fois, sauvegardée tout de suite
+    if round.left == 0.0 && !records.counted {
+        records.counted = true;
+        records.new_entry = records.insert(round.score, round.missed);
+        if records.new_entry.is_some() {
+            if let Err(e) = saves.save(RECORDS, &records.top) {
+                warn!("records non sauvegardes : {e}");
+            }
+        }
+    }
     if round.left == 0.0 && input.just_pressed(DsButton::A) {
         bubbles.iter().for_each(|e| commands.entity(e).despawn());
         (round.score, round.missed, round.left) = (0, 0, DURATION);
+        (records.counted, records.new_entry) = (false, None);
+    }
+    if let Ok(mut text) = records_text.single_mut() {
+        text.0 = if round.left > 0.0 {
+            format!("Record : {}", records.top.first().map_or(0, |r| r.0))
+        } else if records.top.is_empty() {
+            "Meilleurs scores
+(aucun)".to_string()
+        } else {
+            let lines: Vec<String> = records
+                .top
+                .iter()
+                .enumerate()
+                .map(|(i, &(s, m))| format!("{}{}  ({} ratees)", if records.new_entry == Some(i) { "> " } else { "" }, s, m))
+                .collect();
+            format!("Meilleurs scores
+{}", lines.join("
+"))
+        };
     }
     if let Ok(mut text) = hud.single_mut() {
         text.0 = if round.left > 0.0 {
