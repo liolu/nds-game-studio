@@ -1,5 +1,5 @@
 //! Barre de titre du studio, dessinée par le moteur à la place de celle de Windows : titre, puis
-//! les boutons fusionner / séparer les écrans, réduire, agrandir et fermer.
+//! les boutons options, fusionner / séparer les écrans, réduire, agrandir et fermer.
 //!
 //! Windows ne permet pas d'ajouter un bouton à côté de « réduire » dans sa propre barre : les
 //! fenêtres du studio sont donc sans bordure système et le moteur refait ce que fait Windows :
@@ -34,6 +34,7 @@ const ICON: Color = Color::srgb(0.92, 0.92, 0.94);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Action {
+    Options,
     Fusion,
     Minimize,
     Maximize,
@@ -84,7 +85,7 @@ fn spawn_title_bars(mut commands: Commands, cameras: Query<(Entity, &DisplayCame
                     Node { flex_grow: 1.0, margin: UiRect::left(px(12)), overflow: Overflow::clip(), ..default() },
                     TitleText(window),
                 ));
-                for action in [Action::Fusion, Action::Minimize, Action::Maximize, Action::Close] {
+                for action in [Action::Options, Action::Fusion, Action::Minimize, Action::Maximize, Action::Close] {
                     bar.spawn((
                         Button,
                         Hovered::default(),
@@ -113,6 +114,14 @@ fn icon(b: &mut ChildSpawnerCommands, action: Action) {
         Action::Close => {
             b.spawn((Text::new("X"), TextFont::from_font_size(13.0), TextColor(ICON)));
         }
+        Action::Options => {
+            // Trois traits (menu)
+            b.spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(3), ..default() }).with_children(|c| {
+                for _ in 0..3 {
+                    c.spawn(line(12.0, 1.5));
+                }
+            });
+        }
         Action::Fusion => {
             b.spawn((Node { flex_direction: FlexDirection::Column, align_items: AlignItems::Center, row_gap: px(0), ..default() }, FusionIcon))
                 .with_children(|c| {
@@ -129,11 +138,15 @@ fn click(
     mut layout: ResMut<ScreenLayout>,
     mut windows: Query<&mut Window>,
     mut exit: MessageWriter<AppExit>,
+    mut options: MessageWriter<crate::options::ToggleOptions>,
     _main_thread: NonSendMarker,
 ) {
     let Ok(button) = buttons.get(activate.entity) else { return };
     debug!("barre de titre : bouton {:?}", button.action);
     match button.action {
+        Action::Options => {
+            options.write(crate::options::ToggleOptions);
+        }
         Action::Fusion => {
             layout.merged = !layout.merged;
             info!("bouton fusion : ecrans {}", if layout.merged { "fusionnes" } else { "separes" });

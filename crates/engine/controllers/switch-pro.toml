@@ -1,0 +1,227 @@
+id = "switch-pro"
+name = "Manette Nintendo Switch Pro"
+names = ["pro controller", "switch pro", "nintendo switch"]
+vendor_ids = [0x057E]
+product_ids = [0x2009]
+
+# Corps : partie centrale + deux poignees (noir translucide)
+[[part]]
+x = 60
+y = 70
+w = 360
+h = 150
+radius = 60
+color = "#1e1f23"
+
+[[part]]
+x = 50
+y = 150
+w = 130
+h = 135
+radius = 60
+color = "#1e1f23"
+
+[[part]]
+x = 300
+y = 150
+w = 130
+h = 135
+radius = 60
+color = "#1e1f23"
+
+# Boutons de tranche et gachettes, vus de dessus
+[[button]]
+input = "LeftTrigger2"
+label = "ZL"
+x = 80
+y = 12
+w = 80
+h = 24
+radius = 10
+color = "#2c2d32"
+label_color = "#e6e6e6"
+
+[[button]]
+input = "RightTrigger2"
+label = "ZR"
+x = 320
+y = 12
+w = 80
+h = 24
+radius = 10
+color = "#2c2d32"
+label_color = "#e6e6e6"
+
+[[button]]
+input = "LeftTrigger"
+label = "L"
+x = 75
+y = 44
+w = 90
+h = 20
+radius = 8
+color = "#36383e"
+label_color = "#e6e6e6"
+
+[[button]]
+input = "RightTrigger"
+label = "R"
+x = 315
+y = 44
+w = 90
+h = 20
+radius = 8
+color = "#36383e"
+label_color = "#e6e6e6"
+
+# Croix (en bas a gauche)
+[[button]]
+input = "DPadUp"
+label = ""
+x = 154
+y = 159
+w = 22
+h = 26
+radius = 4
+color = "#2a2b30"
+label_color = "#ffffff"
+
+[[button]]
+input = "DPadDown"
+label = ""
+x = 154
+y = 207
+w = 22
+h = 26
+radius = 4
+color = "#2a2b30"
+label_color = "#ffffff"
+
+[[button]]
+input = "DPadLeft"
+label = ""
+x = 128
+y = 185
+w = 26
+h = 22
+radius = 4
+color = "#2a2b30"
+label_color = "#ffffff"
+
+[[button]]
+input = "DPadRight"
+label = ""
+x = 176
+y = 185
+w = 26
+h = 22
+radius = 4
+color = "#2a2b30"
+label_color = "#ffffff"
+
+# Boutons de face (positions Nintendo : X haut, A droite, B bas, Y gauche)
+[[button]]
+input = "North"
+label = "X"
+x = 351
+y = 86
+w = 28
+h = 28
+radius = 14
+color = "#2a2b30"
+label_color = "#ffffff"
+
+[[button]]
+input = "West"
+label = "Y"
+x = 323
+y = 114
+w = 28
+h = 28
+radius = 14
+color = "#2a2b30"
+label_color = "#ffffff"
+
+[[button]]
+input = "East"
+label = "A"
+x = 379
+y = 114
+w = 28
+h = 28
+radius = 14
+color = "#2a2b30"
+label_color = "#ffffff"
+
+[[button]]
+input = "South"
+label = "B"
+x = 351
+y = 142
+w = 28
+h = 28
+radius = 14
+color = "#2a2b30"
+label_color = "#ffffff"
+
+# Centre : - et + en haut, Capture sous -, Home sous +
+[[button]]
+input = "Select"
+label = "-"
+x = 190
+y = 90
+w = 20
+h = 20
+radius = 10
+color = "#2a2b30"
+label_color = "#e6e6e6"
+
+[[button]]
+input = "Start"
+label = "+"
+x = 270
+y = 90
+w = 20
+h = 20
+radius = 10
+color = "#2a2b30"
+label_color = "#e6e6e6"
+
+[[button]]
+input = "C"
+label = ""
+x = 200
+y = 125
+w = 18
+h = 18
+radius = 3
+color = "#3a3c42"
+label_color = "#e6e6e6"
+
+[[button]]
+input = "Mode"
+label = "HOME"
+x = 260
+y = 124
+w = 22
+h = 22
+radius = 11
+color = "#3a3c42"
+label_color = "#e6e6e6"
+
+# Sticks (decales : gauche en haut, droit en bas)
+[[stick]]
+side = "left"
+x = 88
+y = 92
+size = 56
+color = "#141518"
+cap_color = "#34363c"
+
+[[stick]]
+side = "right"
+x = 290
+y = 172
+size = 56
+color = "#141518"
+cap_color = "#34363c"

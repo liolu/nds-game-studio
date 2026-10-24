@@ -167,6 +167,23 @@ struct Dev {
     build: Arc<Mutex<BuildState>>,
 }
 
+/// Réglages des outils (menu Options > Développement).
+#[derive(Resource)]
+pub struct DevSettings {
+    /// Recompiler et relancer quand un fichier est enregistré.
+    pub auto_reload: bool,
+}
+
+impl Default for DevSettings {
+    fn default() -> Self {
+        Self { auto_reload: true }
+    }
+}
+
+/// Ouvrir ou fermer la fenêtre du code (comme F5).
+#[derive(Message)]
+pub struct ToggleCodeWindow;
+
 /// Rouvrir la fenêtre du code au démarrage (après une relance).
 #[derive(Resource)]
 struct OpenCodeAtStart;
@@ -306,11 +323,13 @@ impl Plugin for DevToolsPlugin {
         clean_old_executables();
         app.insert_resource(Dev { root: source_root(), stamp: None, pending: false, last_watch: f64::NEG_INFINITY, build: Arc::new(Mutex::new(BuildState::Idle)) })
             .init_resource::<CodeView>()
+            .init_resource::<DevSettings>()
+            .add_message::<ToggleCodeWindow>()
             .add_systems(Update, (watch_sources, finish_build, toggle_code_window, refresh_code_window, edit_code, scroll_code, tab_looks).chain());
     }
 }
 
-fn watch_sources(time: Res<Time<Real>>, mut dev: ResMut<Dev>, mut toast: MessageWriter<ShowToast>) {
+fn watch_sources(time: Res<Time<Real>>, settings: Res<DevSettings>, mut dev: ResMut<Dev>, mut toast: MessageWriter<ShowToast>) {
     let now = time.elapsed_secs_f64();
     if now - dev.last_watch < WATCH_EVERY {
         return;
@@ -325,6 +344,7 @@ fn watch_sources(time: Res<Time<Real>>, mut dev: ResMut<Dev>, mut toast: Message
             dev.stamp = Some(stamp);
             dev.pending = true;
         }
+        Some(_) if dev.pending && !settings.auto_reload => dev.pending = false,
         Some(_) if dev.pending && *dev.build.lock().unwrap() != BuildState::Building => {
             dev.pending = false;
             info!("code modifie : recompilation");
@@ -462,6 +482,7 @@ fn toggle_code_window(
     mut view: ResMut<CodeView>,
     mut fonts: ResMut<Assets<Font>>,
     windows: Query<(), With<Window>>,
+    mut requests: MessageReader<ToggleCodeWindow>,
     mut toast: MessageWriter<ShowToast>,
 ) {
     // Fenêtre fermée par sa croix : sa caméra et son interface aussi
@@ -475,7 +496,8 @@ fn toggle_code_window(
     if open_now {
         commands.remove_resource::<OpenCodeAtStart>();
     }
-    if !keys.just_pressed(KeyCode::F5) && !open_now {
+    let requested = requests.read().count() % 2 == 1;
+    if !keys.just_pressed(KeyCode::F5) && !open_now && !requested {
         return;
     }
     if let Some(window) = view.window.take() {

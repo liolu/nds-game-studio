@@ -20,6 +20,23 @@ natif en qualité maximale : résolution réelle de la fenêtre, anticrénelage 
   En format large, les jeux voient plus de choses sur les côtés.
 - Fermer une des fenêtres quitte le studio.
 
+## Options (F1)
+
+**F1**, ou le bouton à trois traits à gauche de la barre de titre, ouvre la fenêtre Options :
+
+- **Affichage** : format (remplir, 4:3, 16:9, 16:10), écrans fusionnés ou séparés, plein écran,
+  rendu HD ou pixel.
+- **Manettes** : les manettes branchées et le modèle reconnu, un menu déroulant avec tous les
+  modèles (Xbox One/Series, Xbox 360, PS5 DualSense, PS4 DualShock 4, PS3 DualShock 3, Switch Pro,
+  Joy-Con, 8BitDo SN30 Pro, générique) et le dessin de la manette choisie. Une touche pressée sur la
+  vraie manette s'allume sur le dessin (les sticks bougent) et son nom s'affiche avec le bouton DS
+  qu'elle commande ; cliquer une touche du dessin l'affiche aussi.
+- **Clavier** : la touche clavier et la touche manette de chaque bouton DS.
+- **Développement** : recompilation automatique oui / non, fenêtre Code.
+
+Ajouter une manette : un fichier `crates/engine/controllers/<id>.toml` (format dans
+[FORMAT.md](crates/engine/controllers/FORMAT.md)), puis l'ajouter à la liste de `controllers.rs`.
+
 ## Voir et changer le code en direct
 
 - **F5** ouvre la fenêtre « Code » : un éditeur des fichiers du jeu en cours (un onglet par

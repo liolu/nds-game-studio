@@ -1,0 +1,245 @@
+id = "dualshock-4"
+name = "Manette PlayStation 4 (DualShock 4)"
+names = ["wireless controller", "dualshock 4", "dualshock4", "ps4", "playstation 4"]
+vendor_ids = [0x054C]
+product_ids = [0x05C4, 0x09CC, 0x0BA0]
+
+# Corps : partie centrale + deux poignees
+[[part]]
+x = 60
+y = 80
+w = 360
+h = 150
+radius = 50
+color = "#1e2024"
+
+[[part]]
+x = 45
+y = 150
+w = 130
+h = 135
+radius = 60
+color = "#1e2024"
+
+[[part]]
+x = 305
+y = 150
+w = 130
+h = 135
+radius = 60
+color = "#1e2024"
+
+# Barre lumineuse (bord haut du pave tactile)
+[[part]]
+x = 200
+y = 74
+w = 80
+h = 6
+radius = 3
+color = "#2f6fd6"
+
+# Pave tactile
+[[part]]
+x = 180
+y = 80
+w = 120
+h = 72
+radius = 10
+color = "#33363c"
+
+# Gachettes et boutons de tranche, vus de dessus
+[[button]]
+input = "LeftTrigger2"
+label = "L2"
+x = 80
+y = 12
+w = 70
+h = 26
+radius = 10
+color = "#2c2e33"
+label_color = "#e6e6e6"
+
+[[button]]
+input = "RightTrigger2"
+label = "R2"
+x = 330
+y = 12
+w = 70
+h = 26
+radius = 10
+color = "#2c2e33"
+label_color = "#e6e6e6"
+
+[[button]]
+input = "LeftTrigger"
+label = "L1"
+x = 75
+y = 46
+w = 80
+h = 22
+radius = 8
+color = "#383b41"
+label_color = "#e6e6e6"
+
+[[button]]
+input = "RightTrigger"
+label = "R1"
+x = 325
+y = 46
+w = 80
+h = 22
+radius = 8
+color = "#383b41"
+label_color = "#e6e6e6"
+
+# Croix
+[[button]]
+input = "DPadUp"
+label = ""
+x = 104
+y = 98
+w = 22
+h = 26
+radius = 4
+color = "#2c2e33"
+label_color = "#ffffff"
+
+[[button]]
+input = "DPadDown"
+label = ""
+x = 104
+y = 146
+w = 22
+h = 26
+radius = 4
+color = "#2c2e33"
+label_color = "#ffffff"
+
+[[button]]
+input = "DPadLeft"
+label = ""
+x = 78
+y = 124
+w = 26
+h = 22
+radius = 4
+color = "#2c2e33"
+label_color = "#ffffff"
+
+[[button]]
+input = "DPadRight"
+label = ""
+x = 126
+y = 124
+w = 26
+h = 22
+radius = 4
+color = "#2c2e33"
+label_color = "#ffffff"
+
+# Boutons de face (symboles PlayStation en couleur)
+[[button]]
+input = "North"
+label = "/\\"
+x = 351
+y = 96
+w = 28
+h = 28
+radius = 14
+color = "#14161a"
+label_color = "#3fbf8f"
+
+[[button]]
+input = "West"
+label = "[]"
+x = 323
+y = 124
+w = 28
+h = 28
+radius = 14
+color = "#14161a"
+label_color = "#e57fb8"
+
+[[button]]
+input = "East"
+label = "O"
+x = 379
+y = 124
+w = 28
+h = 28
+radius = 14
+color = "#14161a"
+label_color = "#e5484d"
+
+[[button]]
+input = "South"
+label = "X"
+x = 351
+y = 152
+w = 28
+h = 28
+radius = 14
+color = "#14161a"
+label_color = "#6f9fe8"
+
+# Centre : SHARE, OPTIONS, pave tactile, PS
+[[button]]
+input = "Select"
+label = "SH"
+x = 154
+y = 84
+w = 22
+h = 30
+radius = 8
+color = "#2c2e33"
+label_color = "#c8c8c8"
+
+[[button]]
+input = "Start"
+label = "OP"
+x = 304
+y = 84
+w = 22
+h = 30
+radius = 8
+color = "#2c2e33"
+label_color = "#c8c8c8"
+
+[[button]]
+input = "C"
+label = "PAD"
+x = 210
+y = 100
+w = 60
+h = 28
+radius = 8
+color = "#3d4047"
+label_color = "#c8c8c8"
+
+[[button]]
+input = "Mode"
+label = "PS"
+x = 226
+y = 184
+w = 28
+h = 28
+radius = 14
+color = "#14161a"
+label_color = "#e6e6e6"
+
+# Sticks
+[[stick]]
+side = "left"
+x = 150
+y = 170
+size = 56
+color = "#14161a"
+cap_color = "#3a3d43"
+
+[[stick]]
+side = "right"
+x = 274
+y = 170
+size = 56
+color = "#14161a"
+cap_color = "#3a3d43"

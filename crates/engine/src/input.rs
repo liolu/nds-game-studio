@@ -66,7 +66,7 @@ impl DsButton {
         }
     }
 
-    fn pad_buttons(self) -> &'static [GamepadButton] {
+    pub(crate) fn pad_buttons(self) -> &'static [GamepadButton] {
         use GamepadButton::*;
         match self {
             DsButton::A => &[East],
@@ -83,6 +83,11 @@ impl DsButton {
             DsButton::Right => &[DPadRight],
         }
     }
+}
+
+/// Touches de manette qui commandent ce bouton DS.
+pub(crate) fn pad_buttons_of(button: DsButton) -> &'static [GamepadButton] {
+    button.pad_buttons()
 }
 
 /// Touches du clavier pour chaque bouton (la spécification du jeu peut les changer).

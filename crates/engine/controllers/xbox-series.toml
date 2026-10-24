@@ -1,0 +1,229 @@
+id = "xbox-series"
+name = "Manette Xbox One / Series"
+names = ["xbox one", "xbox series", "xbox wireless", "xbox controller", "xbox elite", "xinput"]
+vendor_ids = [0x045E]
+# One (2013), One (2015), One S USB, One S BT, One S BT (fw recent), Elite, Elite 2, Series X|S USB, Series X|S BT
+product_ids = [0x02D1, 0x02DD, 0x02EA, 0x02E0, 0x02FD, 0x02E3, 0x0B00, 0x0B12, 0x0B13]
+
+# Corps noir carbone : partie centrale + deux poignees
+[[part]]
+x = 60
+y = 78
+w = 360
+h = 150
+radius = 65
+color = "#1e1f22"
+
+[[part]]
+x = 45
+y = 150
+w = 130
+h = 130
+radius = 60
+color = "#1e1f22"
+
+[[part]]
+x = 305
+y = 150
+w = 130
+h = 130
+radius = 60
+color = "#1e1f22"
+
+# Gachettes et boutons de tranche, vus de dessus
+[[button]]
+input = "LeftTrigger2"
+label = "LT"
+x = 85
+y = 12
+w = 70
+h = 26
+radius = 10
+color = "#2c2e33"
+label_color = "#e6e6e6"
+
+[[button]]
+input = "RightTrigger2"
+label = "RT"
+x = 325
+y = 12
+w = 70
+h = 26
+radius = 10
+color = "#2c2e33"
+label_color = "#e6e6e6"
+
+[[button]]
+input = "LeftTrigger"
+label = "LB"
+x = 80
+y = 46
+w = 80
+h = 22
+radius = 8
+color = "#36383e"
+label_color = "#e6e6e6"
+
+[[button]]
+input = "RightTrigger"
+label = "RB"
+x = 320
+y = 46
+w = 80
+h = 22
+radius = 8
+color = "#36383e"
+label_color = "#e6e6e6"
+
+# Bouton Xbox (haut centre)
+[[button]]
+input = "Mode"
+label = ""
+x = 225
+y = 84
+w = 30
+h = 30
+radius = 15
+color = "#2a2c30"
+label_color = "#f2f2f2"
+
+# View / Menu / Share
+[[button]]
+input = "Select"
+label = "VIEW"
+x = 186
+y = 124
+w = 36
+h = 18
+radius = 9
+color = "#141518"
+label_color = "#c8c8c8"
+
+[[button]]
+input = "Start"
+label = "MENU"
+x = 258
+y = 124
+w = 36
+h = 18
+radius = 9
+color = "#141518"
+label_color = "#c8c8c8"
+
+[[button]]
+input = "C"
+label = "SHARE"
+x = 222
+y = 150
+w = 36
+h = 16
+radius = 8
+color = "#141518"
+label_color = "#c8c8c8"
+
+# Croix (bas gauche)
+[[button]]
+input = "DPadUp"
+label = ""
+x = 151
+y = 172
+w = 22
+h = 26
+radius = 4
+color = "#141518"
+label_color = "#ffffff"
+
+[[button]]
+input = "DPadDown"
+label = ""
+x = 151
+y = 220
+w = 22
+h = 26
+radius = 4
+color = "#141518"
+label_color = "#ffffff"
+
+[[button]]
+input = "DPadLeft"
+label = ""
+x = 125
+y = 198
+w = 26
+h = 22
+radius = 4
+color = "#141518"
+label_color = "#ffffff"
+
+[[button]]
+input = "DPadRight"
+label = ""
+x = 173
+y = 198
+w = 26
+h = 22
+radius = 4
+color = "#141518"
+label_color = "#ffffff"
+
+# Boutons de face (haut droite)
+[[button]]
+input = "North"
+label = "Y"
+x = 352
+y = 96
+w = 28
+h = 28
+radius = 14
+color = "#e0b31a"
+label_color = "#ffffff"
+
+[[button]]
+input = "West"
+label = "X"
+x = 324
+y = 124
+w = 28
+h = 28
+radius = 14
+color = "#2a6fd6"
+label_color = "#ffffff"
+
+[[button]]
+input = "East"
+label = "B"
+x = 380
+y = 124
+w = 28
+h = 28
+radius = 14
+color = "#d1322b"
+label_color = "#ffffff"
+
+[[button]]
+input = "South"
+label = "A"
+x = 352
+y = 152
+w = 28
+h = 28
+radius = 14
+color = "#3fa535"
+label_color = "#ffffff"
+
+# Sticks decales : gauche en haut, droit en bas
+[[stick]]
+side = "left"
+x = 95
+y = 100
+size = 56
+color = "#141518"
+cap_color = "#34363c"
+
+[[stick]]
+side = "right"
+x = 310
+y = 185
+size = 56
+color = "#141518"
+cap_color = "#34363c"

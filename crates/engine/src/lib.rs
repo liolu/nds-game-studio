@@ -10,9 +10,11 @@
 //! - le studio (`studio`) liste les jeux enregistrés, applique leur spécification et les lance ;
 //! - F5 montre le code du jeu, et enregistrer un fichier recompile et relance le studio (`devtools`).
 
+pub mod controllers;
 pub mod devtools;
 pub mod input;
 pub mod link;
+pub mod options;
 pub mod screens;
 pub mod spec;
 pub mod studio;
@@ -67,7 +69,7 @@ impl Plugin for NdsEnginePlugin {
                     ..default()
                 }),
         )
-        .add_plugins((screens::ScreensPlugin, link::LinkPlugin, input::InputPlugin, studio::StudioPlugin, titlebar::TitleBarPlugin, devtools::DevToolsPlugin));
+        .add_plugins((screens::ScreensPlugin, link::LinkPlugin, input::InputPlugin, studio::StudioPlugin, titlebar::TitleBarPlugin, devtools::DevToolsPlugin, options::OptionsPlugin));
         options.apply_to_app(app);
     }
 }

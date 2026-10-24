@@ -1,0 +1,259 @@
+id = "8bitdo-sn30-pro"
+name = "8BitDo SN30 Pro"
+names = ["8bitdo", "sn30", "pro 2", "pro+"]
+vendor_ids = [0x2DC8]
+
+# Corps style SNES : boite centrale + deux bouts ronds ("os") + petites poignees
+[[part]]
+x = 60
+y = 180
+w = 100
+h = 95
+radius = 45
+color = "#c4c4cb"
+
+[[part]]
+x = 320
+y = 180
+w = 100
+h = 95
+radius = 45
+color = "#c4c4cb"
+
+[[part]]
+x = 40
+y = 65
+w = 150
+h = 150
+radius = 75
+color = "#cfcfd5"
+
+[[part]]
+x = 290
+y = 65
+w = 150
+h = 150
+radius = 75
+color = "#cfcfd5"
+
+[[part]]
+x = 110
+y = 72
+w = 260
+h = 140
+radius = 30
+color = "#cfcfd5"
+
+# Creux autour de la croix et des boutons de face
+[[part]]
+x = 64
+y = 90
+w = 100
+h = 100
+radius = 50
+color = "#bfbfc6"
+
+[[part]]
+x = 310
+y = 85
+w = 110
+h = 110
+radius = 55
+color = "#b9b4c6"
+
+# Gachettes et boutons de tranche, vus de dessus
+[[button]]
+input = "LeftTrigger2"
+label = "L2"
+x = 60
+y = 12
+w = 80
+h = 22
+radius = 8
+color = "#8e8e96"
+label_color = "#ffffff"
+
+[[button]]
+input = "RightTrigger2"
+label = "R2"
+x = 340
+y = 12
+w = 80
+h = 22
+radius = 8
+color = "#8e8e96"
+label_color = "#ffffff"
+
+[[button]]
+input = "LeftTrigger"
+label = "L"
+x = 55
+y = 40
+w = 90
+h = 20
+radius = 8
+color = "#a8a8b0"
+label_color = "#ffffff"
+
+[[button]]
+input = "RightTrigger"
+label = "R"
+x = 335
+y = 40
+w = 90
+h = 20
+radius = 8
+color = "#a8a8b0"
+label_color = "#ffffff"
+
+# Croix
+[[button]]
+input = "DPadUp"
+label = ""
+x = 103
+y = 104
+w = 22
+h = 25
+radius = 4
+color = "#2b2b30"
+label_color = "#ffffff"
+
+[[button]]
+input = "DPadDown"
+label = ""
+x = 103
+y = 151
+w = 22
+h = 25
+radius = 4
+color = "#2b2b30"
+label_color = "#ffffff"
+
+[[button]]
+input = "DPadLeft"
+label = ""
+x = 77
+y = 129
+w = 26
+h = 22
+radius = 4
+color = "#2b2b30"
+label_color = "#ffffff"
+
+[[button]]
+input = "DPadRight"
+label = ""
+x = 125
+y = 129
+w = 26
+h = 22
+radius = 4
+color = "#2b2b30"
+label_color = "#ffffff"
+
+# Boutons de face, couleurs SNES Europe (X bleu, A rouge, B jaune, Y vert)
+[[button]]
+input = "North"
+label = "X"
+x = 351
+y = 97
+w = 28
+h = 28
+radius = 14
+color = "#3d5fc8"
+label_color = "#ffffff"
+
+[[button]]
+input = "West"
+label = "Y"
+x = 321
+y = 126
+w = 28
+h = 28
+radius = 14
+color = "#2f9e44"
+label_color = "#ffffff"
+
+[[button]]
+input = "East"
+label = "A"
+x = 381
+y = 126
+w = 28
+h = 28
+radius = 14
+color = "#d0342c"
+label_color = "#ffffff"
+
+[[button]]
+input = "South"
+label = "B"
+x = 351
+y = 155
+w = 28
+h = 28
+radius = 14
+color = "#e5b72a"
+label_color = "#3a3a3a"
+
+# Centre
+[[button]]
+input = "Select"
+label = "SELECT"
+x = 176
+y = 106
+w = 44
+h = 16
+radius = 8
+color = "#55555c"
+label_color = "#e6e6e6"
+
+[[button]]
+input = "Start"
+label = "START"
+x = 260
+y = 106
+w = 44
+h = 16
+radius = 8
+color = "#55555c"
+label_color = "#e6e6e6"
+
+[[button]]
+input = "Mode"
+label = "H"
+x = 229
+y = 104
+w = 22
+h = 20
+radius = 10
+color = "#3a3a40"
+label_color = "#ffffff"
+
+[[button]]
+input = "C"
+label = "*"
+x = 230
+y = 80
+w = 20
+h = 18
+radius = 9
+color = "#55555c"
+label_color = "#e6e6e6"
+
+# Sticks
+[[stick]]
+side = "left"
+x = 170
+y = 148
+size = 50
+color = "#3a3a40"
+cap_color = "#5c5c64"
+
+[[stick]]
+side = "right"
+x = 260
+y = 148
+size = 50
+color = "#3a3a40"
+cap_color = "#5c5c64"

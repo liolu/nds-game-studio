@@ -1,0 +1,257 @@
+id = "dualsense"
+name = "Manette PlayStation 5 (DualSense)"
+names = ["dualsense", "ps5", "dualsense edge", "dualsense wireless"]
+vendor_ids = [0x054C]
+product_ids = [0x0CE6, 0x0DF2]
+
+# Corps : coque blanche (haut + deux poignees) et partie centrale noire
+[[part]]
+x = 50
+y = 70
+w = 380
+h = 140
+radius = 60
+color = "#f2f2f4"
+
+[[part]]
+x = 40
+y = 140
+w = 130
+h = 145
+radius = 60
+color = "#f2f2f4"
+
+[[part]]
+x = 310
+y = 140
+w = 130
+h = 145
+radius = 60
+color = "#f2f2f4"
+
+[[part]]
+x = 148
+y = 146
+w = 184
+h = 100
+radius = 40
+color = "#1d1e22"
+
+# Pave tactile
+[[part]]
+x = 165
+y = 72
+w = 150
+h = 72
+radius = 12
+color = "#e2e3e6"
+
+# Boutons de tranche et gachettes, vus de dessus
+[[button]]
+input = "LeftTrigger2"
+label = "L2"
+x = 85
+y = 12
+w = 80
+h = 24
+radius = 10
+color = "#e8e8ea"
+label_color = "#333333"
+
+[[button]]
+input = "RightTrigger2"
+label = "R2"
+x = 315
+y = 12
+w = 80
+h = 24
+radius = 10
+color = "#e8e8ea"
+label_color = "#333333"
+
+[[button]]
+input = "LeftTrigger"
+label = "L1"
+x = 80
+y = 42
+w = 90
+h = 20
+radius = 8
+color = "#dcdcdf"
+label_color = "#333333"
+
+[[button]]
+input = "RightTrigger"
+label = "R1"
+x = 310
+y = 42
+w = 90
+h = 20
+radius = 8
+color = "#dcdcdf"
+label_color = "#333333"
+
+# Croix
+[[button]]
+input = "DPadUp"
+label = ""
+x = 103
+y = 103
+w = 22
+h = 26
+radius = 4
+color = "#cfd0d4"
+label_color = "#333333"
+
+[[button]]
+input = "DPadDown"
+label = ""
+x = 103
+y = 151
+w = 22
+h = 26
+radius = 4
+color = "#cfd0d4"
+label_color = "#333333"
+
+[[button]]
+input = "DPadLeft"
+label = ""
+x = 77
+y = 129
+w = 26
+h = 22
+radius = 4
+color = "#cfd0d4"
+label_color = "#333333"
+
+[[button]]
+input = "DPadRight"
+label = ""
+x = 125
+y = 129
+w = 26
+h = 22
+radius = 4
+color = "#cfd0d4"
+label_color = "#333333"
+
+# Boutons de face (gris clair, symboles colores)
+[[button]]
+input = "North"
+label = "/\\"
+x = 352
+y = 100
+w = 28
+h = 28
+radius = 14
+color = "#cfd0d4"
+label_color = "#2fa37a"
+
+[[button]]
+input = "West"
+label = "[]"
+x = 322
+y = 128
+w = 28
+h = 28
+radius = 14
+color = "#cfd0d4"
+label_color = "#d9659d"
+
+[[button]]
+input = "East"
+label = "O"
+x = 382
+y = 128
+w = 28
+h = 28
+radius = 14
+color = "#cfd0d4"
+label_color = "#e0484b"
+
+[[button]]
+input = "South"
+label = "X"
+x = 352
+y = 156
+w = 28
+h = 28
+radius = 14
+color = "#cfd0d4"
+label_color = "#4a7fd6"
+
+# Create / Options de part et d'autre du pave tactile
+[[button]]
+input = "Select"
+label = "CR"
+x = 136
+y = 78
+w = 22
+h = 30
+radius = 8
+color = "#b9bbc0"
+label_color = "#333333"
+
+[[button]]
+input = "Start"
+label = "OP"
+x = 322
+y = 78
+w = 22
+h = 30
+radius = 8
+color = "#b9bbc0"
+label_color = "#333333"
+
+# Clic du pave tactile
+[[button]]
+input = "C"
+label = "PAD"
+x = 215
+y = 96
+w = 50
+h = 24
+radius = 8
+color = "#d2d3d7"
+label_color = "#555555"
+
+# Bouton PS et bouton micro (sur la partie noire, entre les sticks)
+[[button]]
+input = "Mode"
+label = "PS"
+x = 226
+y = 178
+w = 28
+h = 22
+radius = 11
+color = "#2c2d33"
+label_color = "#e6e6e6"
+
+[[button]]
+input = "Z"
+label = "MUTE"
+x = 222
+y = 206
+w = 36
+h = 14
+radius = 7
+color = "#3a3b40"
+label_color = "#ff9a6a"
+
+# Sticks
+[[stick]]
+side = "left"
+x = 165
+y = 170
+size = 54
+color = "#111214"
+cap_color = "#2c2d32"
+
+[[stick]]
+side = "right"
+x = 261
+y = 170
+size = 54
+color = "#111214"
+cap_color = "#2c2d32"

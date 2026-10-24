@@ -1,0 +1,225 @@
+id = "xbox-360"
+name = "Manette Xbox 360"
+names = ["xbox 360", "x360", "xinput", "xbox360"]
+vendor_ids = [0x045E]
+# 0x028E filaire, 0x0719 / 0x0291 / 0x02A1 recepteurs sans fil
+product_ids = [0x028E, 0x0291, 0x02A1, 0x0719]
+
+# Corps blanc : partie centrale + deux poignees + bas central
+[[part]]
+x = 60
+y = 80
+w = 360
+h = 150
+radius = 60
+color = "#e4e5e7"
+
+[[part]]
+x = 50
+y = 150
+w = 120
+h = 130
+radius = 55
+color = "#dcdddf"
+
+[[part]]
+x = 310
+y = 150
+w = 120
+h = 130
+radius = 55
+color = "#dcdddf"
+
+[[part]]
+x = 140
+y = 170
+w = 200
+h = 80
+radius = 35
+color = "#e4e5e7"
+
+# Boutons de tranche et gachettes, vus de dessus
+[[button]]
+input = "LeftTrigger2"
+label = "LT"
+x = 85
+y = 12
+w = 70
+h = 26
+radius = 10
+color = "#c9cbce"
+label_color = "#3a3c40"
+
+[[button]]
+input = "RightTrigger2"
+label = "RT"
+x = 325
+y = 12
+w = 70
+h = 26
+radius = 10
+color = "#c9cbce"
+label_color = "#3a3c40"
+
+[[button]]
+input = "LeftTrigger"
+label = "LB"
+x = 80
+y = 46
+w = 80
+h = 22
+radius = 8
+color = "#b4b7bb"
+label_color = "#2a2c30"
+
+[[button]]
+input = "RightTrigger"
+label = "RB"
+x = 320
+y = 46
+w = 80
+h = 22
+radius = 8
+color = "#b4b7bb"
+label_color = "#2a2c30"
+
+# Croix (en bas a gauche)
+[[button]]
+input = "DPadUp"
+label = ""
+x = 154
+y = 163
+w = 22
+h = 26
+radius = 4
+color = "#8c8f94"
+label_color = "#ffffff"
+
+[[button]]
+input = "DPadDown"
+label = ""
+x = 154
+y = 211
+w = 22
+h = 26
+radius = 4
+color = "#8c8f94"
+label_color = "#ffffff"
+
+[[button]]
+input = "DPadLeft"
+label = ""
+x = 128
+y = 189
+w = 26
+h = 22
+radius = 4
+color = "#8c8f94"
+label_color = "#ffffff"
+
+[[button]]
+input = "DPadRight"
+label = ""
+x = 176
+y = 189
+w = 26
+h = 22
+radius = 4
+color = "#8c8f94"
+label_color = "#ffffff"
+
+# Boutons de face (en haut a droite)
+[[button]]
+input = "North"
+label = "Y"
+x = 346
+y = 90
+w = 28
+h = 28
+radius = 14
+color = "#e0b020"
+label_color = "#ffffff"
+
+[[button]]
+input = "West"
+label = "X"
+x = 318
+y = 118
+w = 28
+h = 28
+radius = 14
+color = "#2a6fd0"
+label_color = "#ffffff"
+
+[[button]]
+input = "East"
+label = "B"
+x = 374
+y = 118
+w = 28
+h = 28
+radius = 14
+color = "#d0342c"
+label_color = "#ffffff"
+
+[[button]]
+input = "South"
+label = "A"
+x = 346
+y = 146
+w = 28
+h = 28
+radius = 14
+color = "#3fa63a"
+label_color = "#ffffff"
+
+# Centre
+[[button]]
+input = "Select"
+label = "BACK"
+x = 196
+y = 132
+w = 36
+h = 16
+radius = 8
+color = "#a5a8ad"
+label_color = "#ffffff"
+
+[[button]]
+input = "Start"
+label = "START"
+x = 248
+y = 132
+w = 36
+h = 16
+radius = 8
+color = "#a5a8ad"
+label_color = "#ffffff"
+
+[[button]]
+input = "Mode"
+label = "GUIDE"
+x = 222
+y = 88
+w = 36
+h = 36
+radius = 18
+color = "#b8bcc2"
+label_color = "#2e9e3e"
+
+# Sticks : gauche en haut, droit en bas
+[[stick]]
+side = "left"
+x = 80
+y = 100
+size = 56
+color = "#5a5d62"
+cap_color = "#3a3c40"
+
+[[stick]]
+side = "right"
+x = 288
+y = 170
+size = 54
+color = "#5a5d62"
+cap_color = "#3a3c40"
