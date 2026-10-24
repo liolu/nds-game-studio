@@ -193,7 +193,16 @@ fn start_game(world: &mut World) {
     }
 }
 
-fn back_to_menu(keys: Res<ButtonInput<KeyCode>>, input: Res<DsInput>, mut next: ResMut<NextState<StudioState>>) {
+fn back_to_menu(
+    keys: Res<ButtonInput<KeyCode>>,
+    input: Res<DsInput>,
+    focus: Option<Res<bevy::input_focus::InputFocus>>,
+    editors: Query<(), With<crate::devtools::CodeEditor>>,
+    mut next: ResMut<NextState<StudioState>>,
+) {
+    if crate::devtools::typing_in_editor(focus.as_deref(), &editors) {
+        return;
+    }
     if keys.just_pressed(KeyCode::Escape) || (input.pressed(DsButton::Start) && input.pressed(DsButton::Select)) {
         next.set(StudioState::Menu);
     }

@@ -22,9 +22,11 @@ natif en qualité maximale : résolution réelle de la fenêtre, anticrénelage 
 
 ## Voir et changer le code en direct
 
-- **F5** ouvre la fenêtre « Code » : les fichiers du jeu en cours (un onglet par fichier, molette
-  pour défiler), relus dès qu'ils changent sur le disque.
-- **Enregistrer un fichier** du jeu ou du moteur (dans n'importe quel éditeur) : le studio
+- **F5** ouvre la fenêtre « Code » : un éditeur des fichiers du jeu en cours (un onglet par
+  fichier, molette pour défiler, clic pour placer le curseur, copier-coller). **Ctrl+S** enregistre.
+  Pendant qu'on tape, les touches du jeu ne réagissent pas. Un fichier changé par un autre éditeur
+  est relu s'il n'y a pas de modification en cours.
+- **Enregistrer un fichier** du jeu ou du moteur (dans la fenêtre Code ou un autre éditeur) : le studio
   recompile en arrière-plan puis se relance tout seul sur le même jeu, avec les fenêtres à la même
   place et la fenêtre Code rouverte. S'il y a une erreur, elle s'affiche en rouge dans la fenêtre
   Code et le jeu continue avec l'ancien code.

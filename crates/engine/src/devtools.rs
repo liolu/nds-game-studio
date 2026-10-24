@@ -1,7 +1,8 @@
 //! Outils de développement : voir le code du jeu (F5) et changer le jeu en changeant le code.
 //!
-//! - **F5** ouvre (ou ferme) la fenêtre « Code » : les fichiers du jeu en cours (ou du studio dans
-//!   le menu), relus dès qu'ils changent sur le disque, avec l'état de la compilation et ses erreurs.
+//! - **F5** ouvre (ou ferme) la fenêtre « Code » : un éditeur des fichiers du jeu en cours (ou du
+//!   studio dans le menu), avec l'état de la compilation et ses erreurs. **Ctrl+S** enregistre ; un
+//!   fichier changé par un autre éditeur est relu s'il n'a pas de modification en cours.
 //! - **Rechargement** : quand un fichier du jeu ou du moteur est enregistré, le studio recompile en
 //!   arrière-plan. Si ça compile, il se relance tout seul sur le même jeu, avec les fenêtres à la
 //!   même place (et la fenêtre Code ouverte si elle l'était). Sinon les erreurs s'affichent dans la
@@ -18,10 +19,12 @@ use std::time::SystemTime;
 use bevy::camera::RenderTarget;
 use bevy::ecs::system::NonSendMarker;
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
+use bevy::input_focus::InputFocus;
+use bevy::text::{EditableText, LineBreak, TextCursorStyle, TextEdit, TextLayout};
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::ui::Pressed;
-use bevy::ui_widgets::{Activate, Button};
+use bevy::ui_widgets::{Activate, Button, TextInput};
 use bevy::window::{WindowRef, WindowResolution};
 use bevy::winit::WINIT_WINDOWS;
 
@@ -303,7 +306,7 @@ impl Plugin for DevToolsPlugin {
         clean_old_executables();
         app.insert_resource(Dev { root: source_root(), stamp: None, pending: false, last_watch: f64::NEG_INFINITY, build: Arc::new(Mutex::new(BuildState::Idle)) })
             .init_resource::<CodeView>()
-            .add_systems(Update, (watch_sources, finish_build, toggle_code_window, refresh_code_window, scroll_code, tab_looks));
+            .add_systems(Update, (watch_sources, finish_build, toggle_code_window, refresh_code_window, edit_code, scroll_code, tab_looks).chain());
     }
 }
 
@@ -383,8 +386,9 @@ fn finish_build(
 #[derive(Component)]
 pub struct CodeWindow;
 
+/// L'éditeur de la fenêtre du code.
 #[derive(Component)]
-struct CodeText;
+pub struct CodeEditor;
 
 #[derive(Component)]
 struct CodeStatus;
@@ -394,9 +398,6 @@ struct CodeErrors;
 
 #[derive(Component)]
 struct CodeTabs;
-
-#[derive(Component)]
-struct CodeScroll;
 
 #[derive(Component)]
 struct CodeTab(usize);
@@ -411,6 +412,11 @@ struct CodeView {
     /// Jeu dont les fichiers sont listés (`None` = le studio, dans le menu).
     shown_for: Option<Option<String>>,
     loaded: Option<(PathBuf, SystemTime)>,
+    /// Contenu du fichier tel qu'il est sur le disque (pour savoir s'il y a des modifications).
+    saved: String,
+    dirty: bool,
+    /// Images à attendre avant de remonter au début du fichier (après sa mise en page).
+    go_top: u8,
     font: Option<Handle<Font>>,
 }
 
@@ -504,8 +510,20 @@ fn toggle_code_window(
         ui.spawn((Node { flex_direction: FlexDirection::Row, column_gap: px(4), flex_wrap: FlexWrap::Wrap, ..default() }, CodeTabs));
         ui.spawn((Text::new(""), font(14.0), TextColor(DIM), CodeStatus));
         ui.spawn((Text::new(""), font(13.0), TextColor(ERROR), CodeErrors, Node { display: Display::None, ..default() }));
-        ui.spawn((Node { flex_grow: 1.0, overflow: Overflow::scroll_y(), ..default() }, ScrollPosition::default(), CodeScroll))
-            .with_child((Text::new(""), font(14.0), TextColor(TEXT), CodeText));
+        // min_height 0 : sinon la zone grandit à la taille du fichier et rien ne défile
+        ui.spawn((
+            Node { flex_grow: 1.0, min_height: px(0), width: percent(100), padding: UiRect::all(px(6)), ..default() },
+            TextInput,
+            // Sans TabIndex, un clic ne donne pas le clavier à l'éditeur
+            bevy::input_focus::tab_navigation::TabIndex(0),
+            editable(""),
+            TextLayout { linebreak: LineBreak::NoWrap, ..default() },
+            TextCursorStyle { color: Color::WHITE, selected_text_color: Some(Color::BLACK), ..default() },
+            font(15.0),
+            TextColor(TEXT),
+            BackgroundColor(Color::srgb(0.055, 0.06, 0.075)),
+            CodeEditor,
+        ));
     });
     view.window = Some(window);
     // Pas enfants de la fenêtre : une interface Bevy doit avoir une racine sans parent
@@ -514,16 +532,43 @@ fn toggle_code_window(
     view.loaded = None;
 }
 
+fn editable(text: &str) -> EditableText {
+    EditableText { allow_newlines: true, ..EditableText::new(text) }
+}
+
+fn editor_text(editor: &EditableText) -> String {
+    editor.value().into_iter().collect()
+}
+
+/// L'éditeur a le clavier : les touches du jeu (et Échap) ne doivent pas réagir.
+pub fn typing_in_editor(focus: Option<&InputFocus>, editors: &Query<(), With<CodeEditor>>) -> bool {
+    focus.and_then(|f| f.get()).is_some_and(|e| editors.get(e).is_ok())
+}
+
+fn save_file(path: &Path, text: &str, view: &mut CodeView, toast: &mut MessageWriter<ShowToast>) {
+    match std::fs::write(path, text) {
+        Ok(()) => {
+            view.saved = text.to_string();
+            view.dirty = false;
+            view.loaded = std::fs::metadata(path).and_then(|m| m.modified()).ok().map(|m| (path.to_path_buf(), m));
+            info!("enregistre : {}", path.display());
+        }
+        Err(e) => {
+            toast.write(ShowToast(format!("Enregistrement impossible : {e}")));
+        }
+    }
+}
+
 fn refresh_code_window(
     mut commands: Commands,
     dev: Res<Dev>,
     active: Res<ActiveGame>,
     mut view: ResMut<CodeView>,
     tabs: Query<(Entity, Option<&Children>), With<CodeTabs>>,
-    mut texts: Query<&mut Text, (With<CodeText>, Without<CodeStatus>, Without<CodeErrors>)>,
-    mut status: Query<&mut Text, (With<CodeStatus>, Without<CodeText>, Without<CodeErrors>)>,
-    mut errors: Query<(&mut Text, &mut Node), (With<CodeErrors>, Without<CodeText>, Without<CodeStatus>)>,
-    mut scroll: Query<&mut ScrollPosition, With<CodeScroll>>,
+    editors: Query<(Entity, &EditableText), With<CodeEditor>>,
+    mut status: Query<&mut Text, (With<CodeStatus>, Without<CodeErrors>)>,
+    mut errors: Query<(&mut Text, &mut Node), (With<CodeErrors>, Without<CodeStatus>)>,
+    mut toast: MessageWriter<ShowToast>,
 ) {
     let (Some(_), Some(root)) = (view.window, dev.root.clone()) else { return };
 
@@ -555,20 +600,25 @@ fn refresh_code_window(
         }
     }
 
-    // Fichier relu quand il change sur le disque
-    if let Some(path) = view.files.get(view.current).cloned() {
+    // Fichier chargé dans l'éditeur, puis relu quand il change sur le disque
+    if let (Some(path), Ok((editor, editable))) = (view.files.get(view.current).cloned(), editors.single()) {
         let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
-        let stale = match (&view.loaded, modified) {
-            (Some((p, t)), Some(m)) => *p != path || *t != m,
-            _ => true,
-        };
-        if stale && let Ok(mut text) = texts.single_mut() {
+        let other_file = view.loaded.as_ref().is_none_or(|(p, _)| *p != path);
+        let changed_on_disk = view.loaded.as_ref().zip(modified).is_some_and(|((p, t), m)| *p == path && *t != m);
+        // Changement d'onglet avec des modifications : on les enregistre d'abord
+        if other_file
+            && view.dirty
+            && let Some((previous, _)) = view.loaded.clone()
+        {
+            let text = editor_text(editable);
+            save_file(&previous, &text, &mut view, &mut toast);
+        }
+        if other_file || (changed_on_disk && !view.dirty) {
             let content = std::fs::read_to_string(&path).unwrap_or_else(|e| format!("Lecture impossible : {e}"));
-            text.0 = content.lines().enumerate().map(|(i, l)| format!("{:>4}  {}", i + 1, l.replace('\t', "    "))).collect::<Vec<_>>().join("\n");
-            let same_file = view.loaded.as_ref().is_some_and(|(p, _)| *p == path);
-            if !same_file && let Ok(mut s) = scroll.single_mut() {
-                s.y = 0.0;
-            }
+            commands.entity(editor).insert(self::editable(&content));
+            view.go_top = 3;
+            view.saved = content;
+            view.dirty = false;
             view.loaded = modified.map(|m| (path.clone(), m));
         }
     }
@@ -579,7 +629,8 @@ fn refresh_code_window(
     let line = match &build {
         BuildState::Building => format!("{file}   |   Recompilation en cours..."),
         BuildState::Failed(_) => format!("{file}   |   Erreur de compilation (le jeu continue avec l'ancien code)"),
-        _ => format!("{file}   |   Enregistrez un fichier : le studio recompile et se relance tout seul"),
+        _ if view.dirty => format!("{file}   |   Modifie : Ctrl+S pour enregistrer (le studio recompile et se relance)"),
+        _ => format!("{file}   |   Ctrl+S enregistre : le studio recompile et se relance tout seul"),
     };
     if let Ok(mut s) = status.single_mut()
         && s.0 != line
@@ -592,6 +643,39 @@ fn refresh_code_window(
             node.display = if message.is_empty() { Display::None } else { Display::Flex };
             text.0 = message;
         }
+    }
+}
+
+/// Modifications en cours, Ctrl+S, et le clavier rendu au jeu quand on quitte la fenêtre du code.
+fn edit_code(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut view: ResMut<CodeView>,
+    windows: Query<&Window>,
+    changed: Query<&EditableText, (With<CodeEditor>, Changed<EditableText>)>,
+    editors: Query<&EditableText, With<CodeEditor>>,
+    editor_marks: Query<(), With<CodeEditor>>,
+    mut focus: ResMut<InputFocus>,
+    mut toast: MessageWriter<ShowToast>,
+) {
+    let Some(window) = view.window.and_then(|w| windows.get(w).ok()) else { return };
+    if let Ok(editable) = changed.single() {
+        let dirty = editor_text(editable) != view.saved;
+        if view.dirty != dirty {
+            view.dirty = dirty;
+        }
+    }
+    // La fenêtre du code n'a plus le focus : le clavier revient au jeu
+    if !window.focused && typing_in_editor(Some(&focus), &editor_marks) {
+        focus.clear();
+    }
+    let ctrl = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
+    if window.focused
+        && ctrl
+        && keys.just_pressed(KeyCode::KeyS)
+        && let (Some((path, _)), Ok(editable)) = (view.loaded.clone(), editors.single())
+    {
+        let text = editor_text(editable);
+        save_file(&path, &text, &mut view, &mut toast);
     }
 }
 
@@ -613,27 +697,36 @@ fn tab_looks(view: Res<CodeView>, mut tabs: Query<(&CodeTab, &Hovered, Has<Press
     }
 }
 
-/// Molette sur la fenêtre du code : défilement.
-fn scroll_code(
-    mut wheel: MessageReader<MouseWheel>,
-    view: Res<CodeView>,
-    windows: Query<&Window>,
-    mut scroll: Query<(&mut ScrollPosition, &ComputedNode), With<CodeScroll>>,
-) {
-    let over = view.window.and_then(|w| windows.get(w).ok()).is_some_and(|w| w.cursor_position().is_some());
-    let mut delta = 0.0;
-    for event in wheel.read() {
-        delta -= match event.unit {
-            MouseScrollUnit::Line => event.y * 18.0 * 3.0,
-            MouseScrollUnit::Pixel => event.y,
-        };
+/// Molette sur la fenêtre du code : défilement de l'éditeur.
+fn scroll_code(mut wheel: MessageReader<MouseWheel>, mut view: ResMut<CodeView>, windows: Query<&Window>, mut editors: Query<&mut EditableText, With<CodeEditor>>) {
+    // Fichier chargé : Bevy met le curseur à la fin une fois le texte mis en page, on remonte ensuite
+    if view.go_top > 0 {
+        view.go_top -= 1;
+        if view.go_top == 0
+            && let Ok(mut editor) = editors.single_mut()
+        {
+            editor.queue_edit(TextEdit::TextStart(false));
+            editor.queue_edit(TextEdit::ScrollTo(Vec2::ZERO));
+        }
     }
-    if !over || delta == 0.0 {
+    let over = view.window.and_then(|w| windows.get(w).ok()).is_some_and(|w| w.cursor_position().is_some());
+    let (mut lines, mut pixels) = (0.0, 0.0);
+    for event in wheel.read() {
+        match event.unit {
+            MouseScrollUnit::Line => lines -= event.y * 3.0,
+            MouseScrollUnit::Pixel => pixels -= event.y,
+        }
+    }
+    if !over || (lines == 0.0 && pixels == 0.0) {
         return;
     }
-    if let Ok((mut position, computed)) = scroll.single_mut() {
-        let max = ((computed.content_size() - computed.size()) * computed.inverse_scale_factor()).y.max(0.0);
-        position.y = (position.y + delta).clamp(0.0, max);
+    if let Ok(mut editor) = editors.single_mut() {
+        if lines != 0.0 {
+            editor.queue_edit(TextEdit::ScrollByLines(lines));
+        }
+        if pixels != 0.0 {
+            editor.queue_edit(TextEdit::ScrollBy(Vec2::new(0.0, pixels)));
+        }
     }
 }
 

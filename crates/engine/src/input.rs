@@ -162,10 +162,19 @@ impl Plugin for InputPlugin {
     }
 }
 
-fn read_buttons(map: Res<KeyMap>, keys: Res<ButtonInput<KeyCode>>, pads: Query<&Gamepad>, mut input: ResMut<DsInput>) {
+fn read_buttons(
+    map: Res<KeyMap>,
+    keys: Res<ButtonInput<KeyCode>>,
+    pads: Query<&Gamepad>,
+    focus: Option<Res<bevy::input_focus::InputFocus>>,
+    editors: Query<(), With<crate::devtools::CodeEditor>>,
+    mut input: ResMut<DsInput>,
+) {
+    // On tape dans l'éditeur de code (F5) : le clavier n'est pas au jeu
+    let typing = crate::devtools::typing_in_editor(focus.as_deref(), &editors);
     let mut held = 0;
     for button in DsButton::ALL {
-        let key = map.0.get(&button).is_some_and(|k| keys.any_pressed(k.iter().copied()));
+        let key = !typing && map.0.get(&button).is_some_and(|k| keys.any_pressed(k.iter().copied()));
         let pad = pads.iter().any(|p| p.any_pressed(button.pad_buttons().iter().copied()));
         // Le stick gauche sert aussi de croix
         let stick = pads.iter().any(|p| {
