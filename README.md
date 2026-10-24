@@ -37,6 +37,21 @@ natif en qualité maximale : résolution réelle de la fenêtre, anticrénelage 
 Ajouter une manette : un fichier `crates/engine/controllers/<id>.toml` (format dans
 [FORMAT.md](crates/engine/controllers/FORMAT.md)), puis l'ajouter à la liste de `controllers.rs`.
 
+## Sauvegardes
+
+- **Options** : gardées d'un lancement à l'autre dans `%APPDATA%\Nds Game Studio\options.toml`
+  (format, fusion, plein écran, rendu, recompilation auto, modèle de manette choisi, place et taille
+  de la fenêtre). Bouton « Réinitialiser les options » dans Options > Affichage.
+- **Jeux** : chaque jeu enregistre ce qu'il veut avec la ressource `GameSaves`
+  (`saves.save("record", &valeur)`, `saves.load("record")`), dans
+  `%APPDATA%\Nds Game Studio\saves\<jeu>\<emplacement>.json`. L'écriture est sûre (fichier
+  temporaire puis renommage) et l'ancienne version est gardée en `.bak`, relue si le fichier est abîmé.
+- Les démos s'en servent : Mini Plateforme (pièces ramassées, record de temps, parties finies),
+  Bulles Tactiles (5 meilleurs scores), Orbite 3D (dernière vue + 3 photos de vue, X + toucher pour
+  en garder une).
+- **Options > Sauvegardes** liste les sauvegardes de tous les jeux (taille, date), permet d'en
+  supprimer (deux clics) et ouvre le dossier.
+
 ## Voir et changer le code en direct
 
 - **F5** ouvre la fenêtre « Code » : un éditeur des fichiers du jeu en cours (un onglet par
