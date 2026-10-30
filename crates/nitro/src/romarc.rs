@@ -73,7 +73,7 @@ fn lz77(src: &[u8], size: usize) -> Option<Vec<u8>> {
     Some(out)
 }
 
-fn rle(src: &[u8], size: usize) -> Option<Vec<u8>> {
+pub(crate) fn rle(src: &[u8], size: usize) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(size);
     let mut pos = 4;
     while out.len() < size {
@@ -93,7 +93,7 @@ fn rle(src: &[u8], size: usize) -> Option<Vec<u8>> {
     Some(out)
 }
 
-fn huffman(src: &[u8], size: usize) -> Option<Vec<u8>> {
+pub(crate) fn huffman(src: &[u8], size: usize) -> Option<Vec<u8>> {
     let bits = src[0] & 0xF;
     let tree = 4;
     let mut pos = tree + (*src.get(4)? as usize + 1) * 2;
