@@ -122,6 +122,16 @@ fn parse_rom(file: &str, path: &Path, header: &[u8], banner: Option<&[u8]>, size
     RomInfo { file: file.to_string(), path: path.to_path_buf(), title, publisher, code, internal_name, size, icon: banner.map(decode_icon).unwrap_or_default() }
 }
 
+/// Le titre, l'éditeur et l'icône d'une rom déjà en mémoire (`.srl` dans une autre rom).
+pub fn read_rom_bytes(file: &str, bytes: &[u8]) -> Result<RomInfo, String> {
+    if bytes.len() < HEADER_SIZE || le16(bytes, 0x15C) != LOGO_CRC {
+        return Err(t!("{file}: not a DS rom", "{file} : pas une rom DS"));
+    }
+    let banner_at = le32(bytes, 0x68) as usize;
+    let banner = (banner_at != 0).then(|| bytes.get(banner_at..banner_at + BANNER_SIZE)).flatten();
+    Ok(parse_rom(file, Path::new(file), &bytes[..HEADER_SIZE], banner, bytes.len() as u64))
+}
+
 /// Lit l'en-tête d'une rom DS (le reste du fichier n'est pas lu). Erreur si ce n'est pas une rom.
 pub fn read_rom(path: &Path) -> Result<RomInfo, String> {
     let file_name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();

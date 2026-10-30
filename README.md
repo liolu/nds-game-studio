@@ -104,10 +104,32 @@ fichiers des jeux, pour voir leurs modèles 3D et leurs images et nommer les obj
   signature (aussi compressés en LZ77). Taper du texte filtre, Retour arrière / Échap efface, la
   molette fait défiler. « Copier le chemin » le met dans le presse-papiers (pour le relier aux
   fonctions du jeu dans DS Decomp Studio).
+- **Grille** : le bouton « Grille » montre des vignettes à la place de la liste, dessinées en arrière-plan. Les
+  animations `.nanr` et `.nsbca` se jouent dans leur vignette. Clic = aperçu à droite, molette = défiler.
 - **Animations** : `.nsbca` jouées sur un modèle du jeu au même squelette (flèches pour en changer ; sans
   modèle lisible dans la rom, ses infos), `.nanr` jouées avec leurs cellules, tuiles et palette.
-- **Sons** : `.sad` / `sadl` (IMA et Procyon ADPCM), forme d'onde et bouton pour écouter.
+- **Sons** : `.sad` / `sadl` (IMA et Procyon ADPCM), et dans les archives `.sdat` les musiques `STRM` et les
+  banques de sons `SWAR` (listés `sound_data.sdat#n` avec leur nom) : forme d'onde et bouton pour écouter. Les
+  séquences `SSEQ` ne se jouent pas (il faudrait un synthétiseur).
+- **Polices** `.nftr` (planche des caractères), **messages** `.bmg` (les textes du jeu).
+- **Fichiers bruts** sans en-tête, reconnus par leur extension : tuiles `.nbfc`, palettes `.nbfp` / `.ntfp` / `.pal`,
+  écrans `.nbfs` / `.scr`. Les fichiers source NITRO-CHARACTER `.ncg`, `.ncl`, `.nsc` s'ouvrent comme les autres images.
+- **Moteur maison** de Rayman Raving Rabbids 2, Battle of Giants et des deux Star Wars (fichiers sans extension) :
+  textures `LXET` / `TXET` avec la palette qu'elles nomment, palettes `TTLP`, images ` PMB`, textes `GNAL`, modèles
+  3D `GEOM` (sans texture) et `MESH` (avec).
+- **Compression** : tout fichier compressé par le BIOS de la DS (LZ77, RLE, Huffman) est décompressé, même s'il
+  s'appelle `.bin` ; un fichier Nitro dedans s'ouvre normalement. MySims : `NCG`, `NCL`, `NSC` s'ouvrent aussi.
+- **Animations de matériaux** `.nsbta`, `.nsbtp`, `.nsbma`, `.nsbva` : leur contenu, pas encore jouées.
+- **`.z`** (Tom and Jerry) : images, écrans et textures décompressés ; le reste (polices, maillages) montre ses octets.
+  **`.anm`** : un résumé, pas jouées.
+- **Autres images** : `.bmp`, `.bstga` (MySims), `.ntft` avec sa palette `.ntfp` (taille devinée), palettes `.plb`.
+- **Vidéos** `.bik`, `.vx`, `.mods` : leurs caractéristiques, pas lues. **Archives** `.zip` : la liste de leurs fichiers.
+- **Autres** : sons CRI `.adx` ; textes `.txt`, `.ini`... ; `.lz` et `.cat` décompressés (ses textes et octets) ; mini-roms
+  `.srl` (icône, titre, et leurs fichiers listés `jeu.srl#n`).
 - **Nintendogs** : `.bncd` (cellules) et `.bncl` (mise en page sur l'écran).
+- **Tables de positions** : un `.dat` ou `.bin` qui commence par une table est découpé en `fichier.dat#n`. Heroes of
+  Mana : ses planches de tuiles (palette au début) s'ouvrent, `.dat` compressés entiers compris ; ses sprites
+  (`faceshap`, `monstershap`), modèles (`model00.bin`) et `skana.dat` montrent leurs octets.
 - **Fichiers maison** (`.dat`, `.bnd`...) : les fichiers Nitro collés dedans sont listés `fichier.dat#n`. Tout
   fichier qu'on ne sait pas décoder (`.sb`, `.scripb`, `.pu`...) montre ses textes (ASCII et Shift-JIS) et
   ses octets ; la molette fait défiler.

@@ -21,6 +21,8 @@
 //! Lecture des formats : crate `nds-nitro` (code d'apicula pour la 3D).
 
 use std::collections::HashMap;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bevy::asset::RenderAssetUsages;
@@ -44,7 +46,7 @@ use nds_nitro::{model3d, Kind, Rgba};
 
 use crate::i18n::{t, tr, Language, Tr};
 use crate::library;
-use crate::asset_scan::{all_formats, choices_for, decode, find_games, run_index, scan, kind_text, size_text, Choices, Decoded, Entry, FormatStat, GameDir, IndexState};
+use crate::asset_scan::{all_formats, choices_for, decode, find_games, run_index, scan, thumbnail, kind_text, size_text, Choices, Decoded, Entry, FormatStat, GameDir, IndexState};
 
 /// La fenêtre des assets (la fermer ne quitte pas le studio).
 #[derive(Component)]
@@ -57,6 +59,11 @@ pub struct ToggleAssets;
 /// Calque des modèles 3D montrés (ni les jeux ni les écrans ne l'utilisent).
 const LAYER: usize = 24;
 const ROWS: usize = 36;
+/// Vue en grille : colonnes et lignes de vignettes, fils qui les dessinent, vignettes gardées en mémoire.
+const GRID_COLUMNS: usize = 4;
+const GRID_LINES: usize = 6;
+const GRID_THREADS: usize = 2;
+const GRID_KEPT: usize = 400;
 const ROW_H: f32 = 21.0;
 /// Lignes montrées de l'aperçu en texte.
 const TEXT_ROWS: usize = 42;
@@ -130,7 +137,7 @@ pub(crate) struct AssetBrowser {
     index: Arc<Mutex<IndexState>>,
     index_started: bool,
     index_seen: u64,
-    entries: Vec<Entry>,
+    entries: Arc<Vec<Entry>>,
     shown: Vec<usize>,
     filter: String,
     /// Format choisi dans le menu des formats : seuls ses fichiers sont listés.
@@ -158,6 +165,10 @@ pub(crate) struct AssetBrowser {
     /// Aperçu animé : images 2D (poignée, durée en secondes) ou modèle 3D.
     frames: Vec<(Handle<Image>, f32)>,
     model_anim: Option<ModelAnim>,
+    /// Vue en grille, et les vignettes déjà prêtes (par n° de fichier ; vide = pas d'image).
+    grid: bool,
+    thumbs: HashMap<usize, Vec<(Handle<Image>, f32)>>,
+    jobs: Arc<ThumbJobs>,
     anim_time: f32,
     sound: Option<Handle<bevy::audio::AudioSource>>,
     /// Aperçu en texte, et sa première ligne visible.
@@ -166,6 +177,21 @@ pub(crate) struct AssetBrowser {
     text_font: Option<Handle<Font>>,
     text_shown: Option<(usize, usize)>,
 }
+
+/// Les vignettes à dessiner (plusieurs fils) et celles qui sont prêtes.
+#[derive(Default)]
+struct ThumbJobs {
+    queue: Mutex<VecDeque<usize>>,
+    done: Mutex<Vec<(usize, Option<Vec<(Rgba, u16)>>)>>,
+    running: AtomicUsize,
+}
+
+/// Une vignette de la grille : le fichier qu'elle montre.
+#[derive(Component)]
+struct GridThumb(usize);
+
+#[derive(Component)]
+struct GridToggle;
 
 struct ModelAnim {
     meshes: Vec<Handle<Mesh>>,
@@ -197,7 +223,7 @@ impl Default for AssetBrowser {
             index: Arc::default(),
             index_started: false,
             index_seen: 0,
-            entries: Vec::new(),
+            entries: Arc::new(Vec::new()),
             shown: Vec::new(),
             filter: String::new(),
             format_filter: None,
@@ -219,6 +245,9 @@ impl Default for AssetBrowser {
             start_menu: None,
             frames: Vec::new(),
             model_anim: None,
+            grid: false,
+            thumbs: HashMap::new(),
+            jobs: Arc::new(ThumbJobs::default()),
             anim_time: 0.0,
             sound: None,
             text_lines: Vec::new(),
@@ -307,7 +336,7 @@ impl Plugin for AssetBrowserPlugin {
         }
         app.insert_resource(browser).add_message::<ToggleAssets>().add_systems(
             Update,
-            (redo_on_language, toggle_window, poll_scan, type_filter, rebuild_menu, rebuild_list, render_preview, play_preview, show_preview_text, rebuild_controls, refresh_texts, fit_image, place_camera, looks).chain(),
+            (redo_on_language, toggle_window, poll_scan, type_filter, rebuild_menu, rebuild_list, render_preview, play_preview, update_grid, show_preview_text, rebuild_controls, refresh_texts, fit_image, place_camera, looks).chain(),
         );
     }
 }
@@ -334,6 +363,40 @@ fn matches_words(text: &str, words: &[String]) -> bool {
 // --------------------------------------------------------------------------------------------
 
 impl AssetBrowser {
+    fn page_size(&self) -> usize {
+        if self.grid { GRID_COLUMNS * GRID_LINES } else { ROWS }
+    }
+
+    /// Les fils en cours finissent sur l'ancienne file : leurs résultats ne servent plus.
+    fn reset_thumbs(&mut self) {
+        self.jobs.queue.lock().unwrap().clear();
+        self.jobs = Arc::new(ThumbJobs::default());
+        self.thumbs.clear();
+    }
+
+    /// Demande les vignettes de la page montrée (celles des autres pages attendront).
+    fn request_thumbs(&mut self) {
+        let wanted: VecDeque<usize> = self.shown.iter().skip(self.scroll).take(self.page_size()).copied().filter(|i| !self.thumbs.contains_key(i)).collect();
+        let count = wanted.len();
+        *self.jobs.queue.lock().unwrap() = wanted;
+        for _ in 0..count.min(GRID_THREADS) {
+            if self.jobs.running.fetch_add(1, Ordering::SeqCst) >= GRID_THREADS {
+                self.jobs.running.fetch_sub(1, Ordering::SeqCst);
+                break;
+            }
+            let (jobs, entries) = (self.jobs.clone(), self.entries.clone());
+            std::thread::spawn(move || {
+                loop {
+                    let next = jobs.queue.lock().unwrap().pop_front();
+                    let Some(index) = next else { break };
+                    let thumb = thumbnail(&entries, index);
+                    jobs.done.lock().unwrap().push((index, thumb));
+                }
+                jobs.running.fetch_sub(1, Ordering::SeqCst);
+            });
+        }
+    }
+
     /// Ouvre la fenêtre (si besoin) sur cette rom (nom de fichier).
     pub(crate) fn show_game(&mut self, file: &str) {
         self.start = Some((file.to_string(), None));
@@ -355,7 +418,8 @@ impl AssetBrowser {
         self.games = found;
         self.game = current.as_ref().and_then(|rom| self.games.iter().position(|g| g.rom == *rom));
         if current.is_some() && self.game.is_none() {
-            self.entries.clear();
+            self.entries = Arc::new(Vec::new());
+            self.reset_thumbs();
             self.selected = None;
             self.image = None;
             self.is3d = false;
@@ -413,7 +477,8 @@ impl AssetBrowser {
     fn open_game(&mut self, index: usize) {
         self.game = Some(index);
         self.close_menu();
-        self.entries.clear();
+        self.entries = Arc::new(Vec::new());
+        self.reset_thumbs();
         self.format_filter = None;
         let result = Arc::new(Mutex::new(None));
         let (rom, out) = (self.games[index].rom.clone(), result.clone());
@@ -435,7 +500,8 @@ impl AssetBrowser {
     }
 
     fn scan_done(&mut self, entries: Vec<Entry>) {
-        self.entries = entries;
+        self.entries = Arc::new(entries);
+        self.reset_thumbs();
         self.scanning = None;
         self.list_dirty = true;
         let viewable = self.entries.iter().filter(|e| e.kind.viewable()).count();
@@ -450,7 +516,7 @@ impl AssetBrowser {
         }
         if let Some(i) = self.want_file.take().and_then(|f| self.entries.iter().position(|e| e.path.eq_ignore_ascii_case(&f))) {
             self.filter_entries();
-            self.scroll = self.shown.iter().position(|&s| s == i).unwrap_or(0).saturating_sub(ROWS / 2);
+            self.scroll = self.shown.iter().position(|&s| s == i).unwrap_or(0).saturating_sub(self.page_size() / 2);
             self.select(i);
         }
     }
@@ -470,7 +536,7 @@ impl AssetBrowser {
                 words.iter().all(|w| hay.contains(w.as_str()))
             })
             .collect();
-        self.scroll = self.scroll.min(self.shown.len().saturating_sub(ROWS));
+        self.scroll = self.scroll.min(self.shown.len().saturating_sub(self.page_size()));
     }
 
     fn select(&mut self, index: usize) {
@@ -567,6 +633,12 @@ fn toggle_window(
                             .with_child((label("", 15.0, TEXT), GameButton));
                     });
                     side.spawn(Node { flex_direction: FlexDirection::Row, column_gap: px(8), align_items: AlignItems::Center, ..default() }).with_children(|row| {
+                        row.spawn((Button, Hovered::default(), item_node(), BackgroundColor(ITEM)))
+                            .observe(|_: On<Activate>, mut b: ResMut<AssetBrowser>| {
+                                b.grid = !b.grid;
+                                b.list_dirty = true;
+                            })
+                            .with_child((label("", 14.0, TEXT), GridToggle));
                         row.spawn((Button, Hovered::default(), item_node(), BackgroundColor(ITEM), FilterButton))
                             .observe(|_: On<Activate>, mut b: ResMut<AssetBrowser>| {
                                 b.all_files = !b.all_files;
@@ -589,7 +661,9 @@ fn toggle_window(
                                 MouseScrollUnit::Line => scroll.y * 3.0,
                                 MouseScrollUnit::Pixel => scroll.y / ROW_H,
                             };
-                            let max = b.shown.len().saturating_sub(ROWS) as i64;
+                            // En grille, une ligne de vignettes à la fois
+                            let lines = if b.grid { lines.signum() * GRID_COLUMNS as f32 } else { lines };
+                            let max = b.shown.len().saturating_sub(b.page_size()) as i64;
                             let wanted = (b.scroll as i64 - lines.round() as i64).clamp(0, max.max(0)) as usize;
                             if wanted != b.scroll {
                                 b.scroll = wanted;
@@ -716,8 +790,9 @@ fn poll_scan(mut b: ResMut<AssetBrowser>) {
 
 fn page(activate: On<Activate>, pages: Query<&PageButton>, mut b: ResMut<AssetBrowser>) {
     let Ok(PageButton(dir)) = pages.get(activate.entity) else { return };
-    let max = b.shown.len().saturating_sub(ROWS) as i64;
-    b.scroll = (b.scroll as i64 + *dir as i64 * (ROWS as i64 - 2)).clamp(0, max.max(0)) as usize;
+    let (size, overlap) = if b.grid { (b.page_size(), GRID_COLUMNS) } else { (ROWS, 2) };
+    let max = b.shown.len().saturating_sub(size) as i64;
+    b.scroll = (b.scroll as i64 + *dir as i64 * (size - overlap) as i64).clamp(0, max.max(0)) as usize;
     b.list_dirty = true;
 }
 
@@ -900,7 +975,7 @@ fn rebuild_menu(mut commands: Commands, mut b: ResMut<AssetBrowser>, mut nodes: 
     });
 }
 
-fn rebuild_list(mut commands: Commands, mut b: ResMut<AssetBrowser>, children: Query<&Children>) {
+fn rebuild_list(mut commands: Commands, mut b: ResMut<AssetBrowser>, children: Query<&Children>, mut nodes: Query<&mut Node>) {
     let Some(list) = b.list else { return };
     if !b.list_dirty {
         return;
@@ -911,6 +986,35 @@ fn rebuild_list(mut commands: Commands, mut b: ResMut<AssetBrowser>, children: Q
         for child in old.iter() {
             commands.entity(child).despawn();
         }
+    }
+    if let Ok(mut node) = nodes.get_mut(list) {
+        node.flex_direction = if b.grid { FlexDirection::Row } else { FlexDirection::Column };
+        node.flex_wrap = if b.grid { FlexWrap::Wrap } else { FlexWrap::NoWrap };
+        node.align_content = AlignContent::FlexStart;
+    }
+    if b.grid {
+        b.request_thumbs();
+        let tiles: Vec<(usize, String)> = b.shown.iter().skip(b.scroll).take(b.page_size()).map(|&i| {
+            let e = &b.entries[i];
+            let name = e.member_name.as_deref().unwrap_or(&e.path);
+            let short: String = name.rsplit('/').next().unwrap_or(name).chars().take(19).collect();
+            (i, short)
+        }).collect();
+        commands.entity(list).with_children(|list| {
+            for (i, name) in tiles {
+                list.spawn((Button, Hovered::default(), Node { width: px(134), height: px(124), margin: UiRect::all(px(2)), flex_direction: FlexDirection::Column, align_items: AlignItems::Center, row_gap: px(3), padding: UiRect::all(px(3)), border_radius: BorderRadius::all(px(4)), overflow: Overflow::clip(), ..default() }, BackgroundColor(ROW), ListRow(i)))
+                    .observe(|activate: On<Activate>, rows: Query<&ListRow>, mut b: ResMut<AssetBrowser>| {
+                        if let Ok(row) = rows.get(activate.entity) {
+                            b.select(row.0);
+                        }
+                    })
+                    .with_children(|tile| {
+                        tile.spawn((ImageNode::default(), Node { width: px(96), height: px(96), flex_shrink: 0.0, ..default() }, Visibility::Hidden, GridThumb(i), Pickable::IGNORE));
+                        tile.spawn((label(name, 11.0, DIM), Pickable::IGNORE));
+                    });
+            }
+        });
+        return;
     }
     let rows: Vec<(usize, String, String)> = b.shown.iter().skip(b.scroll).take(ROWS).map(|&i| {
         let e = &b.entries[i];
@@ -951,7 +1055,7 @@ fn refresh_texts(
         } else if filter.is_some() {
             if b.all_files { tr("All files", "Tous les fichiers").into() } else { tr("Viewable files", "Fichiers montrables").into() }
         } else if title.is_some() {
-            let range = if b.shown.is_empty() { "0".to_string() } else { format!("{}-{}", b.scroll + 1, (b.scroll + ROWS).min(b.shown.len())) };
+            let range = if b.shown.is_empty() { "0".to_string() } else { format!("{}-{}", b.scroll + 1, (b.scroll + b.page_size()).min(b.shown.len())) };
             let filter = if b.filter.is_empty() { tr("type to filter", "tapez pour filtrer").to_string() } else { t!("filter: {}_", "filtre : {}_", b.filter) };
             let format = b.format_filter.as_ref().map_or(String::new(), |f| t!("   format: {f} (Esc = all)", "   format : {f} (Echap = tous)"));
             format!("{range} / {}   ({filter}){format}", b.shown.len())
@@ -1023,11 +1127,16 @@ fn rebuild_controls(mut commands: Commands, mut b: ResMut<AssetBrowser>, childre
     }
     if !c.linked.is_empty() {
         let kind = b.selected.map(|s| b.entries[s].kind);
-        let what = if kind == Some(Kind::ModelAnim) { tr("Model", "Modele") } else { tr("Cells", "Cellules") };
+        let what = match kind {
+            Some(Kind::ModelAnim) => tr("Model", "Modele"),
+            Some(Kind::TextureRef) => "Texture",
+            _ => tr("Cells", "Cellules"),
+        };
         steps.push((Ctl::Link, format!("{what}: {}", name(&c.linked, c.link))));
     }
     if c.anims > 1 {
-        steps.push((Ctl::Anim, t!("Animation: {} / {}", "Animation : {} / {}", c.anim + 1, c.anims)));
+        let what = if b.selected.is_some_and(|s| b.entries[s].kind == Kind::AudioBank) { tr("Sound", "Son") } else { "Animation" };
+        steps.push((Ctl::Anim, format!("{what}: {} / {}", c.anim + 1, c.anims)));
     }
     if c.models > 1 {
         steps.push((Ctl::Model, t!("Model: {} / {}", "Modele : {} / {}", c.model + 1, c.models)));
@@ -1122,6 +1231,62 @@ fn play_preview(time: Res<Time>, mut b: ResMut<AssetBrowser>, mut meshes: ResMut
         if let Some(mut mesh) = meshes.get_mut(handle) {
             mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions.clone());
             mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals.clone());
+        }
+    }
+}
+
+/// Prend les vignettes prêtes et fait avancer celles qui sont animées.
+fn update_grid(
+    time: Res<Time>,
+    mut b: ResMut<AssetBrowser>,
+    mut images: ResMut<Assets<Image>>,
+    mut thumbs: Query<(&GridThumb, &mut ImageNode, &mut Visibility)>,
+    mut toggles: Query<&mut Text, With<GridToggle>>,
+    mut clock: Local<f32>,
+) {
+    for mut text in &mut toggles {
+        let wanted = if b.grid { tr("List", "Liste") } else { tr("Grid", "Grille") };
+        if text.0 != wanted {
+            text.0 = wanted.to_string();
+        }
+    }
+    if !b.grid || b.window.is_none() {
+        return;
+    }
+    let done = std::mem::take(&mut *b.jobs.done.lock().unwrap());
+    for (index, frames) in done {
+        let frames = frames.unwrap_or_default();
+        let handles = frames.iter().map(|(rgba, duration)| (images.add(to_image(rgba, ImageSampler::nearest())), *duration as f32 / 60.0)).collect();
+        b.thumbs.insert(index, handles);
+    }
+    // Trop de vignettes en mémoire : on ne garde que la page montrée
+    if b.thumbs.len() > GRID_KEPT {
+        let visible: Vec<usize> = b.shown.iter().skip(b.scroll).take(b.page_size()).copied().collect();
+        b.thumbs.retain(|i, _| visible.contains(i));
+    }
+    *clock += time.delta_secs();
+    for (thumb, mut node, mut visibility) in &mut thumbs {
+        let Some(frames) = b.thumbs.get(&thumb.0).filter(|f| !f.is_empty()) else {
+            if *visibility != Visibility::Hidden {
+                *visibility = Visibility::Hidden;
+            }
+            continue;
+        };
+        let total: f32 = frames.iter().map(|f| f.1).sum();
+        let mut left = *clock % total.max(0.001);
+        let mut shown = &frames[frames.len() - 1].0;
+        for frame in frames {
+            if left < frame.1 {
+                shown = &frame.0;
+                break;
+            }
+            left -= frame.1;
+        }
+        if node.image != *shown {
+            node.image = shown.clone();
+        }
+        if *visibility != Visibility::Inherited {
+            *visibility = Visibility::Inherited;
         }
     }
 }

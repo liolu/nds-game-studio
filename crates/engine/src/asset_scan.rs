@@ -16,13 +16,13 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use nds_nitro::{g2d, model3d, narc, nitrofs, romarc, sadl, sniff, unpack, Kind, Rgba};
+use nds_nitro::{adx, decompress_any, g2d, gx_mesh, looks_compressed, model3d, narc, nitrofs, romarc, sadl, sdat, sniff, unpack, Kind, Rgba};
 use serde::{Deserialize, Serialize};
 
 use crate::i18n::{t, tr};
 
 /// À changer quand le calcul change : l'index gardé est alors refait.
-const INDEX_VERSION: u32 = 3;
+const INDEX_VERSION: u32 = 9;
 const BIG_FILE: usize = 4 << 20;
 
 /// Une rom du dossier `rom` du launcher.
@@ -100,7 +100,7 @@ fn stem_of(path: &str) -> String {
 /// Sorte d'un fichier : signature, sinon signature une fois décompressé (LZ77).
 fn kind_of(head: &[u8], whole: impl FnOnce() -> Option<Vec<u8>>) -> Kind {
     let kind = sniff(head);
-    if kind == Kind::Other && matches!(head.first(), Some(0x10 | 0x11)) {
+    if kind == Kind::Other && looks_compressed(head.first()) {
         if let Some(bytes) = whole() {
             return sniff(&unpack(bytes));
         }
@@ -120,18 +120,45 @@ pub fn scan(rom_path: &Path) -> Vec<Entry> {
         let path = file.path;
         let size = data.len();
         let small = size < BIG_FILE;
-        let kind = kind_of(&data[..size.min(4)], || small.then(|| data.to_vec()));
+        let kind = guess_house_format(by_extension(kind_of(&data[..size.min(4)], || small.then(|| data.to_vec())), &path), &path, data);
         let dir = path.rsplit_once('/').map_or(String::new(), |(d, _)| d.to_string());
         let stem = stem_of(&path);
         entries.push(Entry { path: path.clone(), member_name: None, rom: rom_path.to_path_buf(), span, member: None, kind, size, dir, stem, rom_index: None });
         if path.rsplit('/').next().is_some_and(|n| n.eq_ignore_ascii_case("rom.bin")) {
             rom_bin = scan_rom_bin(rom_path, data, file.start);
         }
+        if kind == Kind::NestedRom {
+            // Une mini-rom a son propre NitroFS ; ses positions comptent depuis son début
+            for (n, f) in nitrofs::read(data).unwrap_or_default().into_iter().enumerate() {
+                let inner = &data[f.start..f.end];
+                let name = f.path.rsplit('/').next().unwrap_or(&f.path).to_string();
+                entries.push(Entry { path: format!("{path}#{n}"), member_name: Some(f.path.clone()), rom: rom_path.to_path_buf(), span, member: Some((f.start, f.end)), kind: by_extension(sniff(inner), &name), size: f.end - f.start, dir: path.clone(), stem: stem_of(&name), rom_index: None });
+            }
+            continue;
+        }
+        if kind == Kind::SoundArchive {
+            for (n, f) in sdat::files(data).unwrap_or_default().into_iter().enumerate() {
+                let inner = &data[f.start..f.end];
+                let name = format!("{}.{}", f.name.unwrap_or_else(|| format!("{n:04}")), f.ext);
+                entries.push(Entry { path: format!("{path}#{n}"), member_name: Some(name), rom: rom_path.to_path_buf(), span, member: Some((f.start, f.end)), kind: sniff(inner), size: f.end - f.start, dir: path.clone(), stem: String::new(), rom_index: None });
+            }
+            continue;
+        }
         if kind == Kind::Other && !path.to_lowercase().ends_with("rom.bin") {
             let bytes = unpack(data.to_vec());
-            for (n, (start, end, ext)) in embedded_files(&bytes).into_iter().enumerate() {
+            let embedded = embedded_files(&bytes);
+            for (n, (start, end, ext)) in embedded.iter().copied().enumerate() {
                 let inner = &bytes[start..end];
                 entries.push(Entry { path: format!("{path}#{n}"), member_name: Some(format!("{n:03}.{ext}")), rom: rom_path.to_path_buf(), span, member: Some((start, end)), kind: sniff(inner), size: end - start, dir: path.clone(), stem: String::new(), rom_index: None });
+            }
+            if embedded.is_empty() && has_house_extension(&path) {
+                // Une table de positions au début : chaque morceau est un fichier, souvent compressé
+                for (n, (start, end)) in table_members(&bytes).into_iter().enumerate() {
+                    let member = &bytes[start..end];
+                    let kind = guess_house_format(sniff_inner(member), &path, member);
+                    let ext = if kind == Kind::Other { "bin" } else { "dat" };
+                    entries.push(Entry { path: format!("{path}#{n}"), member_name: Some(format!("{n:03}.{ext}")), rom: rom_path.to_path_buf(), span, member: Some((start, end)), kind, size: end - start, dir: path.clone(), stem: String::new(), rom_index: None });
+                }
             }
             continue;
         }
@@ -142,7 +169,7 @@ pub fn scan(rom_path: &Path) -> Vec<Entry> {
         let Ok(members) = narc::read(&bytes) else { continue };
         for m in members {
             let data = &bytes[m.start..m.end];
-            let kind = kind_of(data, || Some(data.to_vec()));
+            let kind = by_extension(kind_of(data, || Some(data.to_vec())), &m.name);
             let member_path = format!("{path}#{}", m.index);
             let named = !m.name.chars().all(|c| c.is_ascii_digit());
             let stem = if named { stem_of(&m.name) } else { String::new() };
@@ -151,6 +178,269 @@ pub fn scan(rom_path: &Path) -> Vec<Entry> {
     }
     entries.extend(rom_bin);
     entries
+}
+
+fn has_house_extension(path: &str) -> bool {
+    matches!(path.rsplit_once('.').map(|(_, ext)| ext.to_lowercase()).as_deref(), Some("dat" | "bin"))
+}
+
+/// La sorte d'un morceau, une fois décompressé s'il l'est.
+fn sniff_inner(member: &[u8]) -> Kind {
+    match decompress_any(member) {
+        Some(inner) => sniff(&inner),
+        None => sniff(member),
+    }
+}
+
+/// Un `.dat` ou `.bin` sans signature : une planche de tuiles se reconnaît à sa taille et à sa palette.
+fn guess_house_format(kind: Kind, path: &str, data: &[u8]) -> Kind {
+    if kind != Kind::Other || !has_house_extension(path) {
+        return kind;
+    }
+    let inner = decompress_any(data);
+    if g2d::read_palette_tiles(inner.as_deref().unwrap_or(data)).is_some() { Kind::PaletteTiles } else { kind }
+}
+
+/// Les morceaux d'un fichier qui commence par une table de positions : la première donne la taille de la table, elles
+/// vont en croissant, la fin du dernier morceau est celle du fichier. Vide si ce n'est pas une telle table.
+fn table_members(bytes: &[u8]) -> Vec<(usize, usize)> {
+    const MAX_TABLE: usize = 256 * 1024;
+    let u32_at = |at: usize| bytes.get(at..at + 4).map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]) as usize);
+    let Some(first) = u32_at(0) else { return Vec::new() };
+    if first % 4 != 0 || first < 8 || first > bytes.len() || first > MAX_TABLE {
+        return Vec::new();
+    }
+    let offsets: Vec<usize> = (0..first / 4).filter_map(|i| u32_at(i * 4)).collect();
+    if offsets.windows(2).any(|w| w[1] < w[0]) || offsets.last().is_none_or(|last| *last > bytes.len()) {
+        return Vec::new();
+    }
+    offsets.iter().enumerate().map(|(i, start)| (*start, offsets.get(i + 1).copied().unwrap_or(bytes.len()))).collect()
+}
+
+/// Les fichiers bruts n'ont pas de signature : on se fie à leur extension.
+fn by_extension(kind: Kind, name: &str) -> Kind {
+    if kind != Kind::Other {
+        return kind;
+    }
+    match name.rsplit_once('.').map(|(_, ext)| ext.to_lowercase()).as_deref() {
+        Some("nbfc" | "char" | "ncg") => Kind::RawTiles,
+        Some("nbfp" | "ntfp" | "plt" | "ncl" | "pal" | "plb") => Kind::RawPalette,
+        Some("ntft") => Kind::RawTexture,
+        Some("bstga") => Kind::BsTexture,
+        Some("bmp") => Kind::Bitmap,
+        Some("zip") => Kind::ZipFile,
+        Some("z") => Kind::ZImage,
+        Some("anm") => Kind::AnmFile,
+        Some("nbfs" | "nsc" | "scr") => Kind::RawScreen,
+        Some("adx") => Kind::Audio,
+        Some("txt" | "ini" | "itx" | "csv" | "xml" | "cfg") => Kind::PlainText,
+        Some("lz" | "cat") => Kind::Compressed,
+        Some("srl") => Kind::NestedRom,
+        _ => kind,
+    }
+}
+
+/// Le chemin de la texture et celui de sa palette, dans un `TXET` (deux chaînes précédées de leur taille).
+fn texture_ref(bytes: &[u8]) -> Option<(String, String)> {
+    two_paths(bytes, 4)
+}
+
+/// Deux chaînes précédées de leur taille, à partir de `at`.
+fn two_paths(bytes: &[u8], at: usize) -> Option<(String, String)> {
+    let read = |at: usize| -> Option<(String, usize)> {
+        let size = u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?) as usize;
+        let text = bytes.get(at + 4..at + 4 + size)?;
+        Some((String::from_utf8_lossy(text).trim_end_matches('\0').to_string(), at + 4 + size))
+    };
+    let (first, next) = read(at)?;
+    let (second, _) = read(next)?;
+    Some((first, second))
+}
+
+/// Les morceaux d'un `MESH` : géométrie, texture, et palette chez ceux qui la nomment ici. Le nombre de morceaux et ce qui
+/// suit chaque morceau changent selon le jeu : on repère donc chaque chemin de géométrie (précédé de sa taille).
+fn mesh_parts(bytes: &[u8]) -> Vec<(String, String, Option<String>)> {
+    const GEOMETRY: &[u8] = b"3d/geometry/";
+    let string_at = |at: usize| -> Option<String> {
+        let size = u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?) as usize;
+        Some(String::from_utf8_lossy(bytes.get(at + 4..at + 4 + size)?).trim_end_matches('\0').to_string())
+    };
+    let mut parts = Vec::new();
+    let mut search = 4;
+    while let Some(found) = bytes.get(search..).and_then(|rest| rest.windows(GEOMETRY.len()).position(|w| w == GEOMETRY)) {
+        let path_at = search + found;
+        search = path_at + GEOMETRY.len();
+        let Some(geometry) = path_at.checked_sub(4).and_then(string_at) else { continue };
+        if !geometry.starts_with("3d/geometry/") {
+            continue;
+        }
+        // La taille écrite compte aussi les zéros de fin, que `geometry` n'a plus
+        let Some(texture_at) = bytes.get(path_at - 4..path_at).map(|s| path_at + u32::from_le_bytes([s[0], s[1], s[2], s[3]]) as usize) else { continue };
+        let Some(texture) = string_at(texture_at) else { continue };
+        let palette = string_at(texture_at + 4 + texture.len()).filter(|p| p.starts_with("3d/palette/"));
+        parts.push((geometry, texture, palette));
+    }
+    parts
+}
+
+/// La texture d'un `MESH` : le fichier nommé est un `TXET` qui relie pixels et palette, ou les pixels eux-mêmes.
+fn engine_texture(entries: &[Entry], index: usize, named_palette: Option<&str>) -> Option<Rgba> {
+    let bytes = read_entry(&entries[index]).ok()?;
+    let (texel_bytes, mut palettes) = match entries[index].kind {
+        Kind::TextureRef => {
+            let (texel, _) = texture_ref(&bytes)?;
+            (read_entry(&entries[entry_at(entries, &texel)?]).ok()?, texture_palettes(entries, Some(index), index))
+        }
+        _ => (bytes, texture_palettes(entries, None, index)),
+    };
+    if let Some(named) = named_palette.and_then(|p| entry_at(entries, p)) {
+        palettes.insert(0, named);
+    }
+    let texel = g2d::read_texel(&texel_bytes).ok()?;
+    let palette = g2d::read_palette(&read_entry(&entries[*palettes.first()?]).ok()?).ok()?;
+    let mut image = g2d::render_texel(&texel, &palette).ok()?;
+    // Une texture entièrement transparente est une couleur unie : sa couleur 0 compte vraiment
+    if image.data.chunks_exact(4).all(|p| p[3] == 0) {
+        let first = palette.colors.first().copied().unwrap_or([255; 4]);
+        for pixel in image.data.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&first);
+        }
+    }
+    Some(image)
+}
+
+/// Ce qu'on sait d'une animation `.anm` : la table des animations de SimAnimals (nombre, 0, positions), sinon l'en-tête.
+fn anm_lines(bytes: &[u8]) -> Vec<String> {
+    let u32_at = |at: usize| bytes.get(at..at + 4).map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]) as usize);
+    // La première position dit où finit la table
+    let first = u32_at(8).unwrap_or(0);
+    let count = if first > 8 && (first - 8) % 4 == 0 { (first - 8) / 4 } else { 0 };
+    let offsets: Vec<usize> = (0..count.min(4096)).filter_map(|i| u32_at(8 + i * 4)).collect();
+    let is_table = u32_at(4) == Some(0) && count > 0 && offsets.len() == count && offsets.windows(2).all(|w| w[0] < w[1]) && offsets.last().is_some_and(|last| *last <= bytes.len());
+    let mut lines = if is_table {
+        let mut list = vec![t!("{count} animations", "{count} animations")];
+        for (i, at) in offsets.iter().enumerate() {
+            let end = offsets.get(i + 1).copied().unwrap_or(bytes.len());
+            let first_frame = u32_at(*at).unwrap_or(end);
+            list.push(t!("{i:4}  {} frames", "{i:4}  {} images", first_frame.saturating_sub(*at).min(end - at) / 4));
+        }
+        list
+    } else {
+        vec![t!("Header: size {}, then {} and {}", "En-tete : taille {}, puis {} et {}", u32_at(0).unwrap_or(0), u32_at(4).unwrap_or(0), u32_at(8).unwrap_or(0))]
+    };
+    lines.push(String::new());
+    lines.extend(text_lines(bytes));
+    lines
+}
+
+/// Les caractéristiques d'une vidéo, d'après son en-tête.
+fn video_lines(bytes: &[u8]) -> Vec<String> {
+    let u32_at = |at: usize| bytes.get(at..at + 4).map_or(0, |s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]));
+    let (format, frames, width, height, fps) = match bytes.get(0..3) {
+        Some(b"BIK") => ("Bink", u32_at(8), u32_at(0x14), u32_at(0x18), u32_at(0x1C) as f32 / u32_at(0x20).max(1) as f32),
+        Some(b"VXD") => ("VX", u32_at(4), u32_at(8), u32_at(0xC), u32_at(0x10) as f32 / 65536.0),
+        _ => ("Mobiclip", u32_at(8), u32_at(0xC), u32_at(0x10), u32_at(0x14) as f32 / 16777216.0),
+    };
+    vec![
+        t!("Video {format}: {width}x{height}, {frames} frames, {fps:.1} per second", "Video {format} : {width}x{height}, {frames} images, {fps:.1} par seconde"),
+        t!("{:.1} seconds. The video itself is not played.", "{:.1} secondes. La video elle-meme n'est pas lue.", frames as f32 / fps.max(0.01)),
+    ]
+}
+
+/// Les fichiers d'une archive zip, d'après son répertoire de fin de fichier.
+fn zip_lines(bytes: &[u8]) -> Vec<String> {
+    let u16_at = |at: usize| bytes.get(at..at + 2).map(|s| u16::from_le_bytes([s[0], s[1]]) as usize);
+    let u32_at = |at: usize| bytes.get(at..at + 4).map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]) as usize);
+    let Some(end) = bytes.windows(4).rposition(|w| w == b"PK\x05\x06") else { return vec![tr("Not a readable zip.", "Zip illisible.").to_string()] };
+    let count = u16_at(end + 10).unwrap_or(0);
+    let mut at = u32_at(end + 16).unwrap_or(0);
+    let mut lines = vec![t!("{count} files", "{count} fichiers")];
+    for _ in 0..count {
+        let (Some(size), Some(names), Some(extra), Some(comment)) = (u32_at(at + 24), u16_at(at + 28), u16_at(at + 30), u16_at(at + 32)) else { break };
+        let Some(name) = bytes.get(at + 46..at + 46 + names) else { break };
+        lines.push(format!("{}  {}", String::from_utf8_lossy(name), size_text(size)));
+        at += 46 + names + extra + comment;
+    }
+    lines
+}
+
+/// Le n° du fichier à ce chemin (le moteur écrit parfois le dossier avec des `\\`).
+fn entry_at(entries: &[Entry], path: &str) -> Option<usize> {
+    let wanted = path.replace('\\', "/").to_lowercase();
+    entries.iter().position(|e| e.path.to_lowercase() == wanted)
+}
+
+/// Les palettes d'une texture : celle que nomme son `TXET` d'abord, puis les plus proches par le nom.
+fn texture_palettes(entries: &[Entry], reference: Option<usize>, near: usize) -> Vec<usize> {
+    let named = reference.and_then(|r| read_entry(&entries[r]).ok()).and_then(|b| texture_ref(&b)).and_then(|(_, palette)| entry_at(entries, &palette));
+    let mut list: Vec<usize> = named.into_iter().collect();
+    list.extend(companions(entries, near, &[Kind::Palette]).into_iter().filter(|i| Some(*i) != named));
+    list
+}
+
+/// Les textes d'un fichier `GNAL` : nombre de textes, puis pour chacun deux nombres, sa taille, ses octets.
+fn lang_lines(bytes: &[u8]) -> Vec<String> {
+    let u32_at = |at: usize| bytes.get(at..at + 4).map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]) as usize);
+    let count = u32_at(4).unwrap_or(0);
+    let mut lines = Vec::new();
+    let mut at = 8;
+    for i in 0..count {
+        let Some(size) = u32_at(at + 8) else { break };
+        let Some(text) = bytes.get(at + 12..at + 12 + size) else { break };
+        lines.push(format!("{i:4}  {}", encoding_rs::WINDOWS_1252.decode(text).0));
+        at += 12 + size;
+    }
+    lines
+}
+
+/// Les textes d'un fichier de messages BMG : INF1 donne où commence chaque texte dans DAT1.
+fn bmg_lines(bytes: &[u8]) -> Vec<String> {
+    let u32_at = |at: usize| bytes.get(at..at + 4).map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]) as usize);
+    let u16_at = |at: usize| bytes.get(at..at + 2).map(|s| u16::from_le_bytes([s[0], s[1]]) as usize);
+    let encoding = bytes.get(0x10).copied().unwrap_or(2);
+    let (mut inf, mut dat) = (None, None);
+    let mut at = 0x20;
+    while let (Some(magic), Some(size)) = (bytes.get(at..at + 4), u32_at(at + 4)) {
+        match magic {
+            b"INF1" => inf = Some(at),
+            b"DAT1" => dat = Some(at + 8),
+            _ => {}
+        }
+        if size < 8 {
+            break;
+        }
+        at += size;
+    }
+    let (Some(inf), Some(dat)) = (inf, dat) else { return Vec::new() };
+    let (count, entry) = (u16_at(inf + 8).unwrap_or(0), u16_at(inf + 10).unwrap_or(4).max(4));
+    let mut lines = Vec::with_capacity(count);
+    for i in 0..count {
+        let Some(offset) = u32_at(inf + 16 + i * entry) else { break };
+        let Some(rest) = bytes.get(dat + offset..) else { continue };
+        let text = if encoding == 2 {
+            // UTF-16 ; 0x1A = une commande du jeu, l'octet suivant donne sa taille
+            let (mut units, mut p) = (Vec::new(), 0);
+            while let Some(c) = rest.get(p..p + 2).map(|s| u16::from_le_bytes([s[0], s[1]])) {
+                if c == 0 {
+                    break;
+                }
+                if c == 0x1A {
+                    units.extend("[*]".encode_utf16());
+                    p += (rest.get(p + 2).copied().unwrap_or(4) as usize).max(4);
+                    continue;
+                }
+                units.push(c);
+                p += 2;
+            }
+            String::from_utf16_lossy(&units)
+        } else {
+            let end = rest.iter().position(|b| *b == 0).unwrap_or(rest.len());
+            let codec = if encoding == 3 { encoding_rs::SHIFT_JIS } else if encoding == 4 { encoding_rs::UTF_8 } else { encoding_rs::WINDOWS_1252 };
+            codec.decode(&rest[..end]).0.into_owned()
+        };
+        lines.push(format!("{i:4}  {}", text.replace('\n', " / ")));
+    }
+    lines
 }
 
 /// Les fichiers Nitro collés dans un fichier maison (`.dat`, souvent) : leur en-tête donne leur taille.
@@ -321,7 +611,23 @@ pub fn choices_for(entries: &[Entry], sel: usize) -> Choices {
             c.palettes = companions(entries, sel, &[Kind::Palette]);
             c.tiles = companions(entries, sel, &[Kind::Tiles]);
         }
-        Kind::JCells => c.palettes = companions(entries, sel, &[Kind::Palette]),
+        Kind::JCells | Kind::EngineBitmap => c.palettes = companions(entries, sel, &[Kind::Palette]),
+        Kind::Texel => {
+            // `x_texel` : la texture ; `x` : ce qui la relie à sa palette
+            let path = entries[sel].path.strip_suffix("_texel").map(str::to_string);
+            let reference = path.and_then(|p| entry_at(entries, &p));
+            c.palettes = texture_palettes(entries, reference, sel);
+        }
+        Kind::TextureRef => {
+            let target = read_entry(&entries[sel]).ok().and_then(|b| texture_ref(&b)).and_then(|(texel, _)| entry_at(entries, &texel));
+            c.linked = target.into_iter().collect();
+            c.palettes = texture_palettes(entries, Some(sel), sel);
+        }
+        Kind::RawTiles | Kind::RawTexture => c.palettes = companions(entries, sel, &[Kind::RawPalette]),
+        Kind::RawScreen => {
+            c.tiles = companions(entries, sel, &[Kind::RawTiles]);
+            c.palettes = companions(entries, sel, &[Kind::RawPalette]);
+        }
         Kind::JLayout => {
             c.linked = companions(entries, sel, &[Kind::JCells]);
             // La palette va avec les cellules (`training_obj`), pas avec la mise en page (`training`)
@@ -431,6 +737,12 @@ pub fn kind_text(kind: Kind) -> &'static str {
         "cellules J" => tr("cells", "cellules"),
         "mise en page" => tr("layout", "mise en page"),
         "son" => tr("sound", "son"),
+        "banque de sons" => tr("sound bank", "banque de sons"),
+        "archive de son" => tr("sound archive", "archive de son"),
+        "police" => tr("font", "police"),
+        "texte" => tr("text", "texte"),
+        "video" => "video",
+        "compresse" => tr("compressed", "compresse"),
         other => other,
     }
 }
@@ -458,6 +770,11 @@ fn sheet(images: &[Rgba]) -> Rgba {
         }
     }
     out
+}
+
+fn audio(sound: sadl::Sound, extra: String) -> Decoded {
+    let info = t!("{extra}{:.1} s, {} Hz, {} channels", "{extra}{:.1} s, {} Hz, {} voies", sound.seconds(), sound.rate, sound.channels);
+    Decoded::Audio { wav: sound.wav(), waveform: sound.waveform(), info }
 }
 
 /// Sans palette : niveaux de gris.
@@ -565,9 +882,162 @@ fn decode_inner(entries: &[Entry], sel: usize, c: &mut Choices) -> Result<Decode
             Ok(Decoded::Animated { model: model3d::build_model(model, &lib), animation: out })
         }
         Kind::Audio => {
-            let sound = sadl::decode(&bytes).map_err(|e| e.to_string())?;
-            let info = t!("{:.1} s, {} Hz, {} channels", "{:.1} s, {} Hz, {} voies", sound.seconds(), sound.rate, sound.channels);
-            Ok(Decoded::Audio { wav: sound.wav(), waveform: sound.waveform(), info })
+            let sound = match bytes.get(0..4) {
+                Some(b"STRM") => sdat::read_strm(&bytes),
+                Some(b"SWAV") => sdat::read_swav(&bytes),
+                _ if adx::is_adx(&bytes) => adx::decode(&bytes),
+                _ => sadl::decode(&bytes),
+            };
+            Ok(audio(sound.map_err(|e| e.to_string())?, String::new()))
+        }
+        Kind::AudioBank => {
+            c.anims = sdat::swar_count(&bytes).map_err(|e| e.to_string())?;
+            c.anim = c.anim.min(c.anims.saturating_sub(1));
+            let sound = sdat::read_swar(&bytes, c.anim).map_err(|e| e.to_string())?;
+            let extra = t!("sound {} of {}, ", "son {} sur {}, ", c.anim + 1, c.anims);
+            Ok(audio(sound, extra))
+        }
+        Kind::PlainText => {
+            // UTF-16 avec sa marque, UTF-8, sinon Shift-JIS (les jeux japonais)
+            let text = match bytes.get(0..2) {
+                Some([0xFF, 0xFE]) => encoding_rs::UTF_16LE.decode(&bytes).0.into_owned(),
+                _ => match std::str::from_utf8(&bytes) {
+                    Ok(text) => text.to_string(),
+                    Err(_) => encoding_rs::SHIFT_JIS.decode(&bytes).0.into_owned(),
+                },
+            };
+            let lines: Vec<String> = text.lines().map(str::to_string).collect();
+            let info = t!("{} lines", "{} lignes", lines.len());
+            Ok(Decoded::Text { lines, info })
+        }
+        Kind::Compressed => match decompress_any(&bytes) {
+            Some(inner) => {
+                let info = t!("LZ77, {} once decompressed", "LZ77, {} une fois decompresse", size_text(inner.len()));
+                Ok(Decoded::Text { lines: text_lines(&inner), info })
+            }
+            None => Ok(Decoded::Text { lines: text_lines(&bytes), info: t!("Not LZ77: its text and bytes", "Pas du LZ77 : ses textes et ses octets") }),
+        },
+        Kind::NestedRom => {
+            let info = crate::library::read_rom_bytes(&entries[sel].path, &bytes)?;
+            let rgba = if info.icon.is_empty() { Rgba { width: 1, height: 1, data: vec![0; 4] } } else { Rgba { width: 32, height: 32, data: info.icon.clone() } };
+            Ok(Decoded::Image { rgba, info: format!("{}  -  {}  -  {}", info.title.replace('\n', " "), info.publisher, info.code) })
+        }
+        Kind::EngineGeometry | Kind::EngineMesh => {
+            let name = entries[sel].path.rsplit('/').next().unwrap_or("").to_string();
+            if kind == Kind::EngineGeometry {
+                let model = gx_mesh::read_geometry(&bytes, None, &name).map_err(|e| e.to_string())?;
+                return Ok(Decoded::Model { model, own_textures: 0 });
+            }
+            let parts = mesh_parts(&bytes);
+            let mut models = Vec::with_capacity(parts.len());
+            let mut textured = 0;
+            for (geometry, texture, palette) in &parts {
+                // Un morceau manquant ou vide n'empêche pas de montrer les autres
+                let Some(at) = entry_at(entries, geometry) else { continue };
+                let Ok(geometry) = read_entry(&entries[at]) else { continue };
+                let image = entry_at(entries, texture).and_then(|i| engine_texture(entries, i, palette.as_deref()));
+                textured += usize::from(image.is_some());
+                if let Ok(model) = gx_mesh::read_geometry(&geometry, image, &name) {
+                    models.push(model);
+                }
+            }
+            let model = gx_mesh::merge(&name, models).ok_or(tr("unreadable mesh", "maillage illisible"))?;
+            Ok(Decoded::Model { model, own_textures: textured })
+        }
+        Kind::BsTexture => {
+            let inner = decompress_any(&bytes).unwrap_or_else(|| bytes.clone());
+            let (texel, palette) = g2d::read_bstga(&inner).map_err(|e| e.to_string())?;
+            let rgba = g2d::render_texel(&texel, &palette).map_err(|e| e.to_string())?;
+            Ok(Decoded::Image { rgba, info: t!("{}x{}, DS texture format {}", "{}x{}, format de texture DS {}", texel.width, texel.height, texel.format) })
+        }
+        Kind::RawTexture => {
+            let palette = match load(&c.palettes, c.palette)? {
+                Some(p) => g2d::raw_palette(&p),
+                None => g2d::Palette { colors: (0..=255).map(|i| [i, i, i, 255]).collect() },
+            };
+            let texel = g2d::raw_texture(&bytes, &palette);
+            let rgba = g2d::render_texel(&texel, &palette).map_err(|e| e.to_string())?;
+            Ok(Decoded::Image { rgba, info: t!("{}x{} (size guessed)", "{}x{} (taille devinee)", texel.width, texel.height) })
+        }
+        Kind::Bitmap => {
+            let rgba = g2d::read_bmp(&bytes).map_err(|e| e.to_string())?;
+            let info = format!("{}x{}", rgba.width, rgba.height);
+            Ok(Decoded::Image { rgba, info })
+        }
+        Kind::ZipFile => {
+            let lines = zip_lines(&bytes);
+            Ok(Decoded::Text { lines, info: t!("Zip archive: the list of its files", "Archive zip : la liste de ses fichiers") })
+        }
+        Kind::PaletteTiles => {
+            let inner = decompress_any(&bytes).unwrap_or_else(|| bytes.clone());
+            let (palette, tiles) = g2d::read_palette_tiles(&inner).ok_or(tr("unreadable tile sheet", "planche de tuiles illisible"))?;
+            if c.width == 0 {
+                // 40 tuiles de large = 320 pixels, la largeur des planches de Heroes of Mana
+                c.width = if tiles.count() % 40 == 0 && tiles.count() % 32 != 0 { 40 } else { 32 };
+            }
+            let info = t!("{} tiles {} bpp, palette included", "{} tuiles {} bpp, palette incluse", tiles.count(), if tiles.bpp8 { 8 } else { 4 });
+            Ok(Decoded::Image { rgba: g2d::render_tiles(&tiles, &palette, 0, c.width), info })
+        }
+        Kind::AnmFile => Ok(Decoded::Text { lines: anm_lines(&bytes), info: t!("Animation not played: its content", "Animation pas jouee : son contenu") }),
+        Kind::ZImage => {
+            let inner = decompress_any(&bytes).unwrap_or_else(|| bytes.clone());
+            match g2d::read_z_image(&inner) {
+                Some(rgba) => {
+                    let info = format!("{}x{}", rgba.width, rgba.height);
+                    Ok(Decoded::Image { rgba, info })
+                }
+                None => Ok(Decoded::Text { lines: text_lines(&inner), info: t!("Not an image: {} once decompressed", "Pas une image : {} une fois decompresse", size_text(inner.len())) }),
+            }
+        }
+        Kind::Video => Ok(Decoded::Text { lines: video_lines(&bytes), info: t!("Video: not played", "Video : pas lue") }),
+        Kind::Texel | Kind::TextureRef => {
+            let texel_bytes = if kind == Kind::Texel { bytes.clone() } else { load(&c.linked, c.link)?.ok_or(tr("texture file not found", "fichier de la texture introuvable"))? };
+            let texel = g2d::read_texel(&texel_bytes).map_err(|e| e.to_string())?;
+            let palette = match load(&c.palettes, c.palette)? {
+                Some(p) => g2d::read_palette(&p).map_err(|e| e.to_string())?,
+                None => g2d::Palette { colors: (0..=255).map(|i| [i, i, i, 255]).collect() },
+            };
+            let rgba = g2d::render_texel(&texel, &palette).map_err(|e| e.to_string())?;
+            Ok(Decoded::Image { rgba, info: t!("{}x{}, DS texture format {}", "{}x{}, format de texture DS {}", texel.width, texel.height, texel.format) })
+        }
+        Kind::EngineBitmap => {
+            let palette = match load(&c.palettes, c.palette)? {
+                Some(p) => g2d::read_palette(&p).map_err(|e| e.to_string())?,
+                None => g2d::Palette { colors: (0..=255).map(|i| [i, i, i, 255]).collect() },
+            };
+            let rgba = g2d::render_engine_bitmap(&bytes, &palette).map_err(|e| e.to_string())?;
+            let info = format!("{}x{}", rgba.width, rgba.height);
+            Ok(Decoded::Image { rgba, info })
+        }
+        Kind::Font => {
+            let (rgba, count) = g2d::render_font(&bytes).map_err(|e| e.to_string())?;
+            Ok(Decoded::Image { rgba, info: t!("{count} characters", "{count} caracteres") })
+        }
+        Kind::Messages => {
+            let lines = if bytes.starts_with(b"GNAL") { lang_lines(&bytes) } else { bmg_lines(&bytes) };
+            let info = t!("{} messages", "{} messages", lines.len());
+            Ok(Decoded::Text { lines, info })
+        }
+        Kind::RawPalette => {
+            let p = g2d::raw_palette(&bytes);
+            Ok(Decoded::Image { rgba: p.swatches(), info: t!("{} colors", "{} couleurs", p.colors.len()) })
+        }
+        Kind::RawTiles | Kind::RawScreen => {
+            let palette = load(&c.palettes, c.palette)?.map(|p| g2d::raw_palette(&p));
+            let tiles_bytes = if kind == Kind::RawTiles { Some(bytes.clone()) } else { load(&c.tiles, c.tile)? };
+            let tiles = g2d::raw_tiles(&tiles_bytes.ok_or(tr("no tile file (.nbfc) found", "aucun fichier de tuiles (.nbfc) trouve"))?, palette.as_ref());
+            let palette = palette.unwrap_or_else(|| grey_palette(&tiles));
+            if kind == Kind::RawScreen {
+                let screen = g2d::raw_screen(&bytes);
+                return Ok(Decoded::Image { rgba: g2d::render_screen(&screen, &tiles, &palette), info: t!("screen {}x{}", "ecran {}x{}", screen.width, screen.height) });
+            }
+            c.banks = if tiles.bpp8 { 1 } else { palette.banks() };
+            c.bank = c.bank.min(c.banks.saturating_sub(1));
+            if c.width == 0 {
+                c.width = tiles.default_width();
+            }
+            let info = t!("{} tiles {} bpp", "{} tuiles {} bpp", tiles.count(), if tiles.bpp8 { 8 } else { 4 });
+            Ok(Decoded::Image { rgba: g2d::render_tiles(&tiles, &palette, c.bank, c.width), info })
         }
         Kind::Textures => {
             let cont = model3d::read(&bytes).map_err(|e| e.to_string())?;
@@ -594,9 +1064,75 @@ fn decode_inner(entries: &[Entry], sel: usize, c: &mut Choices) -> Result<Decode
             }
             Ok(Decoded::Model { model: models.swap_remove(c.model), own_textures: own.textures.len() })
         }
-        // Scripts et fichiers maison : leurs textes et leurs octets
-        _ => Ok(Decoded::Text { lines: text_lines(&bytes), info: t!("Not decoded: its text and bytes", "Pas decode : ses textes et ses octets") }),
+        Kind::Nitro3dOther => {
+            // Animations de matériaux (.nsbta, .nsbtp...) : ce qu'elles contiennent, sans les jouer
+            let mut lines = Vec::new();
+            if let Ok(cont) = model3d::read(&bytes) {
+                lines.extend(cont.patterns.iter().map(|p| t!("Texture animation {}: {} frames", "Animation de textures {} : {} images", p.name, p.num_frames)));
+                lines.extend(cont.mat_anims.iter().map(|m| t!("Material animation {}: {} frames", "Animation de materiau {} : {} images", m.name, m.num_frames)));
+            }
+            lines.push(String::new());
+            lines.extend(text_lines(&bytes));
+            Ok(Decoded::Text { lines, info: t!("Animation not played: its content", "Animation pas jouee : son contenu") })
+        }
+        // Scripts et fichiers maison : leurs textes et leurs octets (décompressés s'ils le sont)
+        _ => match decompress_any(&bytes) {
+            Some(inner) => {
+                let info = t!("Not decoded: {} once decompressed", "Pas decode : {} une fois decompresse", size_text(inner.len()));
+                Ok(Decoded::Text { lines: text_lines(&inner), info })
+            }
+            None => Ok(Decoded::Text { lines: text_lines(&bytes), info: t!("Not decoded: its text and bytes", "Pas decode : ses textes et ses octets") }),
+        },
     }
+}
+
+pub const THUMB_SIZE: u32 = 96;
+/// Images gardées au plus pour une vignette animée.
+const THUMB_FRAMES: usize = 24;
+
+/// L'image dans un carré de la vignette : agrandie sans lissage (d'un nombre entier de fois) ou réduite, centrée.
+fn fit_thumb(image: &Rgba) -> Rgba {
+    let side = THUMB_SIZE as usize;
+    let mut out = Rgba { width: THUMB_SIZE, height: THUMB_SIZE, data: vec![0; side * side * 4] };
+    let longest = image.width.max(image.height).max(1) as f32;
+    let scale = if longest > THUMB_SIZE as f32 { THUMB_SIZE as f32 / longest } else { (THUMB_SIZE as f32 / longest).floor().max(1.0) };
+    let (w, h) = (((image.width as f32 * scale) as usize).clamp(1, side), ((image.height as f32 * scale) as usize).clamp(1, side));
+    let (ox, oy) = ((side - w) / 2, (side - h) / 2);
+    for y in 0..h {
+        for x in 0..w {
+            let sx = ((x as f32 / scale) as usize).min(image.width.max(1) as usize - 1);
+            let sy = ((y as f32 / scale) as usize).min(image.height.max(1) as usize - 1);
+            let from = (sy * image.width as usize + sx) * 4;
+            if let Some(pixel) = image.data.get(from..from + 4) {
+                let to = ((oy + y) * side + ox + x) * 4;
+                out.data[to..to + 4].copy_from_slice(pixel);
+            }
+        }
+    }
+    out
+}
+
+/// La vignette de `sel` : une ou plusieurs images (avec leur durée en 1/60 s) ; `None` pour un fichier sans image.
+pub fn thumbnail(entries: &[Entry], sel: usize) -> Option<Vec<(Rgba, u16)>> {
+    catch_unwind(AssertUnwindSafe(|| {
+        let mut choices = choices_for(entries, sel);
+        match decode(entries, sel, &mut choices).ok()? {
+            Decoded::Image { rgba, .. } => Some(vec![(fit_thumb(&rgba), 60)]),
+            Decoded::Audio { waveform, .. } => Some(vec![(fit_thumb(&waveform), 60)]),
+            Decoded::Frames { frames, .. } => {
+                let step = frames.len().div_ceil(THUMB_FRAMES).max(1);
+                Some(frames.chunks(step).map(|group| (fit_thumb(&group[0].0), group.iter().map(|f| f.1).sum())).collect())
+            }
+            Decoded::Model { model, .. } => Some(vec![(model3d::render_thumbnail(&model, None, model.min, model.max, THUMB_SIZE), 60)]),
+            Decoded::Animated { model, animation } => {
+                let step = animation.frames.len().div_ceil(THUMB_FRAMES).max(1);
+                let duration = animation.step.saturating_mul(step as u16).max(1);
+                Some(animation.frames.iter().step_by(step).map(|pose| (model3d::render_thumbnail(&model, Some(pose), animation.min, animation.max, THUMB_SIZE), duration)).collect())
+            }
+            Decoded::Text { .. } => None,
+        }
+    }))
+    .unwrap_or(None)
 }
 
 /// L'aperçu de `sel`. Un fichier mal formé donne une erreur, il ne fait pas tomber le studio.
@@ -868,6 +1404,66 @@ mod tests {
         let path = dir.join("jeu.nds");
         std::fs::write(&path, rom).unwrap();
         path
+    }
+
+    #[test]
+    fn raw_files_are_known_by_their_extension() {
+        assert_eq!(by_extension(Kind::Other, "data/icon.NBFC"), Kind::RawTiles);
+        assert_eq!(by_extension(Kind::Other, "a.nbfp"), Kind::RawPalette);
+        assert_eq!(by_extension(Kind::Other, "a.xyz"), Kind::Other);
+        assert_eq!(by_extension(Kind::Other, "a.txt"), Kind::PlainText);
+        assert_eq!(by_extension(Kind::Model, "a.nbfc"), Kind::Model);
+    }
+
+    #[test]
+    fn splits_tables_of_positions() {
+        let mut bytes: Vec<u8> = [8u32, 12].iter().flat_map(|v| v.to_le_bytes()).collect();
+        bytes.extend(b"AAAABB");
+        assert_eq!(table_members(&bytes), [(8, 12), (12, 14)]);
+        assert!(table_members(b"pas une table").is_empty());
+        assert!(table_members(&[0u8; 16]).is_empty());
+    }
+
+    #[test]
+    fn reads_all_parts_of_a_mesh() {
+        // Battle of Giants : plusieurs morceaux, sans palette
+        let long = b"HSEM\x02\0\0\0\x0E\0\0\x003d/geometry/a\0\x03\0\0\x00t/a\0\0\x03\0\xFF\x7F\x0E\0\0\x003d/geometry/b\0\x03\0\0\x00t/b\0\0";
+        let parts = mesh_parts(long);
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[1], ("3d/geometry/b".to_string(), "t/b".to_string(), None));
+        // Rayman : compte sur un octet, palette nommée
+        let short = b"HSEM\x01\x0D\0\0\x003d/geometry/a\x03\0\0\x00t/a\x0C\0\0\x003d/palette/p";
+        assert_eq!(mesh_parts(short), [("3d/geometry/a".to_string(), "t/a".to_string(), Some("3d/palette/p".to_string()))]);
+    }
+
+    #[test]
+    fn reads_video_headers() {
+        let mut b = vec![0u8; 0x24];
+        b[0..4].copy_from_slice(b"BIKi");
+        b[8] = 100;
+        b[0x15] = 1;
+        b[0x18] = 192;
+        b[0x1C] = 30;
+        b[0x20] = 1;
+        assert!(video_lines(&b)[0].contains("256x192, 100 frames, 30.0"));
+    }
+
+    #[test]
+    fn reads_engine_texts_and_texture_links() {
+        let mut b = b"GNAL\x01\0\0\0\0\0\0\0\x01\0\0\0\x02\0\0\0Hi".to_vec();
+        assert_eq!(lang_lines(&b), ["   0  Hi"]);
+        b = b"TXET\x03\0\0\0a/b\x04\0\0\0c/d\0".to_vec();
+        assert_eq!(texture_ref(&b), Some(("a/b".to_string(), "c/d".to_string())));
+    }
+
+    #[test]
+    fn reads_bmg_messages() {
+        let mut b = vec![0u8; 0x20];
+        b[0..8].copy_from_slice(b"MESGbmg1");
+        b[0x10] = 2;
+        b.extend(b"INF1\x18\0\0\0\x01\0\x04\0\0\0\0\0\x02\0\0\0\0\0\0\0");
+        b.extend(b"DAT1\x10\0\0\0\0\0H\0i\0\0\0\0\0");
+        assert_eq!(bmg_lines(&b), ["   0  Hi"]);
     }
 
     #[test]

@@ -217,6 +217,101 @@ pub fn build_animation(model: &Model, animation: &Animation) -> Option<AnimOut> 
     Some(AnimOut { name: animation.name.to_string(), frames, step, min, max })
 }
 
+/// Dessine le modèle dans une image carrée, sans carte graphique (pour les vignettes) : vu de trois quarts, chaque
+/// morceau aux positions de `pose` s'il y en a. `min` et `max` : la boîte à montrer (la même pour toute une animation).
+pub fn render_thumbnail(model: &ModelOut, pose: Option<&[(Vec<[f32; 3]>, Vec<[f32; 3]>)]>, min: [f32; 3], max: [f32; 3], size: u32) -> Rgba {
+    let side = size as usize;
+    let mut out = Rgba { width: size, height: size, data: vec![0; side * side * 4] };
+    let mut depth = vec![f32::MIN; side * side];
+    let center = [(min[0] + max[0]) / 2.0, (min[1] + max[1]) / 2.0, (min[2] + max[2]) / 2.0];
+    let radius = ((max[0] - min[0]).powi(2) + (max[1] - min[1]).powi(2) + (max[2] - min[2]).powi(2)).sqrt().max(0.001) / 2.0;
+    let (sin_yaw, cos_yaw) = 0.6f32.sin_cos();
+    let (sin_pitch, cos_pitch) = 0.35f32.sin_cos();
+    let turn = |v: [f32; 3]| {
+        let (x, z) = (cos_yaw * v[0] + sin_yaw * v[2], cos_yaw * v[2] - sin_yaw * v[0]);
+        [x, cos_pitch * v[1] - sin_pitch * z, sin_pitch * v[1] + cos_pitch * z]
+    };
+    let half = size as f32 / 2.0;
+    for (index, part) in model.parts.iter().enumerate() {
+        let moved = pose.and_then(|p| p.get(index));
+        let positions = moved.map_or(&part.positions, |m| &m.0);
+        let normals = moved.map_or(&part.normals, |m| &m.1);
+        let material = model.materials.get(part.material);
+        let texture = material.and_then(|m| m.texture.as_ref());
+        let screen: Vec<[f32; 3]> = positions
+            .iter()
+            .map(|p| {
+                let t = turn([p[0] - center[0], p[1] - center[1], p[2] - center[2]]);
+                [half + t[0] / radius * half * 0.95, half - t[1] / radius * half * 0.95, t[2]]
+            })
+            .collect();
+        for tri in part.indices.chunks_exact(3) {
+            let [a, b, c] = [tri[0] as usize, tri[1] as usize, tri[2] as usize];
+            let (Some(pa), Some(pb), Some(pc)) = (screen.get(a), screen.get(b), screen.get(c)) else { continue };
+            let area = (pb[0] - pa[0]) * (pc[1] - pa[1]) - (pb[1] - pa[1]) * (pc[0] - pa[0]);
+            if area.abs() < 0.0001 {
+                continue;
+            }
+            let (left, right) = (pa[0].min(pb[0]).min(pc[0]).floor().max(0.0) as usize, pa[0].max(pb[0]).max(pc[0]).ceil().min(size as f32 - 1.0) as usize);
+            let (top, bottom) = (pa[1].min(pb[1]).min(pc[1]).floor().max(0.0) as usize, pa[1].max(pb[1]).max(pc[1]).ceil().min(size as f32 - 1.0) as usize);
+            for y in top..=bottom {
+                for x in left..=right {
+                    let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+                    let w0 = ((pb[0] - px) * (pc[1] - py) - (pb[1] - py) * (pc[0] - px)) / area;
+                    let w1 = ((pc[0] - px) * (pa[1] - py) - (pc[1] - py) * (pa[0] - px)) / area;
+                    let w2 = 1.0 - w0 - w1;
+                    if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
+                        continue;
+                    }
+                    let z = w0 * pa[2] + w1 * pb[2] + w2 * pc[2];
+                    let at = y * side + x;
+                    if z <= depth[at] {
+                        continue;
+                    }
+                    let mix = |v: [f32; 4], u: [f32; 4], t: [f32; 4], i: usize| w0 * v[i] + w1 * u[i] + w2 * t[i];
+                    let (ca, cb, cc) = (part.colors.get(a).copied().unwrap_or([1.0; 4]), part.colors.get(b).copied().unwrap_or([1.0; 4]), part.colors.get(c).copied().unwrap_or([1.0; 4]));
+                    let mut color = [mix(ca, cb, cc, 0), mix(ca, cb, cc, 1), mix(ca, cb, cc, 2)];
+                    if let (Some(texture), Some(material)) = (texture, material) {
+                        let uv = |i: usize| part.uvs.get(i).copied().unwrap_or([0.0; 2]);
+                        let (ua, ub, uc) = (uv(a), uv(b), uv(c));
+                        let wrap = |value: f32, repeat: bool, mirror: bool, length: u32| {
+                            let unit = if !repeat {
+                                value.clamp(0.0, 0.999)
+                            } else if mirror {
+                                let m = value.rem_euclid(2.0);
+                                if m > 1.0 { (2.0 - m).min(0.999) } else { m.min(0.999) }
+                            } else {
+                                value.rem_euclid(1.0)
+                            };
+                            (unit * length as f32) as usize
+                        };
+                        let tx = wrap(w0 * ua[0] + w1 * ub[0] + w2 * uc[0], material.repeat_s, material.mirror_s, texture.width);
+                        let ty = wrap(w0 * ua[1] + w1 * ub[1] + w2 * uc[1], material.repeat_t, material.mirror_t, texture.height);
+                        let p = (ty * texture.width as usize + tx) * 4;
+                        let Some(texel) = texture.data.get(p..p + 4) else { continue };
+                        if texel[3] < 128 {
+                            continue;
+                        }
+                        for i in 0..3 {
+                            color[i] *= texel[i] as f32 / 255.0;
+                        }
+                    }
+                    if part.lit {
+                        let n = |i: usize| normals.get(i).copied().unwrap_or([0.0; 3]);
+                        let (na, nb, nc) = (n(a), n(b), n(c));
+                        let normal = turn([w0 * na[0] + w1 * nb[0] + w2 * nc[0], w0 * na[1] + w1 * nb[1] + w2 * nc[1], w0 * na[2] + w1 * nb[2] + w2 * nc[2]]);
+                        let light = 0.55 + 0.45 * (normal[2] * 0.8 + normal[1] * 0.6).max(0.0);
+                        color = color.map(|v| v * light);
+                    }
+                    depth[at] = z;
+                    out.data[at * 4..at * 4 + 4].copy_from_slice(&[(color[0] * 255.0) as u8, (color[1] * 255.0) as u8, (color[2] * 255.0) as u8, 255]);
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Toutes les textures d'un fichier (NSBTX ou NSBMD), chacune avec la palette de même nom ou la
 /// première venue, pour les montrer à plat.
 pub fn texture_sheet(cont: &Container) -> Vec<(String, Result<Rgba>)> {

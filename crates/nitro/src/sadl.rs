@@ -26,8 +26,7 @@ fn clamp16(value: i32) -> i16 {
 }
 
 /// Une voie en IMA ADPCM : le quartet faible de chaque octet d'abord.
-fn ima(blocks: impl Iterator<Item = u8>) -> Vec<i16> {
-    let (mut sample, mut index) = (0i32, 0i32);
+pub(crate) fn ima(blocks: impl Iterator<Item = u8>, mut sample: i32, mut index: i32) -> Vec<i16> {
     let mut out = Vec::new();
     for byte in blocks {
         for nibble in [byte & 0xF, byte >> 4] {
@@ -90,7 +89,7 @@ pub fn decode(file: &[u8]) -> Result<Sound> {
     let blocks = data.len() / BLOCK / channels;
     let voice = |c: usize| (0..blocks).map(move |b| (b * channels + c) * BLOCK);
     let voices: Vec<Vec<i16>> = match flags & 0xF0 {
-        0x70 => (0..channels).map(|c| ima(voice(c).flat_map(|at| data[at..at + BLOCK].iter().copied()))).collect(),
+        0x70 => (0..channels).map(|c| ima(voice(c).flat_map(|at| data[at..at + BLOCK].iter().copied()), 0, 0)).collect(),
         0xB0 => (0..channels).map(|c| procyon(voice(c).map(|at| data[at..at + BLOCK].try_into().unwrap_or([0; BLOCK])))).collect(),
         _ => bail!("sadl : codage inconnu ({:#x})", flags),
     };
