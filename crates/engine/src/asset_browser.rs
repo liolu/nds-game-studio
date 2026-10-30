@@ -1130,6 +1130,7 @@ fn rebuild_controls(mut commands: Commands, mut b: ResMut<AssetBrowser>, childre
         let what = match kind {
             Some(Kind::ModelAnim) => tr("Model", "Modele"),
             Some(Kind::TextureRef) => "Texture",
+            Some(Kind::Tiles) => tr("Screen", "Ecran"),
             _ => tr("Cells", "Cellules"),
         };
         steps.push((Ctl::Link, format!("{what}: {}", name(&c.linked, c.link))));
@@ -1163,16 +1164,20 @@ fn rebuild_controls(mut commands: Commands, mut b: ResMut<AssetBrowser>, childre
 fn step_choice(activate: On<Activate>, steps: Query<&StepButton>, mut b: ResMut<AssetBrowser>) {
     let Ok(&StepButton(ctl, dir)) = steps.get(activate.entity) else { return };
     let wrap = |v: usize, n: usize| if n == 0 { 0 } else { (v as i64 + dir as i64).rem_euclid(n as i64) as usize };
+    // Une planche : ses écrans, puis la planche elle-même
+    let sheet = usize::from(b.selected.is_some_and(|s| b.entries[s].kind == Kind::Tiles));
+    // Des tuiles brutes peuvent aussi rester en gris
+    let grey = usize::from(b.selected.is_some_and(|s| b.entries[s].kind == Kind::RawTiles));
     let c = &mut b.choices;
     match ctl {
-        Ctl::Palette => c.palette = wrap(c.palette, c.palettes.len()),
+        Ctl::Palette => c.palette = wrap(c.palette, c.palettes.len() + grey),
         Ctl::Tiles => c.tile = wrap(c.tile, c.tiles.len()),
         Ctl::Textures => c.texture = wrap(c.texture, c.textures.len() + 1),
         Ctl::Bank => c.bank = wrap(c.bank, c.banks),
         Ctl::Width => c.width = (c.width as i64 + dir as i64).clamp(1, 256) as u32,
         Ctl::Cell => c.cell = wrap(c.cell, c.cells),
         Ctl::Model => c.model = wrap(c.model, c.models),
-        Ctl::Link => c.link = wrap(c.link, c.linked.len()),
+        Ctl::Link => c.link = wrap(c.link, c.linked.len() + sheet),
         Ctl::Anim => c.anim = wrap(c.anim, c.anims),
     }
     b.preview_dirty = true;

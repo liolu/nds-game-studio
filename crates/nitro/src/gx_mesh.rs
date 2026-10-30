@@ -46,7 +46,49 @@ pub fn read_geometry(file: &[u8], texture: Option<Rgba>, name: &str) -> Result<M
         bail!("pas un fichier GEOM");
     }
     let Some(size) = file.get(4..8).map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]) as usize) else { bail!("GEOM trop court") };
-    let cmds = file.get(8..8 + size).unwrap_or_else(|| file.get(8..).unwrap_or(&[]));
+    read_commands(file.get(8..8 + size).unwrap_or_else(|| file.get(8..).unwrap_or(&[])), texture, name)
+}
+
+/// Un maillage du monde de Tom and Jerry (`.z` décompressé) : échelle en 20.12, 2 u16, boîte (6 i16), nombre de morceaux,
+/// leurs positions depuis cette table. Chaque morceau : hauteur et profondeur de son centre (2 i32), un u32, sa boîte
+/// (6 i16), taille, commandes GX.
+pub fn read_world_mesh(file: &[u8], name: &str, mut texture_of: impl FnMut(usize) -> Option<Rgba>) -> Option<ModelOut> {
+    const MAX_PARTS: usize = 4096;
+    const TABLE_AT: usize = 0x18;
+    let u32_at = |at: usize| file.get(at..at + 4).map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]));
+    const MAX_SCALE: u32 = 0x100000;
+    let scale = u32_at(0)?;
+    if scale == 0 || scale > MAX_SCALE || scale % 0x1000 != 0 {
+        return None;
+    }
+    let scale = scale as f32 / 4096.0;
+    let count = u32_at(0x14)? as usize;
+    if count == 0 || count > MAX_PARTS {
+        return None;
+    }
+    let mut models = Vec::with_capacity(count);
+    for i in 0..count {
+        let base = TABLE_AT + u32_at(TABLE_AT + i * 4)? as usize;
+        let center = [0, u32_at(base)? as i32, u32_at(base + 4)? as i32].map(|v| v as f32 / 4096.0);
+        let size = u32_at(base + 0x18)? as usize;
+        let Ok(mut model) = read_commands(file.get(base + 0x1C..base + 0x1C + size)?, texture_of(i), name) else { continue };
+        let place = |at: f32, axis: usize| (at + center[axis]) * scale;
+        for part in &mut model.parts {
+            for position in &mut part.positions {
+                *position = [place(position[0], 0), place(position[1], 1), place(position[2], 2)];
+            }
+        }
+        for axis in 0..3 {
+            model.min[axis] = place(model.min[axis], axis);
+            model.max[axis] = place(model.max[axis], axis);
+        }
+        models.push(model);
+    }
+    merge(name, models)
+}
+
+/// Le modèle que dessine une liste de commandes GX.
+fn read_commands(cmds: &[u8], texture: Option<Rgba>, name: &str) -> Result<ModelOut> {
     let (tex_w, tex_h) = texture.as_ref().map_or((1.0, 1.0), |t| (t.width.max(1) as f64, t.height.max(1) as f64));
 
     let mut part = Part { positions: Vec::new(), normals: Vec::new(), uvs: Vec::new(), colors: Vec::new(), indices: Vec::new(), material: 0, lit: false };
@@ -127,6 +169,24 @@ pub fn merge(name: &str, models: Vec<ModelOut>) -> Option<ModelOut> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn places_the_parts_of_a_world_mesh() {
+        // Un triangle (BEGIN, 3 VTX_16) : centre à y = 1, échelle 2
+        let cmds = [[0x40u8, 0x23, 0x23, 0x23].as_slice(), &0u32.to_le_bytes(), &[0, 0, 0, 0, 0, 0, 0, 0], &[0, 0x10, 0, 0, 0, 0, 0, 0], &[0, 0, 0, 0x10, 0, 0, 0, 0]].concat();
+        let mut file = vec![0u8; 0x18];
+        file[..4].copy_from_slice(&0x2000u32.to_le_bytes());
+        file[0x14] = 1;
+        file.extend(4u32.to_le_bytes());
+        file.extend(0x1000i32.to_le_bytes());
+        file.extend([0; 8 + 12]);
+        file.extend((cmds.len() as u32).to_le_bytes());
+        file.extend(&cmds);
+        let model = read_world_mesh(&file, "x", |_| None).unwrap();
+        assert_eq!(model.parts[0].positions[0], [0.0, 2.0, 0.0]);
+        assert_eq!(model.parts[0].positions[1], [2.0, 2.0, 0.0]);
+        assert_eq!(model.max[1], 4.0);
+    }
 
     #[test]
     fn assembles_triangles_from_each_group_type() {

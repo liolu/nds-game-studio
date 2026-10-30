@@ -120,7 +120,9 @@ fichiers des jeux, pour voir leurs modèles 3D et leurs images et nommer les obj
 - **Compression** : tout fichier compressé par le BIOS de la DS (LZ77, RLE, Huffman) est décompressé, même s'il
   s'appelle `.bin` ; un fichier Nitro dedans s'ouvre normalement. MySims : `NCG`, `NCL`, `NSC` s'ouvrent aussi.
 - **Animations de matériaux** `.nsbta`, `.nsbtp`, `.nsbma`, `.nsbva` : leur contenu, pas encore jouées.
-- **`.z`** (Tom and Jerry) : images, écrans et textures décompressés ; le reste (polices, maillages) montre ses octets.
+- **`.z`** (Tom and Jerry) : images, écrans, textures et maillages du monde (avec leurs textures, listées par le `.xof`) ; le reste (polices, collisions) montre ses octets.
+- **Planches de tuiles** : assemblées par leur écran quand il est connu (`.nscr` du même nom, bloc LINK, ou écran qui suit dans une archive sans noms) ; le contrôle Ecran permet de revenir à la planche. Dans une archive sans noms, la palette d'une planche 8 bits est celle qui colore le plus de ses pixels.
+- **`.bin` bruts** : `*Tiles.bin`, `*Palette.bin` et les `.bin` d'un dossier `bg` sont lus comme tuiles et palettes, en gris si aucune palette n'a un nom proche.
   **`.anm`** : un résumé, pas jouées.
 - **Autres images** : `.bmp`, `.bstga` (MySims), `.ntft` avec sa palette `.ntfp` (taille devinée), palettes `.plb`.
 - **Vidéos** `.bik`, `.vx`, `.mods` : leurs caractéristiques, pas lues. **Archives** `.zip` : la liste de leurs fichiers.

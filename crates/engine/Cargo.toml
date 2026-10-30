@@ -6,7 +6,7 @@ description = "Moteur de jeux DS natifs (Bevy) : deux ecrans 256x192, fenetres l
 
 [dependencies]
 # wav : jouer les sons des jeux (fenetre Assets)
-bevy = { workspace = true, features = ["wav"] }
+bevy = { workspace = true, features = ["wav", "system_clipboard"] }
 encoding_rs = "0.8"
 nds-nitro = { path = "../nitro" }
 serde = { version = "1", features = ["derive"] }
