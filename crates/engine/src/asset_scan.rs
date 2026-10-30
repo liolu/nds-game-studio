@@ -19,6 +19,8 @@ use std::sync::{Arc, Mutex};
 use nds_nitro::{g2d, model3d, narc, sniff, unpack, Kind, Rgba};
 use serde::{Deserialize, Serialize};
 
+use crate::i18n::{t, tr};
+
 /// À changer quand le calcul change : l'index gardé est alors refait.
 const INDEX_VERSION: u32 = 1;
 const BIG_FILE: usize = 4 << 20;
@@ -272,11 +274,23 @@ pub enum Decoded {
 
 pub fn size_text(size: usize) -> String {
     if size >= 1 << 20 {
-        format!("{:.1} Mo", size as f64 / (1 << 20) as f64)
+        t!("{:.1} MB", "{:.1} Mo", size as f64 / (1 << 20) as f64)
     } else if size >= 1024 {
-        format!("{} Ko", size / 1024)
+        t!("{} KB", "{} Ko", size / 1024)
     } else {
-        format!("{size} o")
+        t!("{size} B", "{size} o")
+    }
+}
+
+/// Le nom du type de fichier dans la langue choisie (`Kind::label` reste la clé en français).
+pub fn kind_text(kind: Kind) -> &'static str {
+    match kind.label() {
+        "modele 3D" => tr("3D model", "modele 3D"),
+        "textures 3D" => tr("3D textures", "textures 3D"),
+        "tuiles" => tr("tiles", "tuiles"),
+        "ecran" => tr("screen", "ecran"),
+        "cellules" => tr("cells", "cellules"),
+        other => other,
     }
 }
 
@@ -312,11 +326,11 @@ fn decode_inner(entries: &[Entry], sel: usize, c: &mut Choices) -> Result<Decode
     match kind {
         Kind::Palette => {
             let p = g2d::read_palette(&bytes).map_err(|e| e.to_string())?;
-            Ok(Decoded::Image { rgba: p.swatches(), info: format!("{} couleurs", p.colors.len()) })
+            Ok(Decoded::Image { rgba: p.swatches(), info: t!("{} colors", "{} couleurs", p.colors.len()) })
         }
         Kind::Tiles | Kind::Screen | Kind::Cells => {
             let tiles_bytes = if kind == Kind::Tiles { Some(bytes.clone()) } else { load(&c.tiles, c.tile)? };
-            let tiles = g2d::read_tiles(tiles_bytes.as_deref().ok_or("aucun fichier de tuiles (.ncgr) trouve")?).map_err(|e| e.to_string())?;
+            let tiles = g2d::read_tiles(tiles_bytes.as_deref().ok_or(tr("no tile file (.ncgr) found", "aucun fichier de tuiles (.ncgr) trouve"))?).map_err(|e| e.to_string())?;
             let palette = match load(&c.palettes, c.palette)? {
                 Some(p) => g2d::read_palette(&p).map_err(|e| e.to_string())?,
                 // Sans palette : niveaux de gris
@@ -324,7 +338,7 @@ fn decode_inner(entries: &[Entry], sel: usize, c: &mut Choices) -> Result<Decode
             };
             c.banks = if tiles.bpp8 { 1 } else { palette.banks() };
             c.bank = c.bank.min(c.banks.saturating_sub(1));
-            let what = format!("{} tuiles {} bpp{}", tiles.count(), if tiles.bpp8 { 8 } else { 4 }, if tiles.linear { " (bitmap)" } else { "" });
+            let what = t!("{} tiles {} bpp{}", "{} tuiles {} bpp{}", tiles.count(), if tiles.bpp8 { 8 } else { 4 }, if tiles.linear { " (bitmap)" } else { "" });
             match kind {
                 Kind::Tiles => {
                     if c.width == 0 {
@@ -334,14 +348,14 @@ fn decode_inner(entries: &[Entry], sel: usize, c: &mut Choices) -> Result<Decode
                 }
                 Kind::Screen => {
                     let screen = g2d::read_screen(&bytes).map_err(|e| e.to_string())?;
-                    Ok(Decoded::Image { rgba: g2d::render_screen(&screen, &tiles, &palette), info: format!("ecran {}x{}, {what}", screen.width, screen.height) })
+                    Ok(Decoded::Image { rgba: g2d::render_screen(&screen, &tiles, &palette), info: t!("screen {}x{}, {what}", "ecran {}x{}, {what}", screen.width, screen.height) })
                 }
                 _ => {
                     let cells = g2d::read_cells(&bytes).map_err(|e| e.to_string())?;
                     c.cells = cells.cells.len();
                     c.cell = c.cell.min(c.cells.saturating_sub(1));
                     let objs = cells.cells.get(c.cell).map_or(0, |o| o.len());
-                    Ok(Decoded::Image { rgba: g2d::render_cell(&cells, c.cell, &tiles, &palette), info: format!("{} cellules ({objs} OBJ), {what}", cells.cells.len()) })
+                    Ok(Decoded::Image { rgba: g2d::render_cell(&cells, c.cell, &tiles, &palette), info: t!("{} cells ({objs} OBJ), {what}", "{} cellules ({objs} OBJ), {what}", cells.cells.len()) })
                 }
             }
         }
@@ -366,17 +380,17 @@ fn decode_inner(entries: &[Entry], sel: usize, c: &mut Choices) -> Result<Decode
             c.models = models.len();
             c.model = c.model.min(models.len().saturating_sub(1));
             if models.is_empty() {
-                return Err("aucun modele dans le fichier".into());
+                return Err(tr("no model in the file", "aucun modele dans le fichier").into());
             }
             Ok(Decoded::Model { model: models.swap_remove(c.model), own_textures: own.textures.len() })
         }
-        _ => Err("format non pris en charge".into()),
+        _ => Err(tr("unsupported format", "format non pris en charge").into()),
     }
 }
 
 /// L'aperçu de `sel`. Un fichier mal formé donne une erreur, il ne fait pas tomber le studio.
 pub fn decode(entries: &[Entry], sel: usize, c: &mut Choices) -> Result<Decoded, String> {
-    catch_unwind(AssertUnwindSafe(|| decode_inner(entries, sel, c))).unwrap_or_else(|_| Err("le decodage a plante (fichier inattendu)".into()))
+    catch_unwind(AssertUnwindSafe(|| decode_inner(entries, sel, c))).unwrap_or_else(|_| Err(tr("decoding crashed (unexpected file)", "le decodage a plante (fichier inattendu)").into()))
 }
 
 // --------------------------------------------------------------------------------------------

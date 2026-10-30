@@ -16,6 +16,7 @@ pub mod asset_browser;
 pub mod asset_scan;
 pub mod controllers;
 pub mod devtools;
+pub mod i18n;
 pub mod input;
 pub mod launcher;
 pub mod library;
@@ -80,7 +81,7 @@ impl Plugin for NdsEnginePlugin {
                 }),
         )
         .add_plugins((screens::ScreensPlugin, link::LinkPlugin, input::InputPlugin, studio::StudioPlugin, titlebar::TitleBarPlugin, devtools::DevToolsPlugin, options::OptionsPlugin))
-            .add_plugins((save::SavePlugin, settings::SettingsPlugin, saves_page::SavesPagePlugin, asset_browser::AssetBrowserPlugin, launcher::LauncherPlugin));
+            .add_plugins((save::SavePlugin, settings::SettingsPlugin, saves_page::SavesPagePlugin, asset_browser::AssetBrowserPlugin, launcher::LauncherPlugin, i18n::I18nPlugin));
         options.apply_to_app(app);
     }
 }

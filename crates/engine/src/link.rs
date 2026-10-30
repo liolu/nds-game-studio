@@ -146,7 +146,7 @@ fn keys(keys: Res<ButtonInput<KeyCode>>, mut layout: ResMut<ScreenLayout>, mut t
     if keys.just_pressed(KeyCode::F8) {
         layout.aspect = layout.aspect.next();
         info!("F8 : format {}", layout.aspect.label());
-        say(format!("Format : {}  (F8)", layout.aspect.label()));
+        say(crate::i18n::t!("Format: {}  (F8)", "Format : {}  (F8)", layout.aspect.label()));
     }
 }
 
@@ -247,7 +247,7 @@ fn reconcile(
                 Some((inner, _, _)) => WindowPosition::At(inner + IVec2::new((48.0 * scale) as i32, ((single_h + 120.0) * scale) as i32)),
                 None => WindowPosition::Automatic,
             };
-            let title = format!("{} - ecran tactile", main_window.title);
+            let title = crate::i18n::t!("{} - touch screen", "{} - ecran tactile", main_window.title);
             let mut resolution = WindowResolution::new(w.max(128.0) as u32, single_h as u32);
             resolution.set_scale_factor_override(main_window.resolution.scale_factor_override());
             let bottom = commands.spawn(Window { title, resolution, position, decorations: false, ..default() }).id();

@@ -80,7 +80,7 @@ impl InstallerApp {
                     if shortcuts {
                         match create_platform_shortcuts(&dir, &target_exe(&dir)) {
                             Ok(created) => *progress.shortcuts.lock().unwrap() = created,
-                            Err(e) => eprintln!("Impossible de creer les raccourcis: {}", e),
+                            Err(e) => eprintln!("Cannot create the shortcuts: {}", e),
                         }
                     }
                 }
@@ -104,12 +104,12 @@ impl eframe::App for InstallerApp {
             });
 
             ui.add_enabled_ui(!busy && !finished, |ui| {
-                ui.label("Dossier d'installation :");
+                ui.label("Install folder:");
                 ui.horizontal(|ui| {
                     ui.add(egui::TextEdit::singleline(&mut self.path).desired_width(360.0));
                     if ui.button("Parcourir").clicked() {
                         if let Some(dir) = rfd::FileDialog::new()
-                            .set_title("Choisir le dossier d'installation")
+                            .set_title("Choose the install folder")
                             .pick_folder()
                         {
                             self.path = dir.join("Nds Game Studio").to_string_lossy().into_owned();
@@ -122,7 +122,7 @@ impl eframe::App for InstallerApp {
                 ui.vertical_centered(|ui| {
                     if ui.add_sized([150.0, 32.0], egui::Button::new("Installer")).clicked() {
                         if self.path.trim().is_empty() {
-                            self.launch_error = Some("Veuillez choisir un dossier d'installation.".into());
+                            self.launch_error = Some("Please choose an install folder.".into());
                         } else {
                             self.launch_error = None;
                             self.start_install(ctx);
@@ -139,19 +139,19 @@ impl eframe::App for InstallerApp {
                 let error = p.error.lock().unwrap().clone();
 
                 if let Some(e) = error {
-                    ui.colored_label(egui::Color32::LIGHT_RED, format!("L'installation a echoue :\n{}", e));
+                    ui.colored_label(egui::Color32::LIGHT_RED, format!("The installation failed:\n{}", e));
                 } else if p.done.load(Ordering::Relaxed) {
-                    ui.add(egui::ProgressBar::new(1.0).text("Installation terminee !"));
+                    ui.add(egui::ProgressBar::new(1.0).text("Installation complete!"));
                     for s in p.shortcuts.lock().unwrap().iter() {
-                        ui.small(format!("Raccourci cree : {}", s.display()));
+                        ui.small(format!("Shortcut created: {}", s.display()));
                     }
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        if ui.button("Lancer le jeu").clicked() {
+                        if ui.button("Start").clicked() {
                             let dir = self.install_dir();
                             match std::process::Command::new(target_exe(&dir)).current_dir(&dir).spawn() {
                                 Ok(_) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
-                                Err(e) => self.launch_error = Some(format!("Impossible de lancer le jeu : {}", e)),
+                                Err(e) => self.launch_error = Some(format!("Cannot start it: {}", e)),
                             }
                         }
                         if ui.button("Fermer").clicked() {
@@ -169,11 +169,11 @@ impl eframe::App for InstallerApp {
                 } else {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.label("Recuperation des informations...");
+                        ui.label("Getting information...");
                     });
                 }
             } else {
-                ui.label("Pret a installer");
+                ui.label("Ready to install");
             }
 
             if let Some(e) = &self.launch_error {
@@ -203,12 +203,12 @@ fn expand_tilde(path: &str) -> PathBuf {
 
 #[cfg(target_os = "macos")]
 fn shortcut_label() -> &'static str {
-    "Creer un raccourci sur le Bureau et dans Applications"
+    "Create a shortcut on the Desktop and in Applications"
 }
 
 #[cfg(not(target_os = "macos"))]
 fn shortcut_label() -> &'static str {
-    "Ajouter au menu des applications et au Bureau"
+    "Add to the applications menu and the Desktop"
 }
 
 /// macOS : petit bundle `Nds Game Studio.app` dans ~/Applications (visible dans

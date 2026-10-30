@@ -8,7 +8,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use ndsgs_common::{exe_name, Channel, VersionInfo, CHANNEL, GAME_BIN, LAUNCHER_BIN};
+use ndsgs_common::{exe_name, tr, Channel, VersionInfo, CHANNEL, GAME_BIN, LAUNCHER_BIN};
 
 fn main() -> eframe::Result {
     // Raccourcis qui ouvriraient le jeu directement : on les redirige vers ce launcher
@@ -171,12 +171,12 @@ impl LauncherApp {
                 && CHANNEL == Channel::Stable
                 && pinned.as_deref() == Some(ndsgs_common::VERSION);
             let stage = if is_pinned {
-                Stage::ReadyToPlay(format!("Version v{} verrouillee (choisie manuellement)", ndsgs_common::VERSION))
+                Stage::ReadyToPlay(format!("{} v{} {}", "Version", ndsgs_common::VERSION, tr("locked (chosen manually)", "verrouillee (choisie manuellement)")))
             } else {
                 match ndsgs_common::fetch_channel(channel, 5) {
                 Ok(info) if ndsgs_common::should_install(channel, &info) => Stage::Available(info),
-                Ok(_) => Stage::ReadyToPlay("Le jeu est a jour".into()),
-                Err(e) => Stage::ReadyToPlay(format!("Hors-ligne ou aucune version disponible ({})", e)),
+                Ok(_) => Stage::ReadyToPlay(tr("The game is up to date", "Le jeu est a jour").into()),
+                Err(e) => Stage::ReadyToPlay(format!("{} ({})", tr("Offline or no version available", "Hors-ligne ou aucune version disponible"), e)),
                 }
             };
             if shared.check_id.load(Ordering::SeqCst) == id {
@@ -210,7 +210,7 @@ impl LauncherApp {
         std::thread::spawn(move || {
             let result = download_and_apply(&info, &dir, &shared, &ctx);
             shared.set(match result {
-                Ok(()) => Stage::Installed(format!("{} installee", info.label())),
+                Ok(()) => Stage::Installed(format!("{} {}", info.label(), tr("installed", "installee"))),
                 Err(e) => Stage::Failed(e.to_string()),
             });
             ctx.request_repaint();
@@ -223,7 +223,7 @@ impl LauncherApp {
             return;
         }
         if !self.game_exe.exists() {
-            self.launch_error = Some(format!("{} introuvable", self.game_exe.display()));
+            self.launch_error = Some(format!("{} {}", self.game_exe.display(), tr("not found", "introuvable")));
             return;
         }
         match Command::new(&self.game_exe).current_dir(&self.install_dir).spawn() {
@@ -231,7 +231,7 @@ impl LauncherApp {
                 self.launched = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
-            Err(e) => self.launch_error = Some(format!("Impossible de lancer le jeu: {}", e)),
+            Err(e) => self.launch_error = Some(format!("{}: {}", tr("Cannot start the game", "Impossible de lancer le jeu"), e)),
         }
     }
 }
@@ -253,22 +253,22 @@ impl eframe::App for LauncherApp {
                     Channel::Dev => ("LOCAL", egui::Color32::GRAY),
                 };
                 ui.horizontal(|ui| {
-                    ui.label("Installe :");
+                    ui.label(tr("Installed:", "Installe :"));
                     ui.label(egui::RichText::new(badge).strong().color(color));
                     ui.label(ndsgs_common::installed_label());
                 });
-                ui.small("Nouvelle numerotation : AA.MM.JJ_HH:MM_vVERSION.REVISION (heure UTC)");
+                ui.small(tr("Numbering: YY.MM.DD_HH:MM_vVERSION.REVISION (UTC time)", "Nouvelle numerotation : AA.MM.JJ_HH:MM_vVERSION.REVISION (heure UTC)"));
                 ui.add_space(8.0);
 
                 // ── Choix du canal ──
                 ui.add_enabled_ui(!busy, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label("Version :");
+                        ui.label(tr("Version:", "Version :"));
                         let before = self.channel;
                         ui.radio_value(&mut self.channel, Channel::Stable, "Stable")
-                            .on_hover_text("Versions publiees, testees");
-                        ui.radio_value(&mut self.channel, Channel::Experimental, "Experimentale")
-                            .on_hover_text("Derniere version en cours de developpement (peut contenir des bugs)");
+                            .on_hover_text(tr("Published, tested versions", "Versions publiees, testees"));
+                        ui.radio_value(&mut self.channel, Channel::Experimental, Channel::Experimental.label())
+                            .on_hover_text(tr("Latest development version (may contain bugs)", "Derniere version en cours de developpement (peut contenir des bugs)"));
                         if self.channel != before {
                             self.pinned = None;
                             save_config(self.channel, None);
@@ -279,7 +279,7 @@ impl eframe::App for LauncherApp {
 
                 // ── Choix d'une version précise (retour à une ancienne version possible) ──
                 ui.add_enabled_ui(!busy, |ui| {
-                    let header = egui::CollapsingHeader::new("Choisir une version precise").show(ui, |ui| {
+                    let header = egui::CollapsingHeader::new(tr("Choose a specific version", "Choisir une version precise")).show(ui, |ui| {
                         let state = std::mem::replace(&mut *self.shared.releases.lock().unwrap(), ReleaseList::Loading);
                         match state {
                             ReleaseList::NotLoaded => {
@@ -290,12 +290,12 @@ impl eframe::App for LauncherApp {
                             ReleaseList::Loading => {
                                 ui.horizontal(|ui| {
                                     ui.spinner();
-                                    ui.label("Chargement des versions...");
+                                    ui.label(tr("Loading versions...", "Chargement des versions..."));
                                 });
                             }
                             ReleaseList::Failed(e) => {
-                                ui.colored_label(egui::Color32::LIGHT_RED, format!("Liste indisponible : {e}"));
-                                let retry = ui.small_button("Reessayer").clicked();
+                                ui.colored_label(egui::Color32::LIGHT_RED, format!("{}: {e}", tr("List unavailable", "Liste indisponible")));
+                                let retry = ui.small_button(tr("Retry", "Reessayer")).clicked();
                                 *self.shared.releases.lock().unwrap() = ReleaseList::Failed(e);
                                 if retry {
                                     self.load_releases();
@@ -305,7 +305,7 @@ impl eframe::App for LauncherApp {
                                 let current = format!("v{}", ndsgs_common::VERSION);
                                 let label_of = |v: &VersionInfo| {
                                     let tag = format!("v{}", v.version);
-                                    if CHANNEL == Channel::Stable && tag == current { format!("{tag} (installee)") } else { tag }
+                                    if CHANNEL == Channel::Stable && tag == current { format!("{tag} ({})", tr("installed", "installee")) } else { tag }
                                 };
                                 let chosen = self.picked.clone().or_else(|| list.first().map(|v| v.version.clone()));
                                 let shown = list
@@ -326,7 +326,7 @@ impl eframe::App for LauncherApp {
                                         let notes: String = v.release_notes.chars().take(300).collect();
                                         ui.small(notes);
                                     }
-                                    if ui.button(format!("Installer v{}", v.version)).clicked() {
+                                    if ui.button(format!("{} v{}", tr("Install", "Installer"), v.version)).clicked() {
                                         // Une version plus ancienne que la dernière est verrouillée,
                                         // sinon la mise à jour automatique la remplacerait au lancement suivant
                                         let is_latest = list.first().is_some_and(|l| l.version == v.version);
@@ -339,7 +339,7 @@ impl eframe::App for LauncherApp {
                                 *self.shared.releases.lock().unwrap() = ReleaseList::Loaded(list);
                             }
                         }
-                        if self.pinned.is_some() && ui.small_button("Reprendre les mises a jour automatiques").clicked() {
+                        if self.pinned.is_some() && ui.small_button(tr("Resume automatic updates", "Reprendre les mises a jour automatiques")).clicked() {
                             self.pinned = None;
                             save_config(self.channel, None);
                             self.auto_update_tried = false;
@@ -354,7 +354,7 @@ impl eframe::App for LauncherApp {
                 if let Some(err) = self.launch_error.clone() {
                     ui.colored_label(egui::Color32::LIGHT_RED, err);
                     ui.add_space(8.0);
-                    if ui.button("Quitter").clicked() {
+                    if ui.button(tr("Quit", "Quitter")).clicked() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                     return;
@@ -364,7 +364,7 @@ impl eframe::App for LauncherApp {
                     Stage::Checking => {
                         ui.horizontal(|ui| {
                             ui.spinner();
-                            ui.label("Verification des mises a jour...");
+                            ui.label(tr("Checking for updates...", "Verification des mises a jour..."));
                         });
                     }
                     Stage::Available(info) => {
@@ -377,19 +377,19 @@ impl eframe::App for LauncherApp {
                             self.start_update(info.clone());
                         }
                         let title = if switching {
-                            format!("Disponible : {}", info.label())
+                            format!("{}: {}", tr("Available", "Disponible"), info.label())
                         } else {
-                            format!("Nouvelle version disponible : {}", info.label())
+                            format!("{}: {}", tr("New version available", "Nouvelle version disponible"), info.label())
                         };
                         ui.label(egui::RichText::new(title).strong());
                         ui.label(&info.release_notes);
                         ui.add_space(10.0);
                         ui.horizontal(|ui| {
-                            let action = if switching { "Installer" } else { "Mettre a jour" };
+                            let action = if switching { tr("Install", "Installer") } else { tr("Update", "Mettre a jour") };
                             if ui.button(action).clicked() {
                                 self.start_update(info.clone());
                             }
-                            if ui.button("Jouer").clicked() {
+                            if ui.button(tr("Play", "Jouer")).clicked() {
                                 self.launch_game(&ctx);
                             }
                         });
@@ -400,14 +400,14 @@ impl eframe::App for LauncherApp {
                         }
                         ui.label(msg);
                         ui.add_space(10.0);
-                        if ui.add_sized([140.0, 34.0], egui::Button::new("Jouer")).clicked() {
+                        if ui.add_sized([140.0, 34.0], egui::Button::new(tr("Play", "Jouer"))).clicked() {
                             self.launch_game(&ctx);
                         }
                     }
                     Stage::Downloading => {
                         let done = self.shared.downloaded.load(Ordering::Relaxed);
                         let total = self.shared.total.load(Ordering::Relaxed);
-                        ui.label("Telechargement...");
+                        ui.label(tr("Downloading...", "Telechargement..."));
                         let (frac, text) = if total > 0 {
                             (
                                 done as f32 / total as f32,
@@ -421,25 +421,25 @@ impl eframe::App for LauncherApp {
                     Stage::Extracting => {
                         ui.horizontal(|ui| {
                             ui.spinner();
-                            ui.label("Installation...");
+                            ui.label(tr("Installing...", "Installation..."));
                         });
                     }
                     // Le jeu ne se lance jamais tout seul : il faut cliquer sur « Jouer »
                     Stage::Installed(msg) => {
                         ui.label(msg);
                         ui.add_space(10.0);
-                        if ui.add_sized([140.0, 34.0], egui::Button::new("Jouer")).clicked() {
+                        if ui.add_sized([140.0, 34.0], egui::Button::new(tr("Play", "Jouer"))).clicked() {
                             self.launch_game(&ctx);
                         }
                     }
                     Stage::Failed(err) => {
-                        ui.colored_label(egui::Color32::LIGHT_RED, format!("Erreur : {}", err));
+                        ui.colored_label(egui::Color32::LIGHT_RED, format!("{}: {}", tr("Error", "Erreur"), err));
                         ui.add_space(10.0);
                         ui.horizontal(|ui| {
-                            if ui.button("Jouer").clicked() {
+                            if ui.button(tr("Play", "Jouer")).clicked() {
                                 self.launch_game(&ctx);
                             }
-                            if ui.button("Quitter").clicked() {
+                            if ui.button(tr("Quit", "Quitter")).clicked() {
                                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                             }
                         });
@@ -481,7 +481,7 @@ fn replace_running_launcher(install_dir: &Path, launcher_name: &str) -> io::Resu
     let e = last.unwrap();
     Err(io::Error::new(
         e.kind(),
-        format!("{launcher_name} : impossible de le remplacer ({e}). Fermez les autres fenetres Nds Game Studio et le jeu, puis reessayez."),
+        format!("{launcher_name}: {} ({e}). {}", tr("cannot replace it", "impossible de le remplacer"), tr("Close the other Nds Game Studio windows and the game, then try again.", "Fermez les autres fenetres Nds Game Studio et le jeu, puis reessayez.")),
     ))
 }
 
@@ -493,7 +493,7 @@ fn download_and_apply(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let url = info
         .platform_download_url()
-        .ok_or_else(|| format!("Aucune version disponible pour {}", ndsgs_common::PLATFORM))?;
+        .ok_or_else(|| format!("{} {}", tr("No version available for", "Aucune version disponible pour"), ndsgs_common::PLATFORM))?;
 
     let temp_dir = std::env::temp_dir().join("nds-game-studio-update");
     fs::create_dir_all(&temp_dir)?;
@@ -528,7 +528,7 @@ fn download_and_apply(
     drop(file);
 
     if total_size > 0 && downloaded != total_size {
-        return Err(format!("Telechargement incomplet: {} / {} octets", downloaded, total_size).into());
+        return Err(format!("{}: {} / {}", tr("Incomplete download", "Telechargement incomplet"), downloaded, total_size).into());
     }
 
     shared.set(Stage::Extracting);

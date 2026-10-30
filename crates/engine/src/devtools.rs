@@ -28,6 +28,7 @@ use bevy::ui_widgets::{Activate, Button, TextInput};
 use bevy::window::{WindowRef, WindowResolution};
 use bevy::winit::WINIT_WINDOWS;
 
+use crate::i18n::{t, tr};
 use crate::link::ShowToast;
 use crate::screens::{Aspect, DsScreens, ScreenLayout};
 use crate::studio::{ActiveGame, AutoStart};
@@ -266,7 +267,7 @@ fn start_build(root: PathBuf, state: Arc<Mutex<BuildState>>) {
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
             let old = exe.with_extension(format!("old-{}", std::process::id()));
             let renamed = std::fs::rename(&exe, &old).is_ok();
-            let output = cargo_command(&root).output().map_err(|e| format!("cargo introuvable : {e}"));
+            let output = cargo_command(&root).output().map_err(|e| t!("cargo not found: {e}", "cargo introuvable : {e}"));
             let restore = || {
                 if renamed && !exe.exists() {
                     let _ = std::fs::rename(&old, &exe);
@@ -292,7 +293,7 @@ fn start_build(root: PathBuf, state: Arc<Mutex<BuildState>>) {
             if !exe.exists() {
                 // Rien n'a été relinké : on garde l'actuel
                 restore();
-                return Err("Compilation terminee mais aucun nouvel executable (rien a recompiler ?)".into());
+                return Err(tr("Build finished but no new executable (nothing to rebuild?)", "Compilation terminee mais aucun nouvel executable (rien a recompiler ?)").into());
             }
             Ok(())
         })();
@@ -348,7 +349,7 @@ fn watch_sources(time: Res<Time<Real>>, settings: Res<DevSettings>, mut dev: Res
         Some(_) if dev.pending && *dev.build.lock().unwrap() != BuildState::Building => {
             dev.pending = false;
             info!("code modifie : recompilation");
-            toast.write(ShowToast("Code modifie : recompilation...".into()));
+            toast.write(ShowToast(tr("Code changed: rebuilding...", "Code modifie : recompilation...").into()));
             start_build(root, dev.build.clone());
         }
         _ => {}
@@ -375,7 +376,7 @@ fn finish_build(
     *reported = Some(state.clone());
     match state {
         BuildState::Failed(_) => {
-            toast.write(ShowToast("Erreur de compilation : voir la fenetre Code (F5)".into()));
+            toast.write(ShowToast(tr("Build error: see the Code window (F5)", "Erreur de compilation : voir la fenetre Code (F5)").into()));
         }
         BuildState::Done => {
             let Some(screens) = screens else { return };
@@ -390,7 +391,7 @@ fn finish_build(
                     exit.write(AppExit::Success);
                 }
                 Err(e) => {
-                    toast.write(ShowToast(format!("Relance impossible : {e}")));
+                    toast.write(ShowToast(t!("Cannot restart: {e}", "Relance impossible : {e}")));
                 }
             }
         }
@@ -508,7 +509,7 @@ fn toggle_code_window(
         return;
     }
     if dev.root.is_none() {
-        toast.write(ShowToast("Code source introuvable : F5 marche avec le depot (compilation locale)".into()));
+        toast.write(ShowToast(tr("Source code not found: F5 works with the repository (local build)", "Code source introuvable : F5 marche avec le depot (compilation locale)").into()));
         return;
     }
     if view.font.is_none() {
@@ -576,7 +577,7 @@ fn save_file(path: &Path, text: &str, view: &mut CodeView, toast: &mut MessageWr
             info!("enregistre : {}", path.display());
         }
         Err(e) => {
-            toast.write(ShowToast(format!("Enregistrement impossible : {e}")));
+            toast.write(ShowToast(t!("Cannot save: {e}", "Enregistrement impossible : {e}")));
         }
     }
 }
@@ -636,7 +637,7 @@ fn refresh_code_window(
             save_file(&previous, &text, &mut view, &mut toast);
         }
         if other_file || (changed_on_disk && !view.dirty) {
-            let content = std::fs::read_to_string(&path).unwrap_or_else(|e| format!("Lecture impossible : {e}"));
+            let content = std::fs::read_to_string(&path).unwrap_or_else(|e| t!("Cannot read: {e}", "Lecture impossible : {e}"));
             commands.entity(editor).insert(self::editable(&content));
             view.go_top = 3;
             view.saved = content;
@@ -649,10 +650,10 @@ fn refresh_code_window(
     let build = dev.build.lock().unwrap().clone();
     let file = view.files.get(view.current).and_then(|p| p.strip_prefix(&root).ok()).map(|p| p.display().to_string()).unwrap_or_default();
     let line = match &build {
-        BuildState::Building => format!("{file}   |   Recompilation en cours..."),
-        BuildState::Failed(_) => format!("{file}   |   Erreur de compilation (le jeu continue avec l'ancien code)"),
-        _ if view.dirty => format!("{file}   |   Modifie : Ctrl+S pour enregistrer (le studio recompile et se relance)"),
-        _ => format!("{file}   |   Ctrl+S enregistre : le studio recompile et se relance tout seul"),
+        BuildState::Building => t!("{file}   |   Rebuilding...", "{file}   |   Recompilation en cours..."),
+        BuildState::Failed(_) => t!("{file}   |   Build error (the game keeps running the old code)", "{file}   |   Erreur de compilation (le jeu continue avec l'ancien code)"),
+        _ if view.dirty => t!("{file}   |   Modified: Ctrl+S to save (the studio rebuilds and restarts)", "{file}   |   Modifie : Ctrl+S pour enregistrer (le studio recompile et se relance)"),
+        _ => t!("{file}   |   Ctrl+S saves: the studio rebuilds and restarts by itself", "{file}   |   Ctrl+S enregistre : le studio recompile et se relance tout seul"),
     };
     if let Ok(mut s) = status.single_mut()
         && s.0 != line
