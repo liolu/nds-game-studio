@@ -4,6 +4,7 @@
 //! id = "platformer"
 //! name = "Mini Platformer"
 //! genre = "plateforme"
+//! game_code = "AQIE" # la rom de ce jeu, pour le launcher
 //!
 //! [screens]
 //! main = "top"     # écran qui affiche le moteur principal (top | bottom), échangeable en jeu
@@ -101,6 +102,9 @@ pub struct GameSpec {
     pub genre: String,
     #[serde(default)]
     pub description: String,
+    /// Code de la rom de ce jeu (`AQIE`) : c'est lui que « Jouer » lance pour cette rom.
+    #[serde(default)]
+    pub game_code: String,
     #[serde(default)]
     pub screens: ScreensSpec,
     #[serde(default)]

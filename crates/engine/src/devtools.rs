@@ -465,7 +465,7 @@ fn files_for(root: &Path, game: Option<&str>) -> Vec<PathBuf> {
             return vec![single];
         }
     }
-    vec![root.join("app").join("src").join("main.rs"), games.join("mod.rs")]
+    vec![root.join("app").join("src").join("main.rs")]
 }
 
 fn monospace_font(fonts: &mut Assets<Font>) -> Option<Handle<Font>> {
@@ -765,12 +765,10 @@ mod tests {
     }
 
     #[test]
-    fn game_files_list_mod_rs_first() {
+    fn game_files_fall_back_to_the_studio() {
         let root = source_root().expect("depot present pendant les tests");
-        let files = files_for(&root, Some("orbit"));
-        assert!(files[0].ends_with("mod.rs"), "{files:?}");
-        assert!(files.iter().any(|f| f.ends_with("game.toml")));
         assert!(files_for(&root, None)[0].ends_with("main.rs"));
+        assert!(files_for(&root, Some("jeu-absent"))[0].ends_with("main.rs"));
         assert_ne!(sources_stamp(&root), 0);
     }
 }

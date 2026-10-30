@@ -1,0 +1,921 @@
+//! Le launcher : ce qu'on voit quand aucun jeu ne tourne, à la place des deux écrans DS.
+//!
+//! - à gauche : le logo, le bouton de la vue des jeux (4 carrés) et les jeux favoris ;
+//! - la vue des jeux, en grille ou en liste ;
+//! - la page d'un jeu : son image, son nom, le bouton favori et quatre boutons qui changent la zone
+//!   du bas (Jouer, Moding, Description, Parametres) ;
+//! - le bouton Options, toujours en bas à droite, même quand on fait défiler.
+//!
+//! Sans rom, aucun jeu n'est montré : seulement le message qui dit de déposer une rom dans la
+//! fenêtre. Elle est copiée dans le dossier `rom` à côté du launcher (voir `library`).
+//!
+//! Il n'y a pas d'émulation : « Jouer » lance le module natif du jeu (décompilation + runtime),
+//! reconnu par le `game_code` de son game.toml. Sans module, le bouton le dit.
+//!
+//! Toute la zone est refaite quand `Launcher::dirty` est vrai, comme les pages des options.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use bevy::asset::RenderAssetUsages;
+use bevy::image::ImageSampler;
+use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
+use bevy::picking::hover::Hovered;
+use bevy::prelude::*;
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use bevy::ui::{Pressed, ScrollPosition};
+use bevy::ui_widgets::{Activate, Button};
+use bevy::window::FileDragAndDrop;
+
+use crate::asset_browser::AssetBrowser;
+use crate::library::{self, Imported, LibraryPrefs, LibraryView, RomInfo};
+use crate::options::ToggleOptions;
+use crate::saves_page::format_size;
+use crate::screens::{DisplayCamera, DsScreens};
+use crate::studio::{ActiveGame, ActiveRom, AutoStart, GameRegistry, StudioFooter, StudioState};
+use crate::titlebar::TITLE_H;
+
+const BG: Color = Color::srgb(0.09, 0.1, 0.12);
+const SIDEBAR: Color = Color::srgb(0.065, 0.07, 0.085);
+const PANEL: Color = Color::srgb(0.12, 0.13, 0.16);
+const ITEM: Color = Color::srgb(0.17, 0.18, 0.22);
+const ITEM_HOVER: Color = Color::srgb(0.24, 0.26, 0.31);
+const ITEM_ON: Color = Color::srgb(0.24, 0.36, 0.62);
+const PLAY: Color = Color::srgb(0.2, 0.55, 0.32);
+const PLAY_HOVER: Color = Color::srgb(0.25, 0.65, 0.39);
+const DANGER: Color = Color::srgb(0.7, 0.2, 0.2);
+const DANGER_HOVER: Color = Color::srgb(0.82, 0.26, 0.26);
+const BORDER: Color = Color::srgb(0.27, 0.29, 0.35);
+const TEXT: Color = Color::srgb(0.92, 0.93, 0.95);
+const DIM: Color = Color::srgb(0.6, 0.63, 0.7);
+const GOLD: Color = Color::srgb(0.98, 0.78, 0.25);
+
+const SIDEBAR_W: f32 = 170.0;
+const COVER: f32 = 300.0;
+const MAIN_PAD: f32 = 24.0;
+/// Hauteur au-dessus de la zone du bas ; le reste de l'image déborde dans la zone.
+const HEADER_H: f32 = 126.0;
+const STATUS_SECONDS: f64 = 5.0;
+const POLL_EVERY: f64 = 2.0;
+const CONFIRM_SECONDS: f64 = 3.0;
+/// Pixels défilés par cran de molette.
+const WHEEL_LINE: f32 = 70.0;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+enum Tab {
+    #[default]
+    Play,
+    Modding,
+    Description,
+    Settings,
+}
+
+impl Tab {
+    const ALL: [Tab; 4] = [Tab::Play, Tab::Modding, Tab::Description, Tab::Settings];
+
+    fn label(self) -> &'static str {
+        match self {
+            Tab::Play => "Jouer",
+            Tab::Modding => "Moding",
+            Tab::Description => "Description",
+            Tab::Settings => "Parametres",
+        }
+    }
+}
+
+struct Rom {
+    info: RomInfo,
+    icon: Option<Handle<Image>>,
+    tint: Color,
+}
+
+#[derive(Resource, Default)]
+struct Launcher {
+    roms: Vec<Rom>,
+    prefs: LibraryPrefs,
+    /// Jeu ouvert (nom de fichier de la rom) ; sans, la vue des jeux.
+    open: Option<String>,
+    tab: Tab,
+    dirty: bool,
+    /// La zone qui est refaite, et le texte des messages.
+    content: Option<Entity>,
+    star: Handle<Image>,
+    font: Fonts,
+    stamp: Vec<(String, u64)>,
+    next_poll: f64,
+    /// Position de la vue des jeux, retrouvée en revenant d'un jeu.
+    grid_scroll: f32,
+    status: String,
+    status_at: f64,
+    /// Copies de rom en cours et leurs résultats.
+    copying: usize,
+    imported: Arc<Mutex<Vec<Result<Imported, String>>>>,
+    /// Code du jeu -> projet de décompilation (lu en arrière-plan au démarrage).
+    projects: HashMap<String, String>,
+    projects_found: Arc<Mutex<Option<HashMap<String, String>>>>,
+    /// Premier clic sur « Retirer ce jeu ».
+    confirm_remove: Option<f64>,
+}
+
+/// Couleurs d'un bouton : `Look` donne celles au repos et au survol.
+#[derive(Component)]
+struct Look {
+    normal: Color,
+    hover: Color,
+}
+
+/// Zone qui défile à la molette quand la souris est dessus.
+#[derive(Component)]
+struct Scrollable;
+
+/// La vue des jeux, dont on garde la position.
+#[derive(Component)]
+struct GridScroll;
+
+#[derive(Component)]
+struct StatusText;
+
+#[derive(Component)]
+struct DropOverlay;
+
+#[derive(Component)]
+struct ViewChoice(LibraryView);
+
+#[derive(Component)]
+struct VersionText;
+
+pub struct LauncherPlugin;
+
+impl Plugin for LauncherPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<Launcher>()
+            .add_systems(Startup, setup)
+            .add_systems(OnEnter(StudioState::Menu), spawn_launcher.before(crate::studio::auto_start))
+            .add_systems(Update, (take_drops, poll_copies, poll_disk, back_key, expire_confirm, rebuild, show_status).chain().run_if(in_state(StudioState::Menu)))
+            .add_systems(Update, (wheel, looks, view_choice_looks, version_text));
+    }
+}
+
+fn setup(mut lau: ResMut<Launcher>, mut images: ResMut<Assets<Image>>, mut fonts: ResMut<Assets<Font>>, browser: Res<AssetBrowser>) {
+    lau.prefs = LibraryPrefs::load();
+    lau.star = images.add(star_image());
+    lau.font = Fonts { latin: system_font(&mut fonts, &["segoeui.ttf"]), japanese: system_font(&mut fonts, &["YuGothR.ttc", "meiryo.ttc", "msgothic.ttc"]) };
+    let (root, found) = (browser.projects_root(), lau.projects_found.clone());
+    std::thread::spawn(move || {
+        *found.lock().unwrap() = Some(library::find_projects(&root));
+    });
+}
+
+/// Polices de Windows (accents et japonais des titres de jeux) ; ailleurs, celle de Bevy.
+#[derive(Clone, Default)]
+struct Fonts {
+    latin: Option<Handle<Font>>,
+    japanese: Option<Handle<Font>>,
+}
+
+impl Fonts {
+    fn for_text(&self, value: &str) -> Option<&Handle<Font>> {
+        // Kana et kanji commencent à U+2E80 ; le ™ et les accents restent dans la police latine
+        let japanese = value.chars().any(|c| c >= '\u{2E80}');
+        if japanese { self.japanese.as_ref().or(self.latin.as_ref()) } else { self.latin.as_ref() }
+    }
+}
+
+fn system_font(fonts: &mut Assets<Font>, names: &[&str]) -> Option<Handle<Font>> {
+    let windir = std::env::var_os("WINDIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    let bytes = names.iter().find_map(|name| std::fs::read(windir.join("Fonts").join(name)).ok())?;
+    Some(fonts.add(Font::from_bytes(bytes)))
+}
+
+fn rgba_image(width: u32, height: u32, data: Vec<u8>, sampler: ImageSampler) -> Image {
+    let mut image = Image::new(Extent3d { width, height, depth_or_array_layers: 1 }, TextureDimension::D2, data, TextureFormat::Rgba8UnormSrgb, RenderAssetUsages::default());
+    image.sampler = sampler;
+    image
+}
+
+/// Étoile blanche à 5 branches (la police n'en a pas), teintée par `ImageNode::color`.
+fn star_image() -> Image {
+    const SIZE: usize = 64;
+    const SAMPLES: usize = 4;
+    let points: Vec<Vec2> = (0..10)
+        .map(|i| {
+            let radius = if i % 2 == 0 { 30.0 } else { 12.5 };
+            let angle = std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / 5.0;
+            Vec2::new(32.0 + radius * angle.cos(), 33.0 - radius * angle.sin())
+        })
+        .collect();
+    let inside = |p: Vec2| {
+        let mut odd = false;
+        for (i, a) in points.iter().enumerate() {
+            let b = points[(i + 1) % points.len()];
+            if (a.y > p.y) != (b.y > p.y) && p.x < a.x + (p.y - a.y) / (b.y - a.y) * (b.x - a.x) {
+                odd = !odd;
+            }
+        }
+        odd
+    };
+    let mut data = vec![255u8; SIZE * SIZE * 4];
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let mut covered = 0;
+            for sy in 0..SAMPLES {
+                for sx in 0..SAMPLES {
+                    let p = Vec2::new(x as f32 + (sx as f32 + 0.5) / SAMPLES as f32, y as f32 + (sy as f32 + 0.5) / SAMPLES as f32);
+                    covered += usize::from(inside(p));
+                }
+            }
+            data[(y * SIZE + x) * 4 + 3] = (covered * 255 / (SAMPLES * SAMPLES)) as u8;
+        }
+    }
+    rgba_image(SIZE as u32, SIZE as u32, data, ImageSampler::linear())
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  La fenêtre fixe : fond, zone refaite, bouton Options, message, dépôt d'un fichier
+// ─────────────────────────────────────────────────────────────────────────
+
+fn spawn_launcher(mut commands: Commands, mut lau: ResMut<Launcher>, mut images: ResMut<Assets<Image>>, screens: Res<DsScreens>, cameras: Query<(Entity, &DisplayCamera)>, auto: Option<Res<AutoStart>>) {
+    if auto.is_some() {
+        return;
+    }
+    let Some((camera, _)) = cameras.iter().find(|(_, d)| d.0 == screens.main_window()) else { return };
+    let font = lau.font.clone();
+    reload_roms(&mut lau, &mut images);
+    let mut content = None;
+    commands
+        .spawn((
+            Node { position_type: PositionType::Absolute, top: px(TITLE_H), left: px(0), right: px(0), bottom: px(0), flex_direction: FlexDirection::Row, ..default() },
+            BackgroundColor(BG),
+            UiTargetCamera(camera),
+            DespawnOnExit(StudioState::Menu),
+        ))
+        .with_children(|root| {
+            content = Some(root.spawn(Node { width: percent(100), height: percent(100), flex_direction: FlexDirection::Row, ..default() }).id());
+            // Fixe : ne bouge pas quand on fait défiler
+            root.spawn((
+                Button,
+                Hovered::default(),
+                Node { position_type: PositionType::Absolute, right: px(24), bottom: px(20), padding: UiRect::axes(px(22), px(11)), border_radius: BorderRadius::all(px(8)), ..default() },
+                BackgroundColor(ITEM_ON),
+                Look { normal: ITEM_ON, hover: Color::srgb(0.3, 0.44, 0.74) },
+                GlobalZIndex(5),
+            ))
+            .observe(|_: On<Activate>, mut options: MessageWriter<ToggleOptions>| {
+                options.write(ToggleOptions);
+            })
+            .with_child(text(&font, "Options", 16.0, TEXT));
+            root.spawn((text(&font, "", 14.0, TEXT), Node { position_type: PositionType::Absolute, left: px(SIDEBAR_W + MAIN_PAD), bottom: px(28), ..default() }, GlobalZIndex(5), StatusText));
+            root.spawn((
+                Node { position_type: PositionType::Absolute, left: px(0), right: px(0), top: px(0), bottom: px(0), justify_content: JustifyContent::Center, align_items: AlignItems::Center, display: Display::None, ..default() },
+                BackgroundColor(Color::srgba(0.1, 0.2, 0.42, 0.88)),
+                GlobalZIndex(10),
+                DropOverlay,
+            ))
+            .with_child(text(&font, "Deposez la rom pour l'ajouter", 30.0, TEXT));
+        });
+    lau.content = content;
+    lau.dirty = true;
+}
+
+fn reload_roms(lau: &mut Launcher, images: &mut Assets<Image>) {
+    let dir = library::rom_dir();
+    lau.stamp = library::folder_stamp(&dir);
+    lau.roms = library::scan_roms(&dir)
+        .into_iter()
+        .map(|info| {
+            let icon = (!info.icon.is_empty()).then(|| images.add(rgba_image(32, 32, info.icon.clone(), ImageSampler::nearest())));
+            let [r, g, b] = info.average_color();
+            Rom { info, icon, tint: Color::srgb(r * 0.45, g * 0.45, b * 0.45) }
+        })
+        .collect();
+    lau.dirty = true;
+}
+
+fn say(lau: &mut Launcher, time: &Time<Real>, message: impl Into<String>) {
+    lau.status = message.into();
+    lau.status_at = time.elapsed_secs_f64();
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  Ajouter une rom (glisser-déposer), suivre le dossier
+// ─────────────────────────────────────────────────────────────────────────
+
+fn take_drops(mut drops: MessageReader<FileDragAndDrop>, mut lau: ResMut<Launcher>, time: Res<Time<Real>>, mut overlays: Query<&mut Node, With<DropOverlay>>) {
+    for drop in drops.read() {
+        let show = match drop {
+            FileDragAndDrop::HoveredFile { .. } => true,
+            FileDragAndDrop::HoveredFileCanceled { .. } => false,
+            FileDragAndDrop::DroppedFile { path_buf, .. } => {
+                start_copy(&mut lau, path_buf.clone());
+                say(&mut lau, &time, "Copie de la rom...");
+                false
+            }
+        };
+        for mut node in &mut overlays {
+            node.display = if show { Display::Flex } else { Display::None };
+        }
+    }
+}
+
+fn start_copy(lau: &mut Launcher, source: PathBuf) {
+    lau.copying += 1;
+    let results = lau.imported.clone();
+    std::thread::spawn(move || {
+        let result = library::import_rom(&source, &library::rom_dir());
+        results.lock().unwrap().push(result);
+    });
+}
+
+fn poll_copies(mut lau: ResMut<Launcher>, mut images: ResMut<Assets<Image>>, time: Res<Time<Real>>) {
+    let results = std::mem::take(&mut *lau.imported.lock().unwrap());
+    if results.is_empty() {
+        return;
+    }
+    lau.copying -= results.len();
+    for result in results {
+        let message = match result {
+            Ok(Imported { title, already: true }) => format!("{title} est deja dans le launcher"),
+            Ok(Imported { title, already: false }) => format!("{title} ajoute"),
+            Err(e) => e,
+        };
+        say(&mut lau, &time, message);
+    }
+    reload_roms(&mut lau, &mut images);
+}
+
+/// Une rom copiée ou retirée à la main dans le dossier apparaît ou disparaît toute seule.
+fn poll_disk(mut lau: ResMut<Launcher>, mut images: ResMut<Assets<Image>>, time: Res<Time<Real>>) {
+    let now = time.elapsed_secs_f64();
+    if now < lau.next_poll {
+        return;
+    }
+    lau.next_poll = now + POLL_EVERY;
+    let found = lau.projects_found.lock().unwrap().take();
+    if let Some(found) = found {
+        lau.projects = found;
+        lau.dirty = true;
+    }
+    if lau.copying == 0 && library::folder_stamp(&library::rom_dir()) != lau.stamp {
+        reload_roms(&mut lau, &mut images);
+    }
+}
+
+fn back_key(keys: Res<ButtonInput<KeyCode>>, mut lau: ResMut<Launcher>, screens: Res<DsScreens>, windows: Query<&Window>) {
+    let focused = windows.get(screens.main_window()).is_ok_and(|w| w.focused);
+    if focused && keys.just_pressed(KeyCode::Escape) && lau.open.is_some() {
+        lau.open = None;
+        lau.dirty = true;
+    }
+}
+
+fn expire_confirm(mut lau: ResMut<Launcher>, time: Res<Time<Real>>) {
+    if lau.confirm_remove.is_some_and(|t| time.elapsed_secs_f64() - t > CONFIRM_SECONDS) {
+        lau.confirm_remove = None;
+        lau.dirty = true;
+    }
+}
+
+fn show_status(lau: Res<Launcher>, time: Res<Time<Real>>, mut texts: Query<&mut Text, With<StatusText>>) {
+    let wanted = if lau.copying > 0 || time.elapsed_secs_f64() - lau.status_at < STATUS_SECONDS { lau.status.as_str() } else { "" };
+    for mut text in &mut texts {
+        if text.0 != wanted {
+            text.0 = wanted.to_string();
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  Boutons et textes
+// ─────────────────────────────────────────────────────────────────────────
+
+fn text(font: &Fonts, value: impl Into<String>, size: f32, color: Color) -> (Text, TextFont, TextColor) {
+    let value = value.into();
+    let text_font = match font.for_text(&value) {
+        Some(f) => TextFont { font: f.clone().into(), font_size: FontSize::Px(size), ..default() },
+        None => TextFont::from_font_size(size),
+    };
+    (Text::new(value), text_font, TextColor(color))
+}
+
+fn button_node() -> Node {
+    Node { padding: UiRect::axes(px(16), px(9)), border_radius: BorderRadius::all(px(6)), justify_content: JustifyContent::Center, align_items: AlignItems::Center, ..default() }
+}
+
+fn button<'a>(c: &'a mut ChildSpawnerCommands, node: Node, normal: Color, hover: Color) -> EntityCommands<'a> {
+    c.spawn((Button, Hovered::default(), node, BackgroundColor(normal), Look { normal, hover }))
+}
+
+/// L'icône de la rom sur le fond de sa couleur (les icônes DS font 32x32 : agrandies sans lissage).
+fn cover(c: &mut ChildSpawnerCommands, rom: &Rom, size: f32) {
+    c.spawn((
+        Node { width: px(size), height: px(size), flex_shrink: 0.0, justify_content: JustifyContent::Center, align_items: AlignItems::Center, border_radius: BorderRadius::all(px(size.min(80.0) / 8.0)), ..default() },
+        BackgroundColor(rom.tint),
+    ))
+    .with_children(|b| {
+        if let Some(icon) = &rom.icon {
+            let side = (size * 0.8 / 32.0).floor().max(1.0) * 32.0;
+            b.spawn((ImageNode::new(icon.clone()), Node { width: px(side), height: px(side), ..default() }));
+        }
+    });
+}
+
+fn star(c: &mut ChildSpawnerCommands, lau: &Launcher, file: &str, size: f32) {
+    let color = if lau.prefs.is_favorite(file) { GOLD } else { Color::srgb(0.38, 0.4, 0.46) };
+    c.spawn((ImageNode::new(lau.star.clone()).with_color(color), Node { width: px(size), height: px(size), ..default() }));
+}
+
+fn toggle_favorite(lau: &mut Launcher, file: &str) {
+    lau.prefs.toggle_favorite(file);
+    lau.prefs.store();
+    lau.dirty = true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  La zone refaite
+// ─────────────────────────────────────────────────────────────────────────
+
+#[allow(clippy::too_many_arguments)]
+fn rebuild(mut commands: Commands, mut lau: ResMut<Launcher>, registry: Res<GameRegistry>, footer: Option<Res<StudioFooter>>, children: Query<&Children>, grids: Query<&ScrollPosition, With<GridScroll>>) {
+    if !lau.dirty {
+        return;
+    }
+    lau.dirty = false;
+    let Some(content) = lau.content else { return };
+    if let Ok(position) = grids.single() {
+        lau.grid_scroll = position.0.y;
+    }
+    if let Ok(old) = children.get(content) {
+        for child in old.iter() {
+            commands.entity(child).despawn();
+        }
+    }
+    if lau.open.as_ref().is_some_and(|file| !lau.roms.iter().any(|r| r.info.file == *file)) {
+        lau.open = None;
+    }
+    let lau = &*lau;
+    let footer = footer.map(|f| f.0.clone()).unwrap_or_default();
+    commands.entity(content).with_children(|c| {
+        spawn_sidebar(c, lau, &footer);
+        c.spawn(Node { flex_grow: 1.0, flex_basis: px(0), min_width: px(0), height: percent(100), flex_direction: FlexDirection::Column, position_type: PositionType::Relative, ..default() }).with_children(|main| {
+            match lau.open.as_ref().and_then(|file| lau.roms.iter().find(|r| r.info.file == *file)) {
+                Some(rom) => spawn_game(main, lau, rom, &registry),
+                None if lau.roms.is_empty() => spawn_empty(main, lau),
+                None => spawn_library(main, lau),
+            }
+        });
+    });
+}
+
+fn spawn_sidebar(c: &mut ChildSpawnerCommands, lau: &Launcher, footer: &str) {
+    let font = &lau.font;
+    c.spawn((Node { width: px(SIDEBAR_W), flex_shrink: 0.0, height: percent(100), flex_direction: FlexDirection::Column, align_items: AlignItems::Center, padding: UiRect::axes(px(0), px(18)), row_gap: px(14), ..default() }, BackgroundColor(SIDEBAR)))
+        .with_children(|side| {
+            // Logo : une DS (deux écrans l'un sur l'autre), qui ramène aussi à la vue des jeux
+            button(side, Node { width: px(110), height: px(110), flex_direction: FlexDirection::Column, align_items: AlignItems::Center, justify_content: JustifyContent::Center, row_gap: px(5), border_radius: BorderRadius::all(px(12)), ..default() }, ITEM_ON, Color::srgb(0.3, 0.44, 0.74))
+                .observe(show_library)
+                .with_children(|logo| {
+                    for _ in 0..2 {
+                        logo.spawn((Node { width: px(62), height: px(38), border: UiRect::all(px(3)), border_radius: BorderRadius::all(px(3)), ..default() }, BorderColor::all(TEXT), BackgroundColor(Color::srgb(0.08, 0.1, 0.16))));
+                    }
+                });
+            // Vue des jeux : 4 carrés
+            let selected = lau.open.is_none();
+            let (normal, hover) = if selected { (ITEM_ON, ITEM_ON) } else { (ITEM, ITEM_HOVER) };
+            button(side, Node { width: px(52), height: px(52), flex_direction: FlexDirection::Column, align_items: AlignItems::Center, justify_content: JustifyContent::Center, row_gap: px(6), border_radius: BorderRadius::all(px(8)), ..default() }, normal, hover)
+                .observe(show_library)
+                .with_children(|grid| {
+                    for _ in 0..2 {
+                        grid.spawn(Node { flex_direction: FlexDirection::Row, column_gap: px(6), ..default() }).with_children(|row| {
+                            for _ in 0..2 {
+                                row.spawn((Node { width: px(13), height: px(13), border_radius: BorderRadius::all(px(2)), ..default() }, BackgroundColor(TEXT)));
+                            }
+                        });
+                    }
+                });
+            // Favoris
+            side.spawn((
+                Node { flex_grow: 1.0, flex_basis: px(0), min_height: px(0), width: percent(100), flex_direction: FlexDirection::Column, align_items: AlignItems::Center, row_gap: px(10), padding: UiRect::vertical(px(2)), overflow: Overflow::scroll_y(), ..default() },
+                ScrollPosition::default(),
+                Hovered::default(),
+                Scrollable,
+            ))
+            .with_children(|favorites| {
+                for rom in lau.prefs.favorites.iter().filter_map(|file| lau.roms.iter().find(|r| r.info.file == *file)) {
+                    let file = rom.info.file.clone();
+                    let shown = lau.open.as_deref() == Some(file.as_str());
+                    let (normal, hover) = if shown { (ITEM_ON, ITEM_ON) } else { (Color::NONE, ITEM_HOVER) };
+                    button(favorites, Node { padding: UiRect::all(px(4)), flex_shrink: 0.0, border_radius: BorderRadius::all(px(8)), ..default() }, normal, hover)
+                        .observe(open_game(file))
+                        .with_children(|b| cover(b, rom, 96.0));
+                }
+            });
+            side.spawn((text(font, footer, 10.0, DIM), Node { max_width: px(SIDEBAR_W - 16.0), ..default() }));
+        });
+}
+
+fn show_library(_: On<Activate>, mut lau: ResMut<Launcher>) {
+    lau.open = None;
+    lau.dirty = true;
+}
+
+fn open_game(file: String) -> impl FnMut(On<Activate>, ResMut<Launcher>) {
+    move |_, mut lau| {
+        lau.open = Some(file.clone());
+        lau.tab = Tab::Play;
+        lau.confirm_remove = None;
+        lau.dirty = true;
+    }
+}
+
+fn spawn_empty(main: &mut ChildSpawnerCommands, lau: &Launcher) {
+    let font = &lau.font;
+    main.spawn(Node { width: percent(100), height: percent(100), flex_direction: FlexDirection::Column, justify_content: JustifyContent::Center, align_items: AlignItems::Center, row_gap: px(14), padding: UiRect::all(px(40)), ..default() }).with_children(|empty| {
+        empty.spawn(text(font, "Aucun jeu", 32.0, TEXT));
+        empty.spawn(text(font, "Glissez une rom DS (.nds) dans cette fenetre pour l'ajouter au launcher.", 18.0, TEXT));
+        empty.spawn(text(font, format!("Elle sera copiee dans {}", library::rom_dir().display()), 14.0, DIM));
+    });
+}
+
+fn spawn_library(main: &mut ChildSpawnerCommands, lau: &Launcher) {
+    let font = &lau.font;
+    let count = lau.roms.len();
+    main.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(8), padding: UiRect::new(px(MAIN_PAD), px(MAIN_PAD), px(16), px(8)), ..default() }).with_children(|bar| {
+        bar.spawn((text(font, if count == 1 { "1 jeu".to_string() } else { format!("{count} jeux") }, 16.0, DIM), Node { flex_grow: 1.0, ..default() }));
+        for (view, name) in [(LibraryView::Grid, "Grille"), (LibraryView::List, "Liste")] {
+            view_button(bar, font, view, name);
+        }
+    });
+    let mut scroll = main.spawn((
+        Node { flex_grow: 1.0, flex_basis: px(0), min_height: px(0), width: percent(100), overflow: Overflow::scroll_y(), ..default() },
+        ScrollPosition(Vec2::new(0.0, lau.grid_scroll)),
+        Hovered::default(),
+        Scrollable,
+        GridScroll,
+    ));
+    scroll.with_children(|area| match lau.prefs.view {
+        LibraryView::Grid => spawn_grid(area, lau),
+        LibraryView::List => spawn_list(area, lau),
+    });
+}
+
+fn view_button(c: &mut ChildSpawnerCommands, font: &Fonts, view: LibraryView, name: &str) {
+    c.spawn((Button, Hovered::default(), button_node(), BackgroundColor(ITEM), ViewChoice(view)))
+        .observe(move |_: On<Activate>, mut lau: ResMut<Launcher>| {
+            if lau.prefs.view != view {
+                lau.prefs.view = view;
+                lau.prefs.store();
+                lau.grid_scroll = 0.0;
+                lau.dirty = true;
+            }
+        })
+        .with_child(text(font, name, 14.0, TEXT));
+}
+
+fn spawn_grid(area: &mut ChildSpawnerCommands, lau: &Launcher) {
+    let font = &lau.font;
+    area.spawn(Node { width: percent(100), height: auto(), flex_direction: FlexDirection::Row, flex_wrap: FlexWrap::Wrap, align_content: AlignContent::FlexStart, column_gap: px(20), row_gap: px(20), padding: UiRect::new(px(MAIN_PAD), px(MAIN_PAD), px(6), px(84)), ..default() }).with_children(|grid| {
+        for rom in &lau.roms {
+            button(grid, Node { width: px(190), height: px(268), flex_shrink: 0.0, flex_direction: FlexDirection::Column, align_items: AlignItems::Center, padding: UiRect::all(px(10)), row_gap: px(8), border_radius: BorderRadius::all(px(10)), overflow: Overflow::clip(), ..default() }, PANEL, ITEM_HOVER)
+                .observe(open_game(rom.info.file.clone()))
+                .with_children(|card| {
+                    cover(card, rom, 170.0);
+                    if lau.prefs.is_favorite(&rom.info.file) {
+                        card.spawn(Node { position_type: PositionType::Absolute, top: px(16), right: px(16), ..default() }).with_children(|b| star(b, lau, &rom.info.file, 22.0));
+                    }
+                    card.spawn((text(font, rom.info.title.clone(), 14.0, TEXT), Node { width: percent(100), ..default() }));
+                    card.spawn((text(font, rom.info.publisher.clone(), 12.0, DIM), Node { width: percent(100), ..default() }));
+                });
+        }
+    });
+}
+
+fn spawn_list(area: &mut ChildSpawnerCommands, lau: &Launcher) {
+    let font = &lau.font;
+    let columns: [(&str, f32); 4] = [("Editeur", 210.0), ("Code", 70.0), ("Region", 90.0), ("Taille", 80.0)];
+    area.spawn(Node { width: percent(100), height: auto(), flex_direction: FlexDirection::Column, row_gap: px(4), padding: UiRect::new(px(MAIN_PAD), px(MAIN_PAD), px(6), px(84)), ..default() }).with_children(|list| {
+        list.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(14), padding: UiRect::axes(px(8), px(4)), ..default() }).with_children(|head| {
+            head.spawn(Node { width: px(44), ..default() });
+            head.spawn((text(font, "Jeu", 13.0, DIM), Node { flex_grow: 1.0, flex_basis: px(0), ..default() }));
+            for (name, width) in columns {
+                head.spawn((text(font, name, 13.0, DIM), Node { width: px(width), ..default() }));
+            }
+            head.spawn(Node { width: px(22), ..default() });
+        });
+        for rom in &lau.roms {
+            let info = &rom.info;
+            button(list, Node { flex_direction: FlexDirection::Row, flex_shrink: 0.0, align_items: AlignItems::Center, column_gap: px(14), padding: UiRect::axes(px(8), px(6)), border_radius: BorderRadius::all(px(6)), ..default() }, PANEL, ITEM_HOVER)
+                .observe(open_game(info.file.clone()))
+                .with_children(|row| {
+                    cover(row, rom, 44.0);
+                    row.spawn((text(font, info.title.clone(), 15.0, TEXT), Node { flex_grow: 1.0, flex_basis: px(0), min_width: px(0), ..default() }));
+                    let values = [info.publisher.clone(), info.code.clone(), info.region().to_string(), format_size(info.size)];
+                    for ((_, width), value) in columns.iter().zip(values) {
+                        row.spawn((text(font, value, 14.0, DIM), Node { width: px(*width), ..default() }));
+                    }
+                    star(row, lau, &info.file, 22.0);
+                });
+        }
+    });
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  La page d'un jeu
+// ─────────────────────────────────────────────────────────────────────────
+
+fn spawn_game(main: &mut ChildSpawnerCommands, lau: &Launcher, rom: &Rom, registry: &GameRegistry) {
+    let font = &lau.font;
+    let file = rom.info.file.clone();
+    // Nom, boutons des onglets, favori
+    main.spawn(Node { height: px(HEADER_H), flex_shrink: 0.0, flex_direction: FlexDirection::Column, row_gap: px(14), padding: UiRect::new(px(MAIN_PAD + COVER + 20.0), px(112), px(MAIN_PAD), px(0)), ..default() }).with_children(|header| {
+        header.spawn((Node { padding: UiRect::axes(px(16), px(8)), border: UiRect::all(px(2)), border_radius: BorderRadius::all(px(6)), overflow: Overflow::clip(), ..default() }, BorderColor::all(BORDER))).with_child(text(font, rom.info.title.clone(), 20.0, TEXT));
+        header.spawn(Node { flex_direction: FlexDirection::Row, column_gap: px(10), ..default() }).with_children(|tabs| {
+            for tab in Tab::ALL {
+                let (normal, hover) = if lau.tab == tab { (ITEM_ON, ITEM_ON) } else { (ITEM, ITEM_HOVER) };
+                button(tabs, Node { flex_grow: 1.0, flex_basis: px(0), ..button_node() }, normal, hover)
+                    .observe(move |_: On<Activate>, mut lau: ResMut<Launcher>| {
+                        lau.tab = tab;
+                        lau.confirm_remove = None;
+                        lau.dirty = true;
+                    })
+                    .with_child(text(font, tab.label(), 15.0, TEXT));
+            }
+        });
+    });
+    button(main, Node { position_type: PositionType::Absolute, top: px(16), right: px(24), width: px(72), height: px(72), justify_content: JustifyContent::Center, align_items: AlignItems::Center, border_radius: BorderRadius::all(px(8)), border: UiRect::all(px(2)), ..default() }, PANEL, ITEM_HOVER)
+        .insert(BorderColor::all(BORDER))
+        .observe({
+            let file = file.clone();
+            move |_: On<Activate>, mut lau: ResMut<Launcher>| toggle_favorite(&mut lau, &file)
+        })
+        .with_children(|b| star(b, lau, &file, 44.0));
+
+    // Zone du bas : un haut à côté de l'image (qui déborde dessus), le reste défile sous elle
+    main.spawn((
+        Node { flex_grow: 1.0, flex_basis: px(0), min_height: px(0), margin: UiRect::new(px(MAIN_PAD), px(MAIN_PAD), px(0), px(MAIN_PAD)), border: UiRect::all(px(2)), border_radius: BorderRadius::all(px(8)), flex_direction: FlexDirection::Column, overflow: Overflow::clip(), ..default() },
+        BorderColor::all(BORDER),
+        BackgroundColor(PANEL),
+    ))
+    .with_children(|zone| {
+        let beside = COVER + 20.0;
+        let (top, rest): (Top, Rest) = match lau.tab {
+            Tab::Play => play_tab(lau, rom, registry),
+            Tab::Modding => modding_tab(lau, rom),
+            Tab::Description => description_tab(rom),
+            Tab::Settings => settings_tab(lau, rom),
+        };
+        zone.spawn(Node { flex_shrink: 0.0, min_height: px(MAIN_PAD + COVER - HEADER_H + 14.0), flex_direction: FlexDirection::Column, row_gap: px(10), padding: UiRect::new(px(beside - 2.0), px(20), px(16), px(10)), ..default() }).with_children(|t| top(t, font));
+        zone.spawn((
+            Node { flex_grow: 1.0, flex_basis: px(0), min_height: px(0), flex_direction: FlexDirection::Column, row_gap: px(8), padding: UiRect::new(px(20), px(20), px(4), px(70)), overflow: Overflow::scroll_y(), ..default() },
+            ScrollPosition::default(),
+            Hovered::default(),
+            Scrollable,
+        ))
+        .with_children(|r| rest(r, font));
+    });
+    // L'image, par-dessus le coin de la zone du bas
+    main.spawn((Node { position_type: PositionType::Absolute, top: px(MAIN_PAD), left: px(MAIN_PAD), ..default() }, GlobalZIndex(1))).with_children(|b| cover(b, rom, COVER));
+}
+
+type Top = Box<dyn FnOnce(&mut ChildSpawnerCommands, &Fonts)>;
+type Rest = Box<dyn FnOnce(&mut ChildSpawnerCommands, &Fonts)>;
+
+/// Module natif du jeu : le jeu enregistré dont le game.toml donne ce code.
+fn native_game(registry: &GameRegistry, code: &str) -> Option<String> {
+    registry.specs().find(|s| !s.game_code.is_empty() && s.game_code.eq_ignore_ascii_case(code)).map(|s| s.id.clone())
+}
+
+fn play_tab(lau: &Launcher, rom: &Rom, registry: &GameRegistry) -> (Top, Rest) {
+    let native = native_game(registry, &rom.info.code);
+    let path = rom.info.path.clone();
+    let project = lau.projects.get(&rom.info.code).cloned();
+    let summary = format!("{}  -  {}  -  {}", rom.info.code, rom.info.region(), format_size(rom.info.size));
+    (
+        Box::new(move |t, font| {
+            let ready = native.is_some();
+            let (normal, hover) = if ready { (PLAY, PLAY_HOVER) } else { (ITEM, ITEM) };
+            let mut play = button(t, Node { align_self: AlignSelf::FlexStart, padding: UiRect::axes(px(48), px(14)), ..button_node() }, normal, hover);
+            if let Some(id) = native {
+                play.observe(move |_: On<Activate>, mut commands: Commands| {
+                    commands.insert_resource(ActiveRom(path.clone()));
+                    commands.insert_resource(ActiveGame(Some(id.clone())));
+                    commands.set_state(StudioState::Playing);
+                });
+            }
+            play.with_child(text(font, "Jouer", 22.0, if ready { TEXT } else { DIM }));
+            if !ready {
+                t.spawn(text(font, "Pas encore jouable : ce jeu n'a pas de module natif (decompilation + runtime).", 15.0, DIM));
+            }
+            t.spawn(text(font, summary, 14.0, DIM));
+        }),
+        Box::new(move |r, font| {
+            let line = match project {
+                Some(project) => format!("Projet de decompilation : {project}"),
+                None => "Aucun projet de decompilation trouve pour ce jeu.".to_string(),
+            };
+            r.spawn(text(font, line, 15.0, TEXT));
+        }),
+    )
+}
+
+fn modding_tab(lau: &Launcher, rom: &Rom) -> (Top, Rest) {
+    let project = lau.projects.get(&rom.info.code).cloned();
+    (
+        Box::new(move |t, font| {
+            let label = if project.is_some() { "Ouvrir les assets de ce jeu (F6)" } else { "Ouvrir la fenetre Assets (F6)" };
+            button(t, Node { align_self: AlignSelf::FlexStart, ..button_node() }, ITEM, ITEM_HOVER)
+                .observe(move |_: On<Activate>, mut browser: ResMut<AssetBrowser>, mut toggle: MessageWriter<crate::asset_browser::ToggleAssets>| match &project {
+                    Some(project) => browser.show_game(project),
+                    None => {
+                        toggle.write(crate::asset_browser::ToggleAssets);
+                    }
+                })
+                .with_child(text(font, label, 15.0, TEXT));
+            button(t, Node { align_self: AlignSelf::FlexStart, ..button_node() }, ITEM, ITEM_HOVER)
+                .observe(|_: On<Activate>, mut toggle: MessageWriter<crate::devtools::ToggleCodeWindow>| {
+                    toggle.write(crate::devtools::ToggleCodeWindow);
+                })
+                .with_child(text(font, "Ouvrir la fenetre Code (F5)", 15.0, TEXT));
+        }),
+        Box::new(|r, font| {
+            r.spawn(text(font, "Assets : modeles 3D et images du jeu, avec leur chemin dans la rom.", 15.0, DIM));
+            r.spawn(text(font, "Code : les sources du jeu, recompilees et relancees a chaque enregistrement.", 15.0, DIM));
+        }),
+    )
+}
+
+fn description_tab(rom: &Rom) -> (Top, Rest) {
+    let info = rom.info.clone();
+    (
+        Box::new({
+            let (title, publisher) = (info.title.clone(), info.publisher.clone());
+            move |t, font| {
+                t.spawn(text(font, title, 22.0, TEXT));
+                if !publisher.is_empty() {
+                    t.spawn(text(font, publisher, 16.0, DIM));
+                }
+            }
+        }),
+        Box::new(move |r, font| {
+            let rows = [
+                ("Code du jeu", info.code.clone()),
+                ("Region", info.region().to_string()),
+                ("Nom interne", info.internal_name.clone()),
+                ("Taille", format_size(info.size)),
+                ("Fichier", info.file.clone()),
+            ];
+            for (name, value) in rows {
+                r.spawn(Node { flex_direction: FlexDirection::Row, column_gap: px(12), ..default() }).with_children(|row| {
+                    row.spawn((text(font, name, 15.0, DIM), Node { width: px(140), ..default() }));
+                    row.spawn(text(font, value, 15.0, TEXT));
+                });
+            }
+        }),
+    )
+}
+
+fn settings_tab(lau: &Launcher, rom: &Rom) -> (Top, Rest) {
+    let confirming = lau.confirm_remove.is_some();
+    let (file, path) = (rom.info.file.clone(), rom.info.path.clone());
+    let shown = path.display().to_string();
+    (
+        Box::new(move |t, font| {
+            t.spawn(text(font, "Rom", 15.0, DIM));
+            t.spawn(text(font, shown, 14.0, TEXT));
+            button(t, Node { align_self: AlignSelf::FlexStart, ..button_node() }, ITEM, ITEM_HOVER).observe(|_: On<Activate>| open_rom_folder()).with_child(text(font, "Ouvrir le dossier des roms", 15.0, TEXT));
+            let (normal, hover, label) = if confirming { (DANGER, DANGER_HOVER, "Confirmer ? (efface le fichier)") } else { (ITEM, ITEM_HOVER, "Retirer ce jeu") };
+            button(t, Node { align_self: AlignSelf::FlexStart, ..button_node() }, normal, hover)
+                .observe(move |_: On<Activate>, mut lau: ResMut<Launcher>, time: Res<Time<Real>>| {
+                    if lau.confirm_remove.is_none() {
+                        lau.confirm_remove = Some(time.elapsed_secs_f64());
+                        lau.dirty = true;
+                        return;
+                    }
+                    lau.confirm_remove = None;
+                    lau.dirty = true;
+                    remove_rom(&mut lau, &file, &path, &time);
+                })
+                .with_child(text(font, label, 15.0, TEXT));
+        }),
+        Box::new(|_, _| {}),
+    )
+}
+
+fn remove_rom(lau: &mut Launcher, file: &str, path: &Path, time: &Time<Real>) {
+    match std::fs::remove_file(path) {
+        Ok(()) => {
+            lau.prefs.favorites.retain(|f| f != file);
+            lau.prefs.store();
+            lau.open = None;
+            lau.roms.retain(|r| r.info.file != file);
+            lau.stamp.retain(|(name, _)| name != file);
+            say(lau, time, format!("{file} retire"));
+        }
+        Err(e) => say(lau, time, format!("{file} : {e}")),
+    }
+}
+
+fn open_rom_folder() {
+    let dir = library::rom_dir();
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        warn!("dossier des roms impossible a creer : {}: {e}", dir.display());
+        return;
+    }
+    let program = if cfg!(target_os = "windows") {
+        "explorer"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    if let Err(e) = std::process::Command::new(program).arg(&dir).spawn() {
+        warn!("impossible d'ouvrir {} : {e}", dir.display());
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  Page Options > Launcher
+// ─────────────────────────────────────────────────────────────────────────
+
+fn page_label(value: impl Into<String>, size: f32, color: Color) -> (Text, TextFont, TextColor) {
+    text(&Fonts::default(), value, size, color)
+}
+
+/// Contenu de la page (appelé par `options`).
+pub fn spawn_options_page(c: &mut ChildSpawnerCommands) {
+    c.spawn(page_label("Launcher", 24.0, TEXT));
+    c.spawn(page_label("Vue des jeux", 15.0, DIM));
+    c.spawn(Node { flex_direction: FlexDirection::Row, column_gap: px(6), ..default() }).with_children(|row| {
+        for (view, name) in [(LibraryView::Grid, "Grille"), (LibraryView::List, "Liste")] {
+            view_button(row, &Fonts::default(), view, name);
+        }
+    });
+    c.spawn(page_label("Dossier des roms", 15.0, DIM));
+    c.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(12), ..default() }).with_children(|row| {
+        button(row, Node { flex_shrink: 0.0, ..button_node() }, ITEM, ITEM_HOVER).observe(|_: On<Activate>| open_rom_folder()).with_child(page_label("Ouvrir le dossier", 15.0, TEXT));
+        row.spawn(page_label(library::rom_dir().display().to_string(), 13.0, DIM));
+    });
+    c.spawn(page_label("Versions", 15.0, DIM));
+    c.spawn((page_label("", 14.0, TEXT), VersionText));
+    button(c, Node { align_self: AlignSelf::FlexStart, ..button_node() }, ITEM, ITEM_HOVER).observe(open_versions).with_child(page_label("Choisir une version et mettre a jour (ferme le studio)", 15.0, TEXT));
+}
+
+/// Le launcher de mise à jour remplace l'exécutable du studio : il faut donc le fermer.
+fn open_versions(_: On<Activate>, mut exit: MessageWriter<AppExit>, mut toasts: MessageWriter<crate::link::ShowToast>) {
+    let exe = std::env::current_exe().unwrap_or_default();
+    let updater = exe.with_file_name(format!("nds-game-studio-launcher{}", std::env::consts::EXE_SUFFIX));
+    match std::process::Command::new(&updater).arg("--versions").spawn() {
+        Ok(_) => {
+            exit.write(AppExit::Success);
+        }
+        Err(e) => {
+            toasts.write(crate::link::ShowToast(format!("{} : {e}", updater.display())));
+        }
+    }
+}
+
+fn version_text(footer: Option<Res<StudioFooter>>, mut texts: Query<&mut Text, With<VersionText>>) {
+    let wanted = footer.map(|f| f.0.clone()).unwrap_or_default();
+    for mut text in &mut texts {
+        if text.0 != wanted {
+            text.0 = wanted.clone();
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  Ce qui tourne toujours
+// ─────────────────────────────────────────────────────────────────────────
+
+fn wheel(mut events: MessageReader<MouseWheel>, mut areas: Query<(&Hovered, &ComputedNode, &mut ScrollPosition), With<Scrollable>>) {
+    for event in events.read() {
+        let delta = match event.unit {
+            MouseScrollUnit::Line => event.y * WHEEL_LINE,
+            MouseScrollUnit::Pixel => event.y,
+        };
+        for (hovered, node, mut position) in &mut areas {
+            if hovered.get() {
+                let max = ((node.content_size().y - node.size().y) * node.inverse_scale_factor()).max(0.0);
+                position.0.y = (position.0.y - delta).clamp(0.0, max);
+            }
+        }
+    }
+}
+
+fn looks(mut buttons: Query<(&Look, &Hovered, Has<Pressed>, &mut BackgroundColor)>) {
+    for (look, hovered, pressed, mut color) in &mut buttons {
+        let wanted = if hovered.get() || pressed { look.hover } else { look.normal };
+        if color.0 != wanted {
+            color.0 = wanted;
+        }
+    }
+}
+
+fn view_choice_looks(lau: Res<Launcher>, mut buttons: Query<(&ViewChoice, &Hovered, &mut BackgroundColor)>) {
+    for (choice, hovered, mut color) in &mut buttons {
+        let wanted = if lau.prefs.view == choice.0 { ITEM_ON } else if hovered.get() { ITEM_HOVER } else { ITEM };
+        if color.0 != wanted {
+            color.0 = wanted;
+        }
+    }
+}

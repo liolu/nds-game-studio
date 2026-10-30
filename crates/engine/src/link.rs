@@ -22,6 +22,7 @@ use bevy::winit::WINIT_WINDOWS;
 
 use crate::titlebar::TITLE_H;
 use crate::screens::{display_camera, DisplayCamera, DsScreens, Screen, ScreenLayout, ScreenPlaces, SCREEN_H};
+use crate::studio::StudioState;
 
 /// Distance (pixels physiques) sous laquelle une fenêtre lâchée se fusionne.
 const SNAP_DISTANCE: f32 = 64.0;
@@ -158,6 +159,7 @@ pub fn grab_button(buttons: &ButtonInput<MouseButton>, keys: &ButtonInput<KeyCod
 }
 
 fn gestures(
+    state: Res<State<StudioState>>,
     buttons: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     screens: Res<DsScreens>,
@@ -166,6 +168,10 @@ fn gestures(
     mut drag: ResMut<Drag>,
     mut windows: Query<&mut Window>,
 ) {
+    // Le launcher n'a pas d'écrans à détacher
+    if *state.get() != StudioState::Playing {
+        return;
+    }
     let Some(button) = grab_button(&buttons, &keys) else { return };
     for screen in [Screen::Bottom, Screen::Top] {
         let Some(place) = places.get(screen) else { continue };
@@ -197,6 +203,7 @@ fn gestures(
 /// Met les fenêtres dans l'état demandé par `ScreenLayout::merged`.
 fn reconcile(
     mut commands: Commands,
+    state: Res<State<StudioState>>,
     layout: Res<ScreenLayout>,
     mut screens: ResMut<DsScreens>,
     mut windows: Query<&mut Window>,
@@ -208,7 +215,9 @@ fn reconcile(
     let main = screens.main_window;
     let Ok(mut main_window) = windows.get_mut(main) else { return };
     let rows = (2 * SCREEN_H + layout.gap) as f32 / SCREEN_H as f32;
-    match (layout.merged, screens.bottom_window) {
+    // Le launcher tient dans une seule fenêtre ; le choix du joueur s'applique quand un jeu tourne
+    let merged = layout.merged || *state.get() != StudioState::Playing;
+    match (merged, screens.bottom_window) {
         (true, Some(bottom)) => {
             // Fusion : la fenêtre principale s'agrandit vers le bas pour montrer les deux écrans
             commands.entity(bottom).despawn();

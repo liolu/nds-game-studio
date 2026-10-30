@@ -1,5 +1,6 @@
 //! Fenêtre Options (F1, ou le bouton à gauche de la barre de titre).
 //!
+//! - **Launcher** : vue des jeux, dossier des roms, versions (`launcher`) ;
 //! - **Affichage** : format, écrans fusionnés ou séparés, plein écran, rendu HD ou pixel, et
 //!   « Reinitialiser les options » (toutes les options gardées, voir `settings`) ;
 //! - **Manettes** : manettes branchées et leur modèle reconnu, menu déroulant de tous les modèles,
@@ -33,6 +34,7 @@ pub struct ToggleOptions;
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 enum Page {
     #[default]
+    Launcher,
     Display,
     Controllers,
     Keyboard,
@@ -41,10 +43,11 @@ enum Page {
 }
 
 impl Page {
-    const ALL: [Page; 5] = [Page::Display, Page::Controllers, Page::Keyboard, Page::Saves, Page::Dev];
+    const ALL: [Page; 6] = [Page::Launcher, Page::Display, Page::Controllers, Page::Keyboard, Page::Saves, Page::Dev];
 
     fn label(self) -> &'static str {
         match self {
+            Page::Launcher => "Launcher",
             Page::Display => "Affichage",
             Page::Controllers => "Manettes",
             Page::Keyboard => "Clavier",
@@ -227,6 +230,7 @@ fn build_page(mut commands: Commands, mut view: ResMut<OptionsView>, keymap: Res
     let dropdown_open = view.dropdown_open;
     let page = view.page;
     commands.entity(content).with_children(|c| match page {
+        Page::Launcher => crate::launcher::spawn_options_page(c),
         Page::Display => {
             c.spawn(label("Affichage", 24.0, TEXT));
             choice_row(c, "Format de l'image (F8)", Setting::Aspect, &["Remplir", "4:3 (DS)", "16:9", "16:10"]);

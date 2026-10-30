@@ -306,6 +306,21 @@ fn matches_words(text: &str, words: &[String]) -> bool {
 // --------------------------------------------------------------------------------------------
 
 impl AssetBrowser {
+    /// Dossier des projets de décompilation.
+    pub(crate) fn projects_root(&self) -> PathBuf {
+        self.root.clone()
+    }
+
+    /// Ouvre la fenêtre (si besoin) sur ce projet.
+    pub(crate) fn show_game(&mut self, project: &str) {
+        self.start = Some((project.to_string(), None));
+    }
+
+    fn find_game(&self, game: &str) -> Option<usize> {
+        let wanted = game.to_lowercase();
+        self.games.iter().position(|g| g.label.to_lowercase() == wanted).or_else(|| self.games.iter().position(|g| !wanted.is_empty() && g.label.to_lowercase().starts_with(&wanted)))
+    }
+
     fn open_menu(&mut self, menu: Menu) {
         self.menu = if self.menu == menu { Menu::None } else { menu };
         self.menu_query.clear();
@@ -435,6 +450,15 @@ fn toggle_window(
     let start = browser.start.take();
     let requested = requests.read().count() % 2 == 1;
     if !keys.just_pressed(KeyCode::F6) && !requested && start.is_none() {
+        return;
+    }
+    // Déjà ouverte et un jeu demandé (launcher) : elle reste ouverte et montre ce jeu
+    if let (Some(_), Some((game, _))) = (browser.window, &start) {
+        if let Some(i) = browser.find_game(game) {
+            browser.menu = Menu::None;
+            browser.menu_dirty = true;
+            browser.open_game(i);
+        }
         return;
     }
     if let Some(window) = browser.window.take() {
@@ -600,8 +624,7 @@ fn toggle_window(
         std::thread::spawn(move || run_index(&root_dir, &state, false));
     }
     if let Some((game, file)) = start {
-        let wanted = game.to_lowercase();
-        if let Some(i) = browser.games.iter().position(|g| g.label.to_lowercase() == wanted).or_else(|| browser.games.iter().position(|g| !wanted.is_empty() && g.label.to_lowercase().starts_with(&wanted))) {
+        if let Some(i) = browser.find_game(&game) {
             browser.open_game(i);
             browser.want_file = file;
         }
