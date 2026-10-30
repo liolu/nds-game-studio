@@ -15,7 +15,6 @@
 //!
 //! Toute la zone est refaite quand `Launcher::dirty` est vrai, comme les pages des options.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -113,9 +112,6 @@ struct Launcher {
     /// Copies de rom en cours et leurs résultats.
     copying: usize,
     imported: Arc<Mutex<Vec<Result<Imported, String>>>>,
-    /// Code du jeu -> projet de décompilation (lu en arrière-plan au démarrage).
-    projects: HashMap<String, String>,
-    projects_found: Arc<Mutex<Option<HashMap<String, String>>>>,
     /// Premier clic sur « Retirer ce jeu ».
     confirm_remove: Option<f64>,
 }
@@ -162,14 +158,10 @@ impl Plugin for LauncherPlugin {
     }
 }
 
-fn setup(mut lau: ResMut<Launcher>, mut images: ResMut<Assets<Image>>, mut fonts: ResMut<Assets<Font>>, browser: Res<AssetBrowser>) {
+fn setup(mut lau: ResMut<Launcher>, mut images: ResMut<Assets<Image>>, mut fonts: ResMut<Assets<Font>>) {
     lau.prefs = LibraryPrefs::load();
     lau.star = images.add(star_image());
     lau.font = Fonts { latin: system_font(&mut fonts, &["segoeui.ttf"]), japanese: system_font(&mut fonts, &["YuGothR.ttc", "meiryo.ttc", "msgothic.ttc"]) };
-    let (root, found) = (browser.projects_root(), lau.projects_found.clone());
-    std::thread::spawn(move || {
-        *found.lock().unwrap() = Some(library::find_projects(&root));
-    });
 }
 
 /// Polices de Windows (accents et japonais des titres de jeux) ; ailleurs, celle de Bevy.
@@ -356,11 +348,6 @@ fn poll_disk(mut lau: ResMut<Launcher>, mut images: ResMut<Assets<Image>>, time:
         return;
     }
     lau.next_poll = now + POLL_EVERY;
-    let found = lau.projects_found.lock().unwrap().take();
-    if let Some(found) = found {
-        lau.projects = found;
-        lau.dirty = true;
-    }
     if lau.copying == 0 && library::folder_stamp(&library::rom_dir()) != lau.stamp {
         reload_roms(&mut lau, &mut images);
     }
@@ -668,8 +655,8 @@ fn spawn_game(main: &mut ChildSpawnerCommands, lau: &Launcher, rom: &Rom, regist
     .with_children(|zone| {
         let beside = COVER + 20.0;
         let (top, rest): (Top, Rest) = match lau.tab {
-            Tab::Play => play_tab(lau, rom, registry),
-            Tab::Modding => modding_tab(lau, rom),
+            Tab::Play => play_tab(rom, registry),
+            Tab::Modding => modding_tab(rom),
             Tab::Description => description_tab(rom),
             Tab::Settings => settings_tab(lau, rom),
         };
@@ -694,10 +681,9 @@ fn native_game(registry: &GameRegistry, code: &str) -> Option<String> {
     registry.specs().find(|s| !s.game_code.is_empty() && s.game_code.eq_ignore_ascii_case(code)).map(|s| s.id.clone())
 }
 
-fn play_tab(lau: &Launcher, rom: &Rom, registry: &GameRegistry) -> (Top, Rest) {
+fn play_tab(rom: &Rom, registry: &GameRegistry) -> (Top, Rest) {
     let native = native_game(registry, &rom.info.code);
     let path = rom.info.path.clone();
-    let project = lau.projects.get(&rom.info.code).cloned();
     let summary = format!("{}  -  {}  -  {}", rom.info.code, rom.info.region(), format_size(rom.info.size));
     (
         Box::new(move |t, font| {
@@ -717,29 +703,17 @@ fn play_tab(lau: &Launcher, rom: &Rom, registry: &GameRegistry) -> (Top, Rest) {
             }
             t.spawn(text(font, summary, 14.0, DIM));
         }),
-        Box::new(move |r, font| {
-            let line = match project {
-                Some(project) => t!("Decompilation project: {project}", "Projet de decompilation : {project}"),
-                None => tr("No decompilation project found for this game.", "Aucun projet de decompilation trouve pour ce jeu.").to_string(),
-            };
-            r.spawn(text(font, line, 15.0, TEXT));
-        }),
+        Box::new(|_, _| {}),
     )
 }
 
-fn modding_tab(lau: &Launcher, rom: &Rom) -> (Top, Rest) {
-    let project = lau.projects.get(&rom.info.code).cloned();
+fn modding_tab(rom: &Rom) -> (Top, Rest) {
+    let file = rom.info.file.clone();
     (
         Box::new(move |t, font| {
-            let label = if project.is_some() { tr("Open this game's assets (F6)", "Ouvrir les assets de ce jeu (F6)") } else { tr("Open the Assets window (F6)", "Ouvrir la fenetre Assets (F6)") };
             button(t, Node { align_self: AlignSelf::FlexStart, ..button_node() }, ITEM, ITEM_HOVER)
-                .observe(move |_: On<Activate>, mut browser: ResMut<AssetBrowser>, mut toggle: MessageWriter<crate::asset_browser::ToggleAssets>| match &project {
-                    Some(project) => browser.show_game(project),
-                    None => {
-                        toggle.write(crate::asset_browser::ToggleAssets);
-                    }
-                })
-                .with_child(text(font, label, 15.0, TEXT));
+                .observe(move |_: On<Activate>, mut browser: ResMut<AssetBrowser>| browser.show_game(&file))
+                .with_child(text(font, tr("Open this game's assets (F6)", "Ouvrir les assets de ce jeu (F6)"), 15.0, TEXT));
             button(t, Node { align_self: AlignSelf::FlexStart, ..button_node() }, ITEM, ITEM_HOVER)
                 .observe(|_: On<Activate>, mut toggle: MessageWriter<crate::devtools::ToggleCodeWindow>| {
                     toggle.write(crate::devtools::ToggleCodeWindow);

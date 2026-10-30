@@ -1,33 +1,34 @@
-//! Fichiers des jeux décompilés pour la fenêtre Assets : liste, décodage d'un aperçu, et index de
-//! tous les jeux (pourcentages, formats, essai d'un fichier de chaque format).
+//! Fichiers des roms pour la fenêtre Assets, lus dans la rom elle-même : liste, décodage d'un aperçu,
+//! et index de toutes les roms (pourcentages, formats, essai d'un fichier de chaque format).
 //!
 //! L'index est calculé en arrière-plan et gardé dans `assets_index.json` (dossier des données).
-//! Il est refait pour un jeu quand son dossier `files` ou `build/romarc` change.
+//! Il est refait pour une rom quand son fichier change.
 //!
 //! - **extrait** = part des octets de données lisibles fichier par fichier. Ne comptent pas comme
-//!   extraits : un `rom.bin` pas (ou pas tout) sorti dans `build/romarc`, un `.narc` illisible, et
+//!   extraits : un `rom.bin` qui n'est pas une table de fichiers, un `.narc` illisible, et
 //!   tout gros fichier (4 Mo et plus) de signature inconnue, comme `Glob.bin`. Les banques de son
 //!   et les vidéos ne comptent pas dans le total.
 //! - **regardable** = part des fichiers (ceux des archives compris) que la fenêtre sait montrer.
 
 use std::collections::{BTreeMap, HashMap};
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use nds_nitro::{g2d, model3d, narc, sniff, unpack, Kind, Rgba};
+use nds_nitro::{g2d, model3d, narc, nitrofs, romarc, sniff, unpack, Kind, Rgba};
 use serde::{Deserialize, Serialize};
 
 use crate::i18n::{t, tr};
 
 /// À changer quand le calcul change : l'index gardé est alors refait.
-const INDEX_VERSION: u32 = 1;
+const INDEX_VERSION: u32 = 2;
 const BIG_FILE: usize = 4 << 20;
 
+/// Une rom du dossier `rom` du launcher.
 pub struct GameDir {
     pub label: String,
-    pub files: PathBuf,
+    pub rom: PathBuf,
 }
 
 pub struct Entry {
@@ -35,14 +36,16 @@ pub struct Entry {
     pub path: String,
     /// Nom dans l'archive, s'il y en a un.
     pub member_name: Option<String>,
-    pub disk: PathBuf,
+    /// La rom, et la position du fichier dedans.
+    pub rom: PathBuf,
+    pub span: (usize, usize),
     pub member: Option<(usize, usize)>,
     pub kind: Kind,
     pub size: usize,
     /// Dossier (ou archive) : les fichiers qui vont ensemble y sont cherchés d'abord.
     pub dir: String,
     pub stem: String,
-    /// N° dans l'archive rom.bin (fichiers sortis par `romarc.py extract` dans build/romarc).
+    /// N° dans l'archive rom.bin.
     pub rom_index: Option<u32>,
 }
 
@@ -61,38 +64,32 @@ impl Entry {
     }
 }
 
-/// Les jeux qui ont un NitroFS extrait.
-pub fn find_games(root: &Path) -> Vec<GameDir> {
-    let mut games = Vec::new();
-    let Ok(dirs) = std::fs::read_dir(root) else { return games };
-    let mut dirs: Vec<PathBuf> = dirs.flatten().map(|d| d.path()).filter(|p| p.is_dir()).collect();
-    dirs.sort();
-    for dir in dirs {
-        let Ok(versions) = std::fs::read_dir(dir.join("extract")) else { continue };
-        let mut versions: Vec<PathBuf> = versions.flatten().map(|d| d.path()).filter(|p| p.join("files").is_dir()).collect();
-        versions.sort();
-        let name = dir.file_name().unwrap_or_default().to_string_lossy().to_string();
-        let several = versions.len() > 1;
-        for v in versions {
-            let version = v.file_name().unwrap_or_default().to_string_lossy().to_string();
-            let label = if several { format!("{name} ({version})") } else { name.clone() };
-            games.push(GameDir { label, files: v.join("files") });
-        }
-    }
-    games
+/// Les roms du dossier : « Titre (CODE) ».
+pub fn find_games(dir: &Path) -> Vec<GameDir> {
+    crate::library::scan_roms(dir).into_iter().map(|rom| GameDir { label: format!("{} ({})", plain_title(&rom.title, &rom.internal_name), rom.code), rom: rom.path }).collect()
 }
 
-fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(read) = std::fs::read_dir(dir) else { return };
-    let mut items: Vec<PathBuf> = read.flatten().map(|d| d.path()).collect();
-    items.sort_by_key(|p| p.to_string_lossy().to_lowercase());
-    for p in items {
-        if p.is_dir() {
-            walk(&p, out);
-        } else {
-            out.push(p);
+/// Le titre avec les seuls caractères de la police de cette fenêtre : sans accents ni « ™ » ; le nom
+/// interne de la rom si le titre est dans une autre écriture (japonais...).
+fn plain_title(title: &str, internal_name: &str) -> String {
+    let mut plain = String::new();
+    for c in title.chars() {
+        match c {
+            'à' | 'â' | 'ä' | 'á' | 'ã' => plain.push('a'),
+            'é' | 'è' | 'ê' | 'ë' => plain.push('e'),
+            'î' | 'ï' | 'í' | 'ì' => plain.push('i'),
+            'ô' | 'ö' | 'ó' | 'ò' | 'õ' => plain.push('o'),
+            'û' | 'ü' | 'ú' | 'ù' => plain.push('u'),
+            'ç' => plain.push('c'),
+            'ñ' => plain.push('n'),
+            'À' | 'Â' | 'Ä' | 'Á' => plain.push('A'),
+            'É' | 'È' | 'Ê' | 'Ë' => plain.push('E'),
+            '™' | '®' | '©' => {}
+            c if c.is_ascii() => plain.push(c),
+            _ => return internal_name.to_string(),
         }
     }
+    plain
 }
 
 fn stem_of(path: &str) -> String {
@@ -111,25 +108,29 @@ fn kind_of(head: &[u8], whole: impl FnOnce() -> Option<Vec<u8>>) -> Kind {
     kind
 }
 
-/// Tous les fichiers du jeu, et ceux des archives NARC.
-pub fn scan(files: &Path) -> Vec<Entry> {
-    let mut paths = Vec::new();
-    walk(files, &mut paths);
+/// Tous les fichiers de la rom, ceux des archives NARC et ceux de rom.bin.
+pub fn scan(rom_path: &Path) -> Vec<Entry> {
+    let Ok(rom) = std::fs::read(rom_path) else { return Vec::new() };
+    let Ok(files) = nitrofs::read(&rom) else { return Vec::new() };
     let mut entries = Vec::new();
-    for disk in paths {
-        let path = disk.strip_prefix(files).unwrap_or(&disk).to_string_lossy().replace('\\', "/");
-        let size = disk.metadata().map(|m| m.len() as usize).unwrap_or(0);
-        let mut head = [0u8; 4];
-        let n = std::fs::File::open(&disk).and_then(|mut f| f.read(&mut head)).unwrap_or(0);
+    let mut rom_bin = Vec::new();
+    for file in files {
+        let span = (file.start, file.end);
+        let data = &rom[file.start..file.end];
+        let path = file.path;
+        let size = data.len();
         let small = size < BIG_FILE;
-        let kind = kind_of(&head[..n], || small.then(|| std::fs::read(&disk).ok()).flatten());
+        let kind = kind_of(&data[..size.min(4)], || small.then(|| data.to_vec()));
         let dir = path.rsplit_once('/').map_or(String::new(), |(d, _)| d.to_string());
         let stem = stem_of(&path);
-        entries.push(Entry { path: path.clone(), member_name: None, disk: disk.clone(), member: None, kind, size, dir, stem, rom_index: None });
+        entries.push(Entry { path: path.clone(), member_name: None, rom: rom_path.to_path_buf(), span, member: None, kind, size, dir, stem, rom_index: None });
+        if path.rsplit('/').next().is_some_and(|n| n.eq_ignore_ascii_case("rom.bin")) {
+            rom_bin = scan_rom_bin(rom_path, data, file.start);
+        }
         if kind != Kind::Archive {
             continue;
         }
-        let Ok(bytes) = std::fs::read(&disk).map(unpack) else { continue };
+        let bytes = unpack(data.to_vec());
         let Ok(members) = narc::read(&bytes) else { continue };
         for m in members {
             let data = &bytes[m.start..m.end];
@@ -137,44 +138,42 @@ pub fn scan(files: &Path) -> Vec<Entry> {
             let member_path = format!("{path}#{}", m.index);
             let named = !m.name.chars().all(|c| c.is_ascii_digit());
             let stem = if named { stem_of(&m.name) } else { String::new() };
-            entries.push(Entry { path: member_path, member_name: named.then(|| m.name.clone()), disk: disk.clone(), member: Some((m.start, m.end)), kind, size: m.end - m.start, dir: path.clone(), stem, rom_index: None });
+            entries.push(Entry { path: member_path, member_name: named.then(|| m.name.clone()), rom: rom_path.to_path_buf(), span, member: Some((m.start, m.end)), kind, size: m.end - m.start, dir: path.clone(), stem, rom_index: None });
         }
     }
-    entries.extend(scan_romarc(files));
+    entries.extend(rom_bin);
     entries
 }
 
-/// Dossier des fichiers sortis de rom.bin : `<jeu>/build/romarc` (files = `<jeu>/extract/<v>/files`).
-fn romarc_dir(files: &Path) -> Option<PathBuf> {
-    Some(files.parent()?.parent()?.parent()?.join("build").join("romarc"))
-}
-
-/// Les fichiers de l'archive numérotée rom.bin (jeux Traveller's Tales, EA...) une fois sortis
-/// par `studio/gametools/romarc.py extract` : `<n sur 5 chiffres>.<ext>`.
-fn scan_romarc(files: &Path) -> Vec<Entry> {
-    let Some(dir) = romarc_dir(files) else { return Vec::new() };
-    let mut paths = Vec::new();
-    walk(&dir, &mut paths);
-    let mut entries: Vec<Entry> = paths
+/// Les fichiers de l'archive numérotée rom.bin : `rom.bin#n`, nommés `<n sur 5 chiffres>.<ext>`.
+fn scan_rom_bin(rom_path: &Path, data: &[u8], base: usize) -> Vec<Entry> {
+    romarc::entries(data)
         .into_iter()
-        .filter_map(|disk| {
-            let name = disk.file_name()?.to_string_lossy().to_string();
-            let n: u32 = name.split('.').next()?.parse().ok()?;
-            let size = disk.metadata().map(|m| m.len() as usize).unwrap_or(0);
-            let mut head = [0u8; 4];
-            let read = std::fs::File::open(&disk).and_then(|mut f| f.read(&mut head)).unwrap_or(0);
-            let kind = kind_of(&head[..read], || (size < BIG_FILE).then(|| std::fs::read(&disk).ok()).flatten());
-            Some(Entry { path: format!("rom.bin#{n}"), member_name: Some(name), disk, member: None, kind, size, dir: "rom.bin".into(), stem: n.to_string(), rom_index: Some(n) })
+        .enumerate()
+        .map(|(n, (at, size))| {
+            let bytes = unpack(romarc::unpack(&data[at..at + size]));
+            let name = format!("{n:05}.{}", romarc::extension(&bytes));
+            Entry { path: format!("rom.bin#{n}"), member_name: Some(name), rom: rom_path.to_path_buf(), span: (base + at, base + at + size), member: None, kind: sniff(&bytes), size: bytes.len(), dir: "rom.bin".into(), stem: n.to_string(), rom_index: Some(n as u32) }
         })
-        .collect();
-    entries.sort_by_key(|e| e.rom_index);
-    entries
+        .collect()
+}
+
+fn read_span(rom: &Path, (start, end): (usize, usize)) -> Result<Vec<u8>, String> {
+    let mut file = std::fs::File::open(rom).map_err(|e| e.to_string())?;
+    file.seek(SeekFrom::Start(start as u64)).map_err(|e| e.to_string())?;
+    let mut bytes = vec![0u8; end - start];
+    file.read_exact(&mut bytes).map_err(|e| e.to_string())?;
+    Ok(bytes)
 }
 
 pub fn read_entry(entry: &Entry) -> Result<Vec<u8>, String> {
-    let bytes = unpack(std::fs::read(&entry.disk).map_err(|e| e.to_string())?);
+    let raw = read_span(&entry.rom, entry.span)?;
+    if entry.rom_index.is_some() {
+        return Ok(unpack(romarc::unpack(&raw)));
+    }
+    let bytes = unpack(raw);
     Ok(match entry.member {
-        Some((start, end)) => unpack(bytes.get(start..end).ok_or("archive changee depuis la lecture")?.to_vec()),
+        Some((start, end)) => unpack(bytes.get(start..end).ok_or(tr("archive changed since it was read", "archive changee depuis la lecture"))?.to_vec()),
         None => bytes,
     })
 }
@@ -492,16 +491,8 @@ fn modified_secs(path: &Path) -> u64 {
     path.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs())
 }
 
-fn stamp_of(files: &Path) -> u64 {
-    modified_secs(files) ^ romarc_dir(files).map_or(0, |d| modified_secs(&d).rotate_left(21))
-}
-
-/// Combien de fichiers annonce la table d'offsets de rom.bin (voir romarc.py).
-fn rom_table_entries(disk: &Path) -> Option<usize> {
-    let mut head = [0u8; 4];
-    std::fs::File::open(disk).ok()?.read_exact(&mut head).ok()?;
-    let first = u32::from_le_bytes(head) as usize;
-    (first >= 8 && first % 4 == 0 && first <= disk.metadata().ok()?.len() as usize).then_some(first / 4 - 1)
+fn stamp_of(rom: &Path) -> u64 {
+    modified_secs(rom) ^ rom.metadata().map_or(0, |m| m.len()).rotate_left(21)
 }
 
 /// Essaie de montrer un fichier avec le code de l'aperçu.
@@ -538,10 +529,10 @@ fn is_media(entry: &Entry) -> bool {
 }
 
 /// Les chiffres d'un jeu, et l'essai d'un fichier de chaque format.
-pub fn game_stats(files: &Path) -> GameStats {
-    let entries = scan(files);
-    let mut stats = GameStats { stamp: stamp_of(files), ..GameStats::default() };
-    let romarc_files = entries.iter().filter(|e| e.rom_index.is_some()).count();
+pub fn game_stats(rom: &Path) -> GameStats {
+    let entries = scan(rom);
+    let mut stats = GameStats { stamp: stamp_of(rom), ..GameStats::default() };
+    let rom_bin_total = entries.iter().filter(|e| e.rom_index.is_some()).count();
     for (i, e) in entries.iter().enumerate() {
         let is_top_file = e.member.is_none() && e.rom_index.is_none();
         let parsed_archive = e.kind == Kind::Archive && read_entry(e).ok().is_some_and(|b| narc::read(&b).is_ok());
@@ -550,8 +541,7 @@ pub fn game_stats(files: &Path) -> GameStats {
         if is_top_file && !is_media(e) {
             stats.data_bytes += e.size as u64;
             let part = if is_rom_bin {
-                let total = rom_table_entries(&e.disk).unwrap_or(romarc_files.max(1));
-                (romarc_files as f64 / total.max(1) as f64).min(1.0)
+                if rom_bin_total > 0 { 1.0 } else { 0.0 }
             } else if (e.kind == Kind::Archive && !parsed_archive) || (e.kind == Kind::Other && e.size >= BIG_FILE) {
                 0.0
             } else {
@@ -560,7 +550,7 @@ pub fn game_stats(files: &Path) -> GameStats {
             stats.extracted_bytes += (e.size as f64 * part) as u64;
         }
         // Fichiers : une archive ouverte ne compte pas, ce qu'elle contient oui
-        if !parsed_archive && !(is_rom_bin && romarc_files > 0) {
+        if !parsed_archive && !(is_rom_bin && rom_bin_total > 0) {
             stats.files += 1;
             stats.viewable += usize::from(e.kind.viewable());
         }
@@ -615,14 +605,14 @@ fn save_index(stats: &HashMap<String, GameStats>) {
     }
 }
 
-/// Met l'index à jour jeu après jeu (dans un fil à part) ; `fresh` refait tous les jeux.
-pub fn run_index(root: &Path, state: &Arc<Mutex<IndexState>>, fresh: bool) {
-    let games = find_games(root);
+/// Met l'index à jour rom après rom (dans un fil à part) ; `fresh` les refait toutes.
+pub fn run_index(dir: &Path, state: &Arc<Mutex<IndexState>>, fresh: bool) {
+    let games = find_games(dir);
     let known = if fresh { HashMap::new() } else { load_index() };
     {
         let mut s = state.lock().unwrap();
         s.total = games.len();
-        s.stats = known.iter().filter(|(label, stat)| games.iter().any(|g| &g.label == *label && stat.stamp == stamp_of(&g.files))).map(|(l, s)| (l.clone(), s.clone())).collect();
+        s.stats = known.iter().filter(|(label, stat)| games.iter().any(|g| &g.label == *label && stat.stamp == stamp_of(&g.rom))).map(|(l, s)| (l.clone(), s.clone())).collect();
         s.done = s.stats.len();
         s.revision += 1;
     }
@@ -631,11 +621,73 @@ pub fn run_index(root: &Path, state: &Arc<Mutex<IndexState>>, fresh: bool) {
         if fresh_enough {
             continue;
         }
-        let stats = game_stats(&game.files);
+        let stats = game_stats(&game.rom);
         let mut s = state.lock().unwrap();
         s.stats.insert(game.label.clone(), stats);
         s.done += 1;
         s.revision += 1;
         save_index(&s.stats);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Une rom avec NitroFS : `rom.bin` (un fichier en copie, un en données brutes) et une palette.
+    fn rom_with_files(name: &str) -> PathBuf {
+        let mut rom_bin: Vec<u8> = [12u32, 20, 28].iter().flat_map(|v| v.to_le_bytes()).collect();
+        rom_bin.extend([0x00, 4, 0, 0, b'B', b'M', b'D', b'0']);
+        rom_bin.extend([0x60, 16, 0, 0, 1, 2, 3, 4]);
+        let mut rom = nds_nitro::nitrofs::tests_rom(b"RLCN....", &rom_bin);
+        rom[0x15C..0x15E].copy_from_slice(&0xCF56u16.to_le_bytes());
+        let dir = std::env::temp_dir().join(format!("ndsgs-scan-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("jeu.nds");
+        std::fs::write(&path, rom).unwrap();
+        path
+    }
+
+    #[test]
+    fn titles_fit_the_font() {
+        assert_eq!(plain_title("Madagascar™", "MADAGASCAR"), "Madagascar");
+        assert_eq!(plain_title("Pokémon Dash", "POKEMON DASH"), "Pokemon Dash");
+        assert_eq!(plain_title("ゲームででましたっ！", "POWERPUFF"), "POWERPUFF");
+    }
+
+    #[test]
+    fn lists_and_reads_files_from_the_rom() {
+        let path = rom_with_files("list");
+        let entries = scan(&path);
+        let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths, ["data/a.bin", "rom.bin", "rom.bin#0", "rom.bin#1"]);
+        assert_eq!(entries[0].kind, Kind::Palette);
+        assert_eq!(read_entry(&entries[0]).unwrap(), b"RLCN....");
+        // rom.bin#0 : dépaqueté, reconnu par sa signature
+        assert_eq!(entries[2].kind, Kind::Model);
+        assert_eq!(read_entry(&entries[2]).unwrap(), b"BMD0");
+        assert_eq!(entries[2].format(), "nsbmd");
+        // rom.bin#1 : ressemble seulement à un fichier empaqueté
+        assert_eq!(read_entry(&entries[3]).unwrap(), [0x60, 16, 0, 0, 1, 2, 3, 4]);
+        assert_eq!(entries[3].format(), "bin");
+    }
+
+    #[test]
+    fn the_stats_count_rom_bin() {
+        let stats = game_stats(&rom_with_files("stats"));
+        // data/a.bin (8 octets) et rom.bin (28 octets), lisibles tous les deux
+        assert_eq!(stats.data_bytes, 36);
+        assert_eq!(stats.extracted_bytes, 36);
+    }
+
+    #[test]
+    fn a_broken_rom_gives_nothing() {
+        let dir = std::env::temp_dir().join(format!("ndsgs-scan-broken-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("casse.nds");
+        std::fs::write(&path, [0u8; 8]).unwrap();
+        assert!(scan(&path).is_empty());
+        assert!(scan(&dir.join("absente.nds")).is_empty());
     }
 }

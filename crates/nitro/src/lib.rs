@@ -7,6 +7,7 @@
 //! - 2D : `.nclr` (palettes), `.ncgr` (tuiles), `.nscr` (écrans de tuiles), `.ncer` (cellules /
 //!   sprites), voir `g2d`.
 //! - Archives `.narc` (`narc`) et fichiers compressés LZ77 du BIOS (`decompress`).
+//! - Les fichiers d'une rom, lus dans la rom : NitroFS (`nitrofs`), archives numérotées `rom.bin` (`romarc`).
 
 #![allow(mismatched_lifetime_syntaxes)]
 
@@ -25,6 +26,8 @@ pub mod primitives;
 pub mod g2d;
 pub mod model3d;
 pub mod narc;
+pub mod nitrofs;
+pub mod romarc;
 
 pub use errors::Result;
 

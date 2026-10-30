@@ -1,10 +1,9 @@
 //! La bibliothèque du launcher, sans interface : les roms du dossier `rom` (à côté du launcher),
 //! ce qu'on lit dans leur en-tête (nom, éditeur, icône), l'ajout d'une rom et les préférences.
 //!
-//! Les roms ne sont jamais émulées : elles identifient le jeu (code `AQIE`...) pour trouver sa
-//! décompilation et son module natif, et fourniront ses fichiers au runtime.
+//! Les roms ne sont jamais émulées : elles identifient le jeu (code `AQIE`...) pour trouver son module
+//! natif, et donnent ses fichiers à la fenêtre Assets (F6) et au runtime.
 
-use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -211,22 +210,6 @@ pub fn import_rom(source: &Path, dir: &Path) -> Result<Imported, String> {
         t!("cannot copy: {e}", "copie impossible : {e}")
     })?;
     Ok(Imported { title: info.title, already: false })
-}
-
-/// Code du jeu -> projet de décompilation, d'après la rom à la racine de chaque projet.
-pub fn find_projects(root: &Path) -> HashMap<String, String> {
-    let mut projects = HashMap::new();
-    let Ok(games) = std::fs::read_dir(root) else { return projects };
-    for game in games.flatten().filter(|g| g.path().is_dir()) {
-        let Ok(files) = std::fs::read_dir(game.path()) else { continue };
-        for path in files.flatten().map(|f| f.path()).filter(|p| has_rom_extension(p)) {
-            let mut start = [0u8; 0x10];
-            if File::open(&path).and_then(|mut f| f.read_exact(&mut start)).is_ok() {
-                projects.entry(ascii(&start[0x0C..])).or_insert_with(|| game.file_name().to_string_lossy().into_owned());
-            }
-        }
-    }
-    projects
 }
 
 /// Vue de la liste des jeux.
