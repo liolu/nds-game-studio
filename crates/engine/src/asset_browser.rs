@@ -44,6 +44,7 @@ use bevy::ui_widgets::{Activate, Button};
 use bevy::window::{WindowRef, WindowResolution};
 use nds_nitro::{model3d, Kind, Rgba};
 
+use crate::video::{VideoAudio, VideoPlayer};
 use crate::i18n::{t, tr, Language, Tr};
 use crate::library;
 use crate::asset_scan::{all_formats, choices_for, decode, find_games, run_index, scan, thumbnail, kind_text, size_text, Choices, Decoded, Entry, FormatStat, GameDir, IndexState};
@@ -171,6 +172,7 @@ pub(crate) struct AssetBrowser {
     jobs: Arc<ThumbJobs>,
     anim_time: f32,
     sound: Option<Handle<bevy::audio::AudioSource>>,
+    video: Option<VideoPlayer>,
     /// Aperçu en texte, et sa première ligne visible.
     text_lines: Vec<String>,
     text_scroll: usize,
@@ -250,6 +252,7 @@ impl Default for AssetBrowser {
             jobs: Arc::new(ThumbJobs::default()),
             anim_time: 0.0,
             sound: None,
+            video: None,
             text_lines: Vec::new(),
             text_scroll: 0,
             text_font: None,
@@ -1146,7 +1149,7 @@ fn rebuild_controls(mut commands: Commands, mut b: ResMut<AssetBrowser>, childre
         let tex = if c.texture == 0 { tr("the model's own", "celles du modele").to_string() } else { name(&c.textures, c.texture - 1) };
         steps.push((Ctl::Textures, t!("Textures: {tex}", "Textures : {tex}")));
     }
-    let has_sound = b.sound.is_some();
+    let has_sound = b.sound.is_some() || b.video.is_some();
     commands.entity(controls).with_children(|row| {
         if has_sound {
             row.spawn((Button, Hovered::default(), item_node(), BackgroundColor(ITEM), PlayButton)).observe(toggle_sound).with_child(label(tr("Play / Stop", "Jouer / Arreter"), 14.0, TEXT));
@@ -1187,7 +1190,15 @@ fn step_choice(activate: On<Activate>, steps: Query<&StepButton>, mut b: ResMut<
 #[derive(Component)]
 struct PlayButton;
 
-fn toggle_sound(_: On<Activate>, mut commands: Commands, b: Res<AssetBrowser>, playing: Query<Entity, With<PreviewSound>>) {
+fn toggle_sound(_: On<Activate>, mut commands: Commands, mut b: ResMut<AssetBrowser>, mut sources: ResMut<Assets<VideoAudio>>, playing: Query<Entity, With<PreviewSound>>) {
+    if let Some(video) = &mut b.video {
+        if video.is_playing() {
+            video.stop(&mut commands);
+        } else {
+            video.play(&mut commands, &mut sources);
+        }
+        return;
+    }
     let mut stopped = false;
     for sound in &playing {
         commands.entity(sound).despawn();
@@ -1199,12 +1210,18 @@ fn toggle_sound(_: On<Activate>, mut commands: Commands, b: Res<AssetBrowser>, p
 }
 
 /// Fait avancer l'aperçu animé (images 2D ou modèle 3D).
-fn play_preview(time: Res<Time>, mut b: ResMut<AssetBrowser>, mut meshes: ResMut<Assets<Mesh>>, mut commands: Commands, sounds: Query<Entity, With<PreviewSound>>) {
+fn play_preview(time: Res<Time>, mut b: ResMut<AssetBrowser>, mut meshes: ResMut<Assets<Mesh>>, mut images: ResMut<Assets<Image>>, mut commands: Commands, sounds: Query<Entity, With<PreviewSound>>) {
     if b.window.is_none() {
         for sound in &sounds {
             commands.entity(sound).despawn();
         }
+        if let Some(video) = &mut b.video {
+            video.stop(&mut commands);
+        }
         return;
+    }
+    if let Some(video) = &mut b.video {
+        video.update(time.delta_secs(), &mut images);
     }
     b.anim_time += time.delta_secs();
     let now = b.anim_time;
@@ -1361,6 +1378,9 @@ fn render_preview(
     b.model_anim = None;
     b.anim_time = 0.0;
     b.sound = None;
+    if let Some(mut video) = b.video.take() {
+        video.stop(&mut commands);
+    }
     b.text_lines.clear();
     b.text_scroll = 0;
     b.text_shown = None;
@@ -1406,6 +1426,13 @@ fn preview(b: &mut AssetBrowser, sel: usize, commands: &mut Commands, images: &m
             b.image = Some((images.add(to_image(&waveform, ImageSampler::linear())), UVec2::new(waveform.width, waveform.height)));
             b.sound = Some(audio.add(bevy::audio::AudioSource { bytes: wav.into() }));
             b.info = format!("{}  ({})  -  {info}", kind_text(kind), size_text(size));
+        }
+        Decoded::Video { bytes, info } => {
+            let player = VideoPlayer::new(bytes, images)?;
+            let v = player.info();
+            b.image = Some((player.image(), UVec2::new(v.width, v.height)));
+            b.info = format!("{}  ({})  -  {info}", kind_text(kind), size_text(size));
+            b.video = Some(player);
         }
         Decoded::Text { lines, info } => {
             b.text_lines = lines;

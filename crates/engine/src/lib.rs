@@ -29,6 +29,7 @@ pub mod settings;
 pub mod spec;
 pub mod studio;
 pub mod titlebar;
+pub mod video;
 
 use bevy::prelude::*;
 use bevy::window::{ExitCondition, WindowResolution};
@@ -81,7 +82,7 @@ impl Plugin for NdsEnginePlugin {
                 }),
         )
         .add_plugins((screens::ScreensPlugin, link::LinkPlugin, input::InputPlugin, studio::StudioPlugin, titlebar::TitleBarPlugin, devtools::DevToolsPlugin, options::OptionsPlugin))
-            .add_plugins((save::SavePlugin, settings::SettingsPlugin, saves_page::SavesPagePlugin, asset_browser::AssetBrowserPlugin, launcher::LauncherPlugin, i18n::I18nPlugin));
+            .add_plugins((save::SavePlugin, settings::SettingsPlugin, saves_page::SavesPagePlugin, asset_browser::AssetBrowserPlugin, launcher::LauncherPlugin, i18n::I18nPlugin, video::VideoPlugin));
         options.apply_to_app(app);
     }
 }

@@ -16,6 +16,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use nds_video::Video;
 use nds_nitro::{adx, decompress_any, g2d, gx_mesh, looks_compressed, model3d, narc, nitrofs, romarc, sadl, sdat, sniff, unpack, Kind, Rgba};
 use serde::{Deserialize, Serialize};
 
@@ -356,6 +357,45 @@ fn anm_lines(bytes: &[u8]) -> Vec<String> {
     lines
 }
 
+/// Une vidéo se joue ; sans image (Viva Pinata range sa musique en Bink 4x4), c'est un son.
+fn video_preview(bytes: Vec<u8>) -> Decoded {
+    let bytes: Arc<[u8]> = bytes.into();
+    let mut video = match Video::open(bytes.clone()) {
+        Ok(video) => video,
+        Err(e) => return Decoded::Text { lines: video_lines(&bytes), info: t!("Video not readable: {e}", "Video illisible : {e}") },
+    };
+    let v = video.info().clone();
+    let sound = if v.channels > 0 { t!("{} Hz, {} channels", "{} Hz, {} voies", v.sample_rate, v.channels) } else { tr("no sound", "sans son").to_string() };
+    if v.width >= 16 || v.channels == 0 {
+        let info = t!("{} {}x{}, {} frames, {:.1} per second, {:.1} s, {sound}", "{} {}x{}, {} images, {:.1} par seconde, {:.1} s, {sound}", v.format, v.width, v.height, v.frames, v.fps, v.seconds());
+        return Decoded::Video { bytes, info };
+    }
+    let mut pcm = Vec::new();
+    while video.advance(&mut pcm) {}
+    let samples = pcm.iter().map(|s| (s.clamp(-1.0, 1.0) * 32767.0) as i16).collect();
+    audio(sadl::Sound { rate: v.sample_rate, channels: v.channels, samples }, format!("{}, ", v.format))
+}
+
+/// Quelques images du début : une vidéo entière serait trop longue à parcourir pour une vignette.
+fn video_thumbnail(bytes: Arc<[u8]>) -> Option<Vec<(Rgba, u16)>> {
+    let mut video = Video::open(bytes).ok()?;
+    let v = video.info().clone();
+    let step = (v.fps / 2.0).round().max(1.0) as usize;
+    let duration = (step as f32 / v.fps.max(0.01) * 60.0) as u16;
+    let (mut pcm, mut rgba, mut frames) = (Vec::new(), Vec::new(), Vec::new());
+    for frame in 0..step * THUMB_FRAMES {
+        if !video.advance(&mut pcm) {
+            break;
+        }
+        pcm.clear();
+        if frame % step == 0 {
+            video.rgba(&mut rgba);
+            frames.push((fit_thumb(&Rgba { width: v.width, height: v.height, data: rgba.clone() }), duration.max(1)));
+        }
+    }
+    Some(frames)
+}
+
 /// Les caractéristiques d'une vidéo, d'après son en-tête.
 fn video_lines(bytes: &[u8]) -> Vec<String> {
     let u32_at = |at: usize| bytes.get(at..at + 4).map_or(0, |s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]));
@@ -366,7 +406,7 @@ fn video_lines(bytes: &[u8]) -> Vec<String> {
     };
     vec![
         t!("Video {format}: {width}x{height}, {frames} frames, {fps:.1} per second", "Video {format} : {width}x{height}, {frames} images, {fps:.1} par seconde"),
-        t!("{:.1} seconds. The video itself is not played.", "{:.1} secondes. La video elle-meme n'est pas lue.", frames as f32 / fps.max(0.01)),
+        t!("{:.1} seconds.", "{:.1} secondes.", frames as f32 / fps.max(0.01)),
     ]
 }
 
@@ -745,6 +785,8 @@ pub enum Decoded {
     Animated { model: model3d::ModelOut, animation: model3d::AnimOut },
     Audio { wav: Vec<u8>, waveform: Rgba, info: String },
     Text { lines: Vec<String>, info: String },
+    /// Une vidéo à jouer (`video::VideoPlayer`).
+    Video { bytes: Arc<[u8]>, info: String },
 }
 
 const TEXT_BYTES: usize = 16 * 1024;
@@ -1124,7 +1166,7 @@ fn decode_inner(entries: &[Entry], sel: usize, c: &mut Choices) -> Result<Decode
                 None => Ok(Decoded::Text { lines: text_lines(&inner), info: t!("Not an image: {} once decompressed", "Pas une image : {} une fois decompresse", size_text(inner.len())) }),
             }
         }
-        Kind::Video => Ok(Decoded::Text { lines: video_lines(&bytes), info: t!("Video: not played", "Video : pas lue") }),
+        Kind::Video => Ok(video_preview(bytes)),
         Kind::Texel | Kind::TextureRef => {
             let texel_bytes = if kind == Kind::Texel { bytes.clone() } else { load(&c.linked, c.link)?.ok_or(tr("texture file not found", "fichier de la texture introuvable"))? };
             let texel = g2d::read_texel(&texel_bytes).map_err(|e| e.to_string())?;
@@ -1265,6 +1307,7 @@ pub fn thumbnail(entries: &[Entry], sel: usize) -> Option<Vec<(Rgba, u16)>> {
                 let duration = animation.step.saturating_mul(step as u16).max(1);
                 Some(animation.frames.iter().step_by(step).map(|pose| (model3d::render_thumbnail(&model, Some(pose), animation.min, animation.max, THUMB_SIZE), duration)).collect())
             }
+            Decoded::Video { bytes, .. } => video_thumbnail(bytes),
             Decoded::Text { .. } => None,
         }
     }))
@@ -1402,7 +1445,7 @@ fn try_show(entries: &[Entry], sel: usize) -> Result<String, String> {
             }
         }
         Decoded::Animated { animation, .. } => Ok(format!("animation {} images", animation.frames.len())),
-        Decoded::Audio { info, .. } | Decoded::Text { info, .. } => Ok(info),
+        Decoded::Audio { info, .. } | Decoded::Text { info, .. } | Decoded::Video { info, .. } => Ok(info),
         Decoded::Model { model, .. } => {
             if model.triangle_count == 0 {
                 Err("modele sans triangles".into())

@@ -111,6 +111,9 @@ fichiers des jeux, pour voir leurs modèles 3D et leurs images et nommer les obj
 - **Sons** : `.sad` / `sadl` (IMA et Procyon ADPCM), et dans les archives `.sdat` les musiques `STRM` et les
   banques de sons `SWAR` (listés `sound_data.sdat#n` avec leur nom) : forme d'onde et bouton pour écouter. Les
   séquences `SSEQ` ne se jouent pas (il faudrait un synthétiseur).
+- **Vidéos** `.vx` (Actimagine), `.mods` (Mobiclip) et `.bik` (Bink) : image et son, avec le bouton pour jouer, et
+  une vignette animée dans la grille. Un Bink sans image (les musiques de Viva Piñata) se montre comme un son.
+  Le code de lecture est dans `crates/video`, portage de FFmpeg et de mobipeg, sous LGPL 2.1 ou ultérieure.
 - **Polices** `.nftr` (planche des caractères), **messages** `.bmg` (les textes du jeu).
 - **Fichiers bruts** sans en-tête, reconnus par leur extension : tuiles `.nbfc`, palettes `.nbfp` / `.ntfp` / `.pal`,
   écrans `.nbfs` / `.scr`. Les fichiers source NITRO-CHARACTER `.ncg`, `.ncl`, `.nsc` s'ouvrent comme les autres images.
