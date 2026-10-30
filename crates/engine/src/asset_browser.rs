@@ -11,6 +11,9 @@
 //!   zoom), textures `.nsbtx`, palettes `.nclr`, tuiles `.ncgr`/`.ncbr`, écrans `.nscr`, cellules
 //!   `.ncer` ; la palette, les tuiles ou les textures qui vont avec sont devinées (même dossier,
 //!   nom le plus proche) et se changent avec les flèches ;
+//! - le menu des jeux a une recherche et donne le pourcentage extrait et regardable de chaque
+//!   jeu ; le menu des formats liste toutes les extensions des jeux, cochées si l'app les montre
+//!   (voir `asset_scan`) ;
 //! - « Copier le chemin » met le chemin NitroFS dans le presse-papiers (pour le relier aux
 //!   fonctions du jeu dans DS Decomp Studio) ;
 //! - section « rom.bin » : les fichiers de l'archive numérotée rom.bin (Lego Star Wars II, Les
@@ -21,8 +24,7 @@
 //! Lecture des formats : crate `nds-nitro` (code d'apicula pour la 3D).
 
 use std::collections::HashMap;
-use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use bevy::asset::RenderAssetUsages;
@@ -42,7 +44,9 @@ use bevy::render::view::Tonemapping;
 use bevy::ui::Pressed;
 use bevy::ui_widgets::{Activate, Button};
 use bevy::window::{WindowRef, WindowResolution};
-use nds_nitro::{g2d, model3d, narc, sniff, unpack, Kind, Rgba};
+use nds_nitro::{model3d, Kind, Rgba};
+
+use crate::asset_scan::{all_formats, choices_for, decode, find_games, run_index, scan, size_text, Choices, Decoded, Entry, FormatStat, GameDir, IndexState};
 
 /// La fenêtre des assets (la fermer ne quitte pas le studio).
 #[derive(Component)]
@@ -57,6 +61,11 @@ const DEFAULT_PROJECTS: &str = r"D:\... logiciel\decomp\decomp ds\projets";
 const LAYER: usize = 24;
 const ROWS: usize = 36;
 const ROW_H: f32 = 21.0;
+/// Menus déroulants : largeur, lignes visibles, hauteur d'une ligne, largeur d'une colonne.
+const MENU_W: f32 = 860.0;
+const MENU_ROWS: usize = 28;
+const MENU_ROW_H: f32 = 23.0;
+const MENU_COLUMN: f32 = 100.0;
 /// Taille de l'image où la vue 3D est rendue.
 const VIEW_W: u32 = 1280;
 const VIEW_H: u32 = 960;
@@ -71,25 +80,12 @@ const TEXT: Color = Color::srgb(0.9, 0.91, 0.94);
 const DIM: Color = Color::srgb(0.6, 0.63, 0.7);
 const VIEW_BG: Color = Color::srgb(0.2, 0.21, 0.24);
 
-struct GameDir {
-    label: String,
-    files: PathBuf,
-}
-
-struct Entry {
-    /// Chemin dans NitroFS (sans « / » au début) ; `archive.narc#n` dans une archive.
-    path: String,
-    /// Nom dans l'archive, s'il y en a un.
-    member_name: Option<String>,
-    disk: PathBuf,
-    member: Option<(usize, usize)>,
-    kind: Kind,
-    size: usize,
-    /// Dossier (ou archive) : les fichiers qui vont ensemble y sont cherchés d'abord.
-    dir: String,
-    stem: String,
-    /// N° dans l'archive rom.bin (fichiers sortis par `romarc.py extract` dans build/romarc).
-    rom_index: Option<u32>,
+/// Le menu déroulant ouvert.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Menu {
+    None,
+    Games,
+    Formats,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -103,31 +99,12 @@ enum Ctl {
     Model,
 }
 
-/// Choix de l'aperçu (fichiers qui vont avec, palette, cellule...).
-#[derive(Default)]
-struct Choices {
-    palettes: Vec<usize>,
-    palette: usize,
-    tiles: Vec<usize>,
-    tile: usize,
-    /// Fichiers de textures pour un modèle ; `texture` 0 = aucun, n = `textures[n - 1]`.
-    textures: Vec<usize>,
-    texture: usize,
-    bank: usize,
-    banks: usize,
-    width: u32,
-    cell: usize,
-    cells: usize,
-    model: usize,
-    models: usize,
-}
-
 #[derive(Resource)]
 pub(crate) struct AssetBrowser {
     window: Option<Entity>,
     parts: Vec<Entity>,
     list: Option<Entity>,
-    games_overlay: Option<Entity>,
+    menu_overlay: Option<Entity>,
     controls: Option<Entity>,
     image_box: Option<Entity>,
     image_node: Option<Entity>,
@@ -137,10 +114,19 @@ pub(crate) struct AssetBrowser {
     root: PathBuf,
     games: Vec<GameDir>,
     game: Option<usize>,
-    games_open: bool,
+    menu: Menu,
+    menu_query: String,
+    menu_scroll: usize,
+    menu_len: usize,
+    menu_dirty: bool,
+    index: Arc<Mutex<IndexState>>,
+    index_started: bool,
+    index_seen: u64,
     entries: Vec<Entry>,
     shown: Vec<usize>,
     filter: String,
+    /// Format choisi dans le menu des formats : seuls ses fichiers sont listés.
+    format_filter: Option<String>,
     all_files: bool,
     scroll: usize,
     selected: Option<usize>,
@@ -160,6 +146,7 @@ pub(crate) struct AssetBrowser {
     scanning: Option<Arc<Mutex<Option<Vec<Entry>>>>>,
     /// Fichier à montrer quand la lecture est finie.
     want_file: Option<String>,
+    start_menu: Option<(Menu, String)>,
 }
 
 impl Default for AssetBrowser {
@@ -168,7 +155,7 @@ impl Default for AssetBrowser {
             window: None,
             parts: Vec::new(),
             list: None,
-            games_overlay: None,
+            menu_overlay: None,
             controls: None,
             image_box: None,
             image_node: None,
@@ -178,10 +165,18 @@ impl Default for AssetBrowser {
             root: PathBuf::new(),
             games: Vec::new(),
             game: None,
-            games_open: false,
+            menu: Menu::None,
+            menu_query: String::new(),
+            menu_scroll: 0,
+            menu_len: 0,
+            menu_dirty: false,
+            index: Arc::default(),
+            index_started: false,
+            index_seen: 0,
             entries: Vec::new(),
             shown: Vec::new(),
             filter: String::new(),
+            format_filter: None,
             all_files: false,
             scroll: 0,
             selected: None,
@@ -197,6 +192,7 @@ impl Default for AssetBrowser {
             start: None,
             scanning: None,
             want_file: None,
+            start_menu: None,
         }
     }
 }
@@ -223,6 +219,13 @@ struct GameButton;
 
 #[derive(Component)]
 struct GameChoice(usize);
+
+#[derive(Component)]
+struct FormatButton;
+
+/// L'extension du format, et si tous ses fichiers sont regardables.
+#[derive(Component)]
+struct FormatChoice(String, bool);
 
 #[derive(Component)]
 struct FilterButton;
@@ -264,6 +267,10 @@ impl Plugin for AssetBrowserPlugin {
                 (open, game) = (true, Some(v.to_string()));
             } else if let Some(v) = arg.strip_prefix("--asset=") {
                 file = Some(v.replace('\\', "/"));
+            } else if let Some(v) = arg.strip_prefix("--assets-menu=") {
+                // Menu ouvert au lancement : `games` ou `formats`, et sa recherche : `formats:nsb`
+                let (menu, query) = v.split_once(':').unwrap_or((v, ""));
+                browser.start_menu = Some((if menu == "formats" { Menu::Formats } else { Menu::Games }, query.to_string()));
             }
         }
         browser.root = projects.unwrap_or_else(|| PathBuf::from(DEFAULT_PROJECTS));
@@ -272,7 +279,7 @@ impl Plugin for AssetBrowserPlugin {
         }
         app.insert_resource(browser).add_message::<ToggleAssets>().add_systems(
             Update,
-            (toggle_window, poll_scan, type_filter, rebuild_games, rebuild_list, render_preview, rebuild_controls, refresh_texts, fit_image, place_camera, looks).chain(),
+            (toggle_window, poll_scan, type_filter, rebuild_menu, rebuild_list, render_preview, rebuild_controls, refresh_texts, fit_image, place_camera, looks).chain(),
         );
     }
 }
@@ -285,133 +292,62 @@ fn item_node() -> Node {
     Node { padding: UiRect::axes(px(12), px(6)), border_radius: BorderRadius::all(px(6)), justify_content: JustifyContent::Center, align_items: AlignItems::Center, ..default() }
 }
 
+fn search_words(query: &str) -> Vec<String> {
+    query.to_lowercase().split_whitespace().map(String::from).collect()
+}
+
+fn matches_words(text: &str, words: &[String]) -> bool {
+    let text = text.to_lowercase();
+    words.iter().all(|w| text.contains(w.as_str()))
+}
+
 // --------------------------------------------------------------------------------------------
 //  Jeux et fichiers
 // --------------------------------------------------------------------------------------------
 
-/// Les jeux qui ont un NitroFS extrait.
-fn find_games(root: &Path) -> Vec<GameDir> {
-    let mut games = Vec::new();
-    let Ok(dirs) = std::fs::read_dir(root) else { return games };
-    let mut dirs: Vec<PathBuf> = dirs.flatten().map(|d| d.path()).filter(|p| p.is_dir()).collect();
-    dirs.sort();
-    for dir in dirs {
-        let Ok(versions) = std::fs::read_dir(dir.join("extract")) else { continue };
-        let mut versions: Vec<PathBuf> = versions.flatten().map(|d| d.path()).filter(|p| p.join("files").is_dir()).collect();
-        versions.sort();
-        let name = dir.file_name().unwrap_or_default().to_string_lossy().to_string();
-        let several = versions.len() > 1;
-        for v in versions {
-            let version = v.file_name().unwrap_or_default().to_string_lossy().to_string();
-            let label = if several { format!("{name} ({version})") } else { name.clone() };
-            games.push(GameDir { label, files: v.join("files") });
-        }
-    }
-    games
-}
-
-fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(read) = std::fs::read_dir(dir) else { return };
-    let mut items: Vec<PathBuf> = read.flatten().map(|d| d.path()).collect();
-    items.sort_by_key(|p| p.to_string_lossy().to_lowercase());
-    for p in items {
-        if p.is_dir() {
-            walk(&p, out);
-        } else {
-            out.push(p);
-        }
-    }
-}
-
-fn stem_of(path: &str) -> String {
-    let name = path.rsplit(['/', '#']).next().unwrap_or(path);
-    name.split('.').next().unwrap_or(name).to_lowercase()
-}
-
-/// Sorte d'un fichier : signature, sinon signature une fois décompressé (LZ77).
-fn kind_of(head: &[u8], whole: impl FnOnce() -> Option<Vec<u8>>) -> Kind {
-    let kind = sniff(head);
-    if kind == Kind::Other && matches!(head.first(), Some(0x10 | 0x11)) {
-        if let Some(bytes) = whole() {
-            return sniff(&unpack(bytes));
-        }
-    }
-    kind
-}
-
-/// Tous les fichiers du jeu, et ceux des archives NARC.
-fn scan(files: &Path) -> Vec<Entry> {
-    let mut paths = Vec::new();
-    walk(files, &mut paths);
-    let mut entries = Vec::new();
-    for disk in paths {
-        let path = disk.strip_prefix(files).unwrap_or(&disk).to_string_lossy().replace('\\', "/");
-        let size = disk.metadata().map(|m| m.len() as usize).unwrap_or(0);
-        let mut head = [0u8; 4];
-        let n = std::fs::File::open(&disk).and_then(|mut f| f.read(&mut head)).unwrap_or(0);
-        let small = size < 4 << 20;
-        let kind = kind_of(&head[..n], || small.then(|| std::fs::read(&disk).ok()).flatten());
-        let dir = path.rsplit_once('/').map_or(String::new(), |(d, _)| d.to_string());
-        let stem = stem_of(&path);
-        entries.push(Entry { path: path.clone(), member_name: None, disk: disk.clone(), member: None, kind, size, dir, stem, rom_index: None });
-        if kind != Kind::Archive {
-            continue;
-        }
-        let Ok(bytes) = std::fs::read(&disk).map(unpack) else { continue };
-        let Ok(members) = narc::read(&bytes) else { continue };
-        for m in members {
-            let data = &bytes[m.start..m.end];
-            let kind = kind_of(data, || Some(data.to_vec()));
-            let member_path = format!("{path}#{}", m.index);
-            let named = !m.name.chars().all(|c| c.is_ascii_digit());
-            let stem = if named { stem_of(&m.name) } else { String::new() };
-            entries.push(Entry { path: member_path, member_name: named.then(|| m.name.clone()), disk: disk.clone(), member: Some((m.start, m.end)), kind, size: m.end - m.start, dir: path.clone(), stem, rom_index: None });
-        }
-    }
-    entries.extend(scan_romarc(files));
-    entries
-}
-
-/// Dossier des fichiers sortis de rom.bin : `<jeu>/build/romarc` (files = `<jeu>/extract/<v>/files`).
-fn romarc_dir(files: &Path) -> Option<PathBuf> {
-    Some(files.parent()?.parent()?.parent()?.join("build").join("romarc"))
-}
-
-/// Les fichiers de l'archive numérotée rom.bin (jeux Traveller's Tales, EA...) une fois sortis
-/// par `studio/gametools/romarc.py extract` : `<n sur 5 chiffres>.<ext>`.
-fn scan_romarc(files: &Path) -> Vec<Entry> {
-    let Some(dir) = romarc_dir(files) else { return Vec::new() };
-    let mut paths = Vec::new();
-    walk(&dir, &mut paths);
-    let mut entries: Vec<Entry> = paths
-        .into_iter()
-        .filter_map(|disk| {
-            let name = disk.file_name()?.to_string_lossy().to_string();
-            let n: u32 = name.split('.').next()?.parse().ok()?;
-            let size = disk.metadata().map(|m| m.len() as usize).unwrap_or(0);
-            let mut head = [0u8; 4];
-            let read = std::fs::File::open(&disk).and_then(|mut f| f.read(&mut head)).unwrap_or(0);
-            let kind = kind_of(&head[..read], || (size < 4 << 20).then(|| std::fs::read(&disk).ok()).flatten());
-            Some(Entry { path: format!("rom.bin#{n}"), member_name: Some(name), disk, member: None, kind, size, dir: "rom.bin".into(), stem: n.to_string(), rom_index: Some(n) })
-        })
-        .collect();
-    entries.sort_by_key(|e| e.rom_index);
-    entries
-}
-
-fn read_entry(entry: &Entry) -> Result<Vec<u8>, String> {
-    let bytes = unpack(std::fs::read(&entry.disk).map_err(|e| e.to_string())?);
-    Ok(match entry.member {
-        Some((start, end)) => unpack(bytes.get(start..end).ok_or("archive changee depuis la lecture")?.to_vec()),
-        None => bytes,
-    })
-}
-
 impl AssetBrowser {
+    fn open_menu(&mut self, menu: Menu) {
+        self.menu = if self.menu == menu { Menu::None } else { menu };
+        self.menu_query.clear();
+        self.menu_scroll = 0;
+        self.menu_dirty = true;
+    }
+
+    fn close_menu(&mut self) {
+        self.menu = Menu::None;
+        self.menu_dirty = true;
+    }
+
+    /// Les jeux qui correspondent à la recherche, de haut en bas.
+    fn matching_games(&self) -> Vec<usize> {
+        let words = search_words(&self.menu_query);
+        (0..self.games.len()).filter(|&i| matches_words(&self.games[i].label, &words)).collect()
+    }
+
+    fn matching_formats(&self) -> Vec<(String, FormatStat)> {
+        let words = search_words(&self.menu_query);
+        let index = self.index.lock().unwrap();
+        all_formats(&index.stats).into_iter().filter(|(ext, _)| matches_words(ext, &words)).collect()
+    }
+
+    fn pick_format(&mut self, ext: &str, all_viewable: bool) {
+        self.close_menu();
+        if self.game.is_none() {
+            self.status = "Choisissez d'abord un jeu : le format filtre ses fichiers".into();
+            return;
+        }
+        self.filter.clear();
+        self.format_filter = Some(ext.to_string());
+        self.all_files = !all_viewable;
+        self.scroll = 0;
+        self.list_dirty = true;
+    }
+
     fn open_game(&mut self, index: usize) {
         self.game = Some(index);
-        self.games_open = false;
+        self.close_menu();
         self.entries.clear();
+        self.format_filter = None;
         let result = Arc::new(Mutex::new(None));
         let (files, out) = (self.games[index].files.clone(), result.clone());
         std::thread::spawn(move || {
@@ -459,6 +395,9 @@ impl AssetBrowser {
                 if !self.all_files && !e.kind.viewable() {
                     return false;
                 }
+                if self.format_filter.as_ref().is_some_and(|f| *f != e.format()) {
+                    return false;
+                }
                 let hay = format!("{} {} {}", e.path.to_lowercase(), e.member_name.as_deref().unwrap_or("").to_lowercase(), e.kind.label());
                 words.iter().all(|w| hay.contains(w.as_str()))
             })
@@ -466,71 +405,12 @@ impl AssetBrowser {
         self.scroll = self.scroll.min(self.shown.len().saturating_sub(ROWS));
     }
 
-    /// Les fichiers d'une sorte qui vont le mieux avec `sel` : même dossier d'abord, puis le nom
-    /// le plus proche ; tout le jeu s'il n'y en a aucun dans le dossier.
-    fn companions(&self, sel: usize, kinds: &[Kind]) -> Vec<usize> {
-        let me = &self.entries[sel];
-        let closeness = |e: &Entry| {
-            // rom.bin : les fichiers qui vont ensemble ont des numéros proches
-            if let (Some(a), Some(b)) = (me.rom_index, e.rom_index) {
-                return (false, std::cmp::Reverse(usize::MAX - a.abs_diff(b) as usize));
-            }
-            let common = me.stem.chars().zip(e.stem.chars()).take_while(|(a, b)| a == b).count();
-            (e.stem != me.stem, std::cmp::Reverse(common))
-        };
-        let mut near: Vec<usize> = (0..self.entries.len()).filter(|&i| i != sel && kinds.contains(&self.entries[i].kind) && self.entries[i].dir == me.dir).collect();
-        if near.is_empty() {
-            near = (0..self.entries.len()).filter(|&i| i != sel && kinds.contains(&self.entries[i].kind)).collect();
-        }
-        near.sort_by_key(|&i| (closeness(&self.entries[i]), self.entries[i].path.clone()));
-        near.truncate(400);
-        near
-    }
-
     fn select(&mut self, index: usize) {
         self.selected = Some(index);
-        let kind = self.entries[index].kind;
-        let mut c = Choices::default();
-        match kind {
-            Kind::Tiles | Kind::Screen | Kind::Cells => {
-                c.palettes = self.companions(index, &[Kind::Palette]);
-                if kind != Kind::Tiles {
-                    c.tiles = self.companions(index, &[Kind::Tiles]);
-                }
-            }
-            Kind::Model => {
-                c.textures = self.companions(index, &[Kind::Textures]);
-                c.texture = self.best_textures(index, &c.textures);
-            }
-            _ => {}
-        }
-        self.choices = c;
+        self.choices = choices_for(&self.entries, index);
         self.orbit = Orbit::default();
         self.preview_dirty = true;
         self.controls_dirty = true;
-    }
-
-    /// Les textures d'un modèle sont souvent dans un `.nsbtx` à part : on prend le fichier qui
-    /// donne le plus de textures trouvées (0 = aucun, le modèle a déjà les siennes).
-    fn best_textures(&self, model: usize, candidates: &[usize]) -> usize {
-        let Ok(bytes) = read_entry(&self.entries[model]) else { return 0 };
-        let Ok(own) = model3d::read(&bytes) else { return 0 };
-        let missing = |others: &[nds_nitro::nitro::Container]| model3d::build_models(&own, others).iter().map(|m| m.warnings.len()).sum::<usize>();
-        let mut best = (missing(&[]), 0);
-        if best.0 == 0 {
-            return 0;
-        }
-        for (n, &i) in candidates.iter().take(40).enumerate() {
-            let Ok(other) = read_entry(&self.entries[i]).and_then(|b| model3d::read(&b).map_err(|e| e.to_string())) else { continue };
-            let left = missing(std::slice::from_ref(&other));
-            if left < best.0 {
-                best = (left, n + 1);
-            }
-            if left == 0 {
-                break;
-            }
-        }
-        best.1
     }
 }
 
@@ -588,13 +468,13 @@ fn toggle_window(
         .spawn((Node { width: percent(100), height: percent(100), flex_direction: FlexDirection::Row, ..default() }, UiTargetCamera(camera)))
         .with_children(|root| {
             // Colonne de gauche : jeu, filtre, liste des fichiers
-            root.spawn((Node { width: px(560), height: percent(100), flex_direction: FlexDirection::Column, padding: UiRect::all(px(10)), row_gap: px(6), ..default() }, BackgroundColor(SIDEBAR)))
+            root.spawn((Node { width: px(560), flex_shrink: 0.0, height: percent(100), flex_direction: FlexDirection::Column, padding: UiRect::all(px(10)), row_gap: px(6), ..default() }, BackgroundColor(SIDEBAR)))
                 .with_children(|side| {
                     side.spawn(Node { flex_direction: FlexDirection::Row, column_gap: px(8), align_items: AlignItems::Center, ..default() }).with_children(|row| {
                         row.spawn(label("Jeu :", 15.0, DIM));
                         row.spawn((Button, Hovered::default(), Node { flex_grow: 1.0, justify_content: JustifyContent::FlexStart, ..item_node() }, BackgroundColor(ITEM), GameButton))
                             .observe(|_: On<Activate>, mut b: ResMut<AssetBrowser>| {
-                                b.games_open = !b.games_open;
+                                b.open_menu(Menu::Games);
                             })
                             .with_child((label("", 15.0, TEXT), GameButton));
                     });
@@ -605,6 +485,11 @@ fn toggle_window(
                                 b.list_dirty = true;
                             })
                             .with_child((label("", 14.0, TEXT), FilterButton));
+                        row.spawn((Button, Hovered::default(), item_node(), BackgroundColor(ITEM), FormatButton))
+                            .observe(|_: On<Activate>, mut b: ResMut<AssetBrowser>| {
+                                b.open_menu(Menu::Formats);
+                            })
+                            .with_child((label("", 14.0, TEXT), FormatButton));
                         row.spawn((Button, Hovered::default(), item_node(), BackgroundColor(ITEM), PageButton(-1))).observe(page).with_child(label("^", 14.0, TEXT));
                         row.spawn((Button, Hovered::default(), item_node(), BackgroundColor(ITEM), PageButton(1))).observe(page).with_child(label("v", 14.0, TEXT));
                     });
@@ -660,14 +545,27 @@ fn toggle_window(
             });
         })
         .id();
-    // Liste des jeux (par-dessus tout, ouverte par le bouton « Jeu »)
+    // Menus déroulants des jeux et des formats (par-dessus tout)
     let overlay = commands
         .spawn((
-            Node { position_type: PositionType::Absolute, top: px(48), left: px(10), width: px(1100), flex_direction: FlexDirection::Row, flex_wrap: FlexWrap::Wrap, column_gap: px(6), row_gap: px(6), padding: UiRect::all(px(10)), border_radius: BorderRadius::all(px(8)), display: Display::None, ..default() },
+            Node { position_type: PositionType::Absolute, top: px(48), left: px(10), width: px(MENU_W), flex_direction: FlexDirection::Column, row_gap: px(2), padding: UiRect::all(px(10)), border_radius: BorderRadius::all(px(8)), display: Display::None, ..default() },
             BackgroundColor(Color::srgb(0.13, 0.14, 0.17)),
             GlobalZIndex(10),
             UiTargetCamera(camera),
+            Pickable::default(),
         ))
+        .observe(|scroll: On<PointerScroll>, mut b: ResMut<AssetBrowser>| {
+            let lines = match scroll.unit {
+                MouseScrollUnit::Line => scroll.y * 3.0,
+                MouseScrollUnit::Pixel => scroll.y / MENU_ROW_H,
+            };
+            let max = b.menu_len.saturating_sub(MENU_ROWS) as i64;
+            let wanted = (b.menu_scroll as i64 - lines.round() as i64).clamp(0, max.max(0)) as usize;
+            if wanted != b.menu_scroll {
+                b.menu_scroll = wanted;
+                b.menu_dirty = true;
+            }
+        })
         .id();
     browser.window = Some(window);
     browser.parts = vec![camera, camera3d, light, root, overlay];
@@ -677,7 +575,7 @@ fn toggle_window(
     browser.image_node = ids.get("image").copied();
     browser.camera3d = Some(camera3d);
     browser.light = Some(light);
-    browser.games_overlay = Some(overlay);
+    browser.menu_overlay = Some(overlay);
     browser.view3d = view3d;
     browser.list_dirty = true;
     browser.controls_dirty = true;
@@ -691,13 +589,26 @@ fn toggle_window(
             format!("{} jeux dans {root_dir} : choisissez un jeu", browser.games.len())
         };
     }
-    browser.games_open = browser.game.is_none() && !browser.games.is_empty();
+    browser.menu = if browser.game.is_none() && !browser.games.is_empty() { Menu::Games } else { Menu::None };
+    browser.menu_query.clear();
+    browser.menu_scroll = 0;
+    browser.menu_dirty = true;
+    // Pourcentages et formats de tous les jeux, calculés une fois puis gardés
+    if !browser.index_started {
+        browser.index_started = true;
+        let (root_dir, state) = (browser.root.clone(), browser.index.clone());
+        std::thread::spawn(move || run_index(&root_dir, &state, false));
+    }
     if let Some((game, file)) = start {
         let wanted = game.to_lowercase();
         if let Some(i) = browser.games.iter().position(|g| g.label.to_lowercase() == wanted).or_else(|| browser.games.iter().position(|g| !wanted.is_empty() && g.label.to_lowercase().starts_with(&wanted))) {
             browser.open_game(i);
             browser.want_file = file;
         }
+    }
+    if let Some((menu, query)) = browser.start_menu.take() {
+        browser.menu = menu;
+        browser.menu_query = query;
     }
 }
 
@@ -715,26 +626,54 @@ fn page(activate: On<Activate>, pages: Query<&PageButton>, mut b: ResMut<AssetBr
     b.list_dirty = true;
 }
 
-/// Taper du texte dans la fenêtre filtre la liste (Retour arrière efface, Échap vide).
+/// Taper du texte : recherche du menu ouvert, sinon filtre de la liste (Retour arrière efface,
+/// Échap vide puis ferme le menu, Entrée prend le premier résultat du menu).
 fn type_filter(mut b: ResMut<AssetBrowser>, mut typed: MessageReader<KeyboardInput>, windows: Query<&Window>) {
     let Some(window) = b.window else { return };
     let focused = windows.get(window).is_ok_and(|w| w.focused);
+    let in_menu = b.menu != Menu::None;
     let mut changed = false;
     for key in typed.read() {
         if !focused || key.window != window || !key.state.is_pressed() {
             continue;
         }
+        let b = &mut *b;
+        let query = if in_menu { &mut b.menu_query } else { &mut b.filter };
         match &key.logical_key {
-            Key::Backspace => changed |= b.filter.pop().is_some(),
+            Key::Backspace => changed |= query.pop().is_some(),
             Key::Escape => {
-                changed |= !b.filter.is_empty();
-                b.filter.clear();
+                if in_menu && query.is_empty() {
+                    b.close_menu();
+                    return;
+                }
+                changed |= !query.is_empty();
+                query.clear();
+                if !in_menu {
+                    changed |= b.format_filter.take().is_some();
+                }
+            }
+            Key::Enter => {
+                if in_menu {
+                    match b.menu {
+                        Menu::Games => {
+                            if let Some(&first) = b.matching_games().first() {
+                                b.open_game(first);
+                            }
+                        }
+                        _ => {
+                            if let Some((ext, stat)) = b.matching_formats().first() {
+                                b.pick_format(ext, stat.viewable == stat.count);
+                            }
+                        }
+                    }
+                    return;
+                }
             }
             _ => {
                 if let Some(text) = &key.text {
                     let text: String = text.chars().filter(|c| !c.is_control()).collect();
                     if !text.is_empty() {
-                        b.filter.push_str(&text);
+                        query.push_str(&text);
                         changed = true;
                     }
                 }
@@ -742,39 +681,128 @@ fn type_filter(mut b: ResMut<AssetBrowser>, mut typed: MessageReader<KeyboardInp
         }
     }
     if changed {
-        b.scroll = 0;
-        b.list_dirty = true;
+        if in_menu {
+            b.menu_scroll = 0;
+            b.menu_dirty = true;
+        } else {
+            b.scroll = 0;
+            b.list_dirty = true;
+        }
     }
 }
 
-fn rebuild_games(mut commands: Commands, mut b: ResMut<AssetBrowser>, mut nodes: Query<&mut Node>, children: Query<&Children>, mut built: Local<bool>) {
-    let Some(overlay) = b.games_overlay else {
-        *built = false;
-        return;
+fn percent_text(value: f64) -> String {
+    if value >= 99.95 || value == 0.0 { format!("{value:.0} %") } else { format!("{value:.1} %") }
+}
+
+/// Dessine le menu ouvert : barre de recherche, puis une ligne par jeu ou par format.
+fn rebuild_menu(mut commands: Commands, mut b: ResMut<AssetBrowser>, mut nodes: Query<&mut Node>, children: Query<&Children>) {
+    let Some(overlay) = b.menu_overlay else { return };
+    let (revision, done, total) = {
+        let index = b.index.lock().unwrap();
+        (index.revision, index.done, index.total)
     };
+    if revision != b.index_seen {
+        b.index_seen = revision;
+        b.menu_dirty = true;
+    }
+    if !b.menu_dirty {
+        return;
+    }
+    b.menu_dirty = false;
     if let Ok(mut node) = nodes.get_mut(overlay) {
-        let display = if b.games_open { Display::Flex } else { Display::None };
-        if node.display != display {
-            node.display = display;
+        node.display = if b.menu == Menu::None { Display::None } else { Display::Flex };
+        node.top = px(if b.menu == Menu::Formats { 80 } else { 48 });
+    }
+    if let Ok(old) = children.get(overlay) {
+        for child in old.iter() {
+            commands.entity(child).despawn();
         }
     }
-    if *built && children.get(overlay).is_ok_and(|c| !c.is_empty()) {
+    if b.menu == Menu::None {
         return;
     }
-    *built = true;
-    let labels: Vec<String> = b.games.iter().map(|g| g.label.clone()).collect();
-    commands.entity(overlay).with_children(|list| {
-        for (i, name) in labels.into_iter().enumerate() {
-            list.spawn((Button, Hovered::default(), item_node(), BackgroundColor(ITEM), GameChoice(i)))
-                .observe(|activate: On<Activate>, choices: Query<&GameChoice>, mut b: ResMut<AssetBrowser>| {
-                    if let Ok(choice) = choices.get(activate.entity) {
-                        b.open_game(choice.0);
-                    }
-                })
-                .with_child(label(name, 14.0, TEXT));
+    let query = if b.menu_query.is_empty() { "tapez pour chercher".to_string() } else { format!("{}_", b.menu_query) };
+    let progress = if done < total { format!("analyse des jeux : {done} / {total}") } else { String::new() };
+    // Une ligne : (coche et sa couleur, nom, colonnes de droite, action)
+    enum Pick {
+        Game(usize),
+        Format(String, bool),
+    }
+    let mut rows: Vec<(Option<(&'static str, Color)>, String, Vec<String>, Pick)> = Vec::new();
+    let (columns, legend): (Vec<&str>, &str) = match b.menu {
+        Menu::Games => {
+            let index = b.index.lock().unwrap();
+            for &i in b.matching_games().iter() {
+                let label = b.games[i].label.clone();
+                let cells = match index.stats.get(&label) {
+                    Some(stat) => vec![percent_text(stat.extracted_percent()), percent_text(stat.viewable_percent())],
+                    None => vec!["...".into(), "...".into()],
+                };
+                rows.push((None, label, cells, Pick::Game(i)));
+            }
+            (vec!["extrait", "regardable"], "extrait = octets de donnees lisibles fichier par fichier ; regardable = fichiers que l'app sait montrer")
+        }
+        _ => {
+            for (ext, stat) in b.matching_formats() {
+                let check = stat.check();
+                let color = match check {
+                    "[x]" => Color::srgb(0.4, 0.85, 0.45),
+                    "[~]" => Color::srgb(0.9, 0.75, 0.3),
+                    "[!]" => Color::srgb(0.95, 0.4, 0.35),
+                    _ => DIM,
+                };
+                let name = if ext.starts_with('(') { ext.clone() } else { format!(".{ext}") };
+                let all_viewable = stat.viewable == stat.count;
+                rows.push((Some((check, color)), name, vec![stat.count.to_string(), stat.viewable.to_string(), stat.games.to_string()], Pick::Format(ext, all_viewable)));
+            }
+            (vec!["fichiers", "regardables", "jeux"], "[x] regardable   [~] en partie   [!] l'essai a echoue   [ ] pas dans l'app   ;  clic = filtrer le jeu ouvert")
+        }
+    };
+    b.menu_len = rows.len();
+    b.menu_scroll = b.menu_scroll.min(rows.len().saturating_sub(MENU_ROWS));
+    let (first, count) = (b.menu_scroll + usize::from(!rows.is_empty()), rows.len());
+    let last = (b.menu_scroll + MENU_ROWS).min(count);
+    let scroll = b.menu_scroll;
+    commands.entity(overlay).with_children(|menu| {
+        // Barre de recherche
+        menu.spawn((Node { padding: UiRect::axes(px(10), px(6)), border_radius: BorderRadius::all(px(6)), margin: UiRect::bottom(px(4)), ..default() }, BackgroundColor(Color::srgb(0.07, 0.075, 0.09)))).with_child(label(format!("Recherche : {query}"), 15.0, TEXT));
+        menu.spawn(label(format!("{first}-{last} / {count}   {progress}"), 12.0, DIM));
+        menu.spawn(label(legend, 12.0, DIM));
+        menu.spawn(Node { flex_direction: FlexDirection::Row, justify_content: JustifyContent::FlexEnd, column_gap: px(8), padding: UiRect::horizontal(px(6)), ..default() }).with_children(|head| {
+            for column in &columns {
+                head.spawn((label(*column, 12.0, DIM), Node { width: px(MENU_COLUMN), ..default() }));
+            }
+        });
+        for (check, name, cells, pick) in rows.into_iter().skip(scroll).take(MENU_ROWS) {
+            let mut row = menu.spawn((Button, Hovered::default(), Node { height: px(MENU_ROW_H), flex_shrink: 0.0, padding: UiRect::horizontal(px(6)), align_items: AlignItems::Center, column_gap: px(8), border_radius: BorderRadius::all(px(4)), ..default() }, BackgroundColor(ROW)));
+            match pick {
+                Pick::Game(i) => {
+                    row.insert(GameChoice(i)).observe(|activate: On<Activate>, choices: Query<&GameChoice>, mut b: ResMut<AssetBrowser>| {
+                        if let Ok(choice) = choices.get(activate.entity) {
+                            b.open_game(choice.0);
+                        }
+                    });
+                }
+                Pick::Format(ext, all_viewable) => {
+                    row.insert(FormatChoice(ext, all_viewable)).observe(|activate: On<Activate>, choices: Query<&FormatChoice>, mut b: ResMut<AssetBrowser>| {
+                        if let Ok(choice) = choices.get(activate.entity) {
+                            b.pick_format(&choice.0, choice.1);
+                        }
+                    });
+                }
+            }
+            row.with_children(|row| {
+                if let Some((check, color)) = check {
+                    row.spawn((label(check, 14.0, color), Pickable::IGNORE));
+                }
+                row.spawn((label(name, 14.0, TEXT), Node { flex_grow: 1.0, ..default() }, Pickable::IGNORE));
+                for cell in cells {
+                    row.spawn((label(cell, 13.0, TEXT), Node { width: px(MENU_COLUMN), ..default() }, Pickable::IGNORE));
+                }
+            });
         }
     });
-    b.list_dirty = true;
 }
 
 fn rebuild_list(mut commands: Commands, mut b: ResMut<AssetBrowser>, children: Query<&Children>) {
@@ -813,32 +841,25 @@ fn rebuild_list(mut commands: Commands, mut b: ResMut<AssetBrowser>, children: Q
     });
 }
 
-fn size_text(size: usize) -> String {
-    if size >= 1 << 20 {
-        format!("{:.1} Mo", size as f64 / (1 << 20) as f64)
-    } else if size >= 1024 {
-        format!("{} Ko", size / 1024)
-    } else {
-        format!("{size} o")
-    }
-}
-
 fn refresh_texts(
     b: Res<AssetBrowser>,
-    mut texts: Query<(&mut Text, Option<&GameButton>, Option<&FilterButton>, Option<&ListTitle>, Option<&InfoText>, Option<&PathText>), Or<(With<GameButton>, With<FilterButton>, With<ListTitle>, With<InfoText>, With<PathText>)>>,
+    mut texts: Query<(&mut Text, Option<&GameButton>, Option<&FilterButton>, Option<&ListTitle>, Option<&InfoText>, Option<&PathText>, Option<&FormatButton>), Or<(With<GameButton>, With<FilterButton>, With<ListTitle>, With<InfoText>, With<PathText>, With<FormatButton>)>>,
 ) {
     if b.window.is_none() {
         return;
     }
-    for (mut text, game, filter, title, info, path) in &mut texts {
+    for (mut text, game, filter, title, info, path, formats) in &mut texts {
         let wanted = if game.is_some() {
-            format!("{}   {}", b.game.map_or("(choisir)", |g| b.games[g].label.as_str()), if b.games_open { "^" } else { "v" })
+            format!("{}   {}", b.game.map_or("(choisir)", |g| b.games[g].label.as_str()), if b.menu == Menu::Games { "^" } else { "v" })
+        } else if formats.is_some() {
+            format!("Formats   {}", if b.menu == Menu::Formats { "^" } else { "v" })
         } else if filter.is_some() {
             if b.all_files { "Tous les fichiers".into() } else { "Fichiers montrables".into() }
         } else if title.is_some() {
             let range = if b.shown.is_empty() { "0".to_string() } else { format!("{}-{}", b.scroll + 1, (b.scroll + ROWS).min(b.shown.len())) };
             let filter = if b.filter.is_empty() { "tapez pour filtrer".to_string() } else { format!("filtre : {}_", b.filter) };
-            format!("{range} / {}   ({filter})", b.shown.len())
+            let format = b.format_filter.as_ref().map_or(String::new(), |f| format!("   format : {f} (Echap = tous)"));
+            format!("{range} / {}   ({filter}){format}", b.shown.len())
         } else if info.is_some() {
             if b.info.is_empty() { b.status.clone() } else { format!("{}\n{}", b.info, b.status) }
         } else if path.is_some() {
@@ -857,14 +878,14 @@ fn refresh_texts(
 
 fn looks(
     b: Res<AssetBrowser>,
-    mut items: Query<(&Hovered, Has<Pressed>, &mut BackgroundColor, Option<&ListRow>, Option<&GameChoice>, Option<&FilterButton>), Or<(With<ListRow>, With<GameChoice>, With<GameButton>, With<FilterButton>, With<CopyButton>, With<PageButton>, With<StepButton>)>>,
+    mut items: Query<(&Hovered, Has<Pressed>, &mut BackgroundColor, Option<&ListRow>, Option<&GameChoice>, Option<&FilterButton>, Has<FormatChoice>), Or<(With<ListRow>, With<GameChoice>, With<FormatChoice>, With<GameButton>, With<FormatButton>, With<FilterButton>, With<CopyButton>, With<PageButton>, With<StepButton>)>>,
 ) {
     if b.window.is_none() {
         return;
     }
-    for (hovered, pressed, mut color, row, game, filter) in &mut items {
+    for (hovered, pressed, mut color, row, game, filter, format) in &mut items {
         let selected = row.is_some_and(|r| Some(r.0) == b.selected) || game.is_some_and(|g| Some(g.0) == b.game) || (filter.is_some() && b.all_files);
-        let idle = if row.is_some() { ROW } else { ITEM };
+        let idle = if row.is_some() || game.is_some() || format { ROW } else { ITEM };
         let wanted = if selected || pressed { ITEM_ON } else if hovered.get() { ITEM_HOVER } else { idle };
         if color.0 != wanted {
             color.0 = wanted;
@@ -952,31 +973,6 @@ fn to_image(rgba: &Rgba, sampler: ImageSampler) -> Image {
     image
 }
 
-/// Les images en grille, avec 4 pixels entre elles.
-fn sheet(images: &[Rgba]) -> Rgba {
-    const GAP: u32 = 4;
-    let max_w = images.iter().map(|i| i.width).max().unwrap_or(1).max(512);
-    let (mut x, mut y, mut line_h, mut places) = (0, 0, 0, Vec::new());
-    for img in images {
-        if x > 0 && x + img.width > max_w {
-            (x, y, line_h) = (0, y + line_h + GAP, 0);
-        }
-        places.push((x, y));
-        x += img.width + GAP;
-        line_h = line_h.max(img.height);
-    }
-    let (width, height) = (max_w, (y + line_h).max(1));
-    let mut out = Rgba { width, height, data: vec![0; (width * height * 4) as usize] };
-    for (img, (px, py)) in images.iter().zip(places) {
-        for row in 0..img.height {
-            let src = (row * img.width * 4) as usize;
-            let dst = (((py + row) * width + px) * 4) as usize;
-            out.data[dst..dst + (img.width * 4) as usize].copy_from_slice(&img.data[src..src + (img.width * 4) as usize]);
-        }
-    }
-    out
-}
-
 #[allow(clippy::too_many_arguments)]
 fn render_preview(
     mut commands: Commands,
@@ -1009,93 +1005,25 @@ fn render_preview(
 }
 
 fn preview(b: &mut AssetBrowser, sel: usize, commands: &mut Commands, images: &mut Assets<Image>, meshes: &mut Assets<Mesh>, materials: &mut Assets<StandardMaterial>) -> Result<(), String> {
-    let bytes = read_entry(&b.entries[sel])?;
-    let kind = b.entries[sel].kind;
-    let load = |b: &AssetBrowser, list: &[usize], i: usize| list.get(i).map(|&e| read_entry(&b.entries[e])).transpose();
-    let size = b.entries[sel].size;
-    let mut show = |b: &mut AssetBrowser, rgba: &Rgba, info: String| {
-        b.image = Some((images.add(to_image(rgba, ImageSampler::nearest())), UVec2::new(rgba.width, rgba.height)));
-        b.info = format!("{}  ({})  -  {info}", kind.label(), size_text(size));
-    };
-    match kind {
-        Kind::Palette => {
-            let p = g2d::read_palette(&bytes).map_err(|e| e.to_string())?;
-            show(b, &p.swatches(), format!("{} couleurs", p.colors.len()));
+    let (kind, size) = (b.entries[sel].kind, b.entries[sel].size);
+    let mut choices = std::mem::take(&mut b.choices);
+    let decoded = decode(&b.entries, sel, &mut choices);
+    b.choices = choices;
+    match decoded? {
+        Decoded::Image { rgba, info } => {
+            b.image = Some((images.add(to_image(&rgba, ImageSampler::nearest())), UVec2::new(rgba.width, rgba.height)));
+            b.info = format!("{}  ({})  -  {info}", kind.label(), size_text(size));
         }
-        Kind::Tiles | Kind::Screen | Kind::Cells => {
-            let tiles_bytes = if kind == Kind::Tiles { Some(bytes.clone()) } else { load(b, &b.choices.tiles, b.choices.tile)? };
-            let tiles = g2d::read_tiles(tiles_bytes.as_deref().ok_or("aucun fichier de tuiles (.ncgr) trouve")?).map_err(|e| e.to_string())?;
-            let palette = match load(b, &b.choices.palettes, b.choices.palette)? {
-                Some(p) => g2d::read_palette(&p).map_err(|e| e.to_string())?,
-                // Sans palette : niveaux de gris
-                None => g2d::Palette { colors: (0..256).map(|i| if tiles.bpp8 { [i as u8, i as u8, i as u8, 255] } else { let v = (i % 16 * 17) as u8; [v, v, v, 255] }).collect() },
-            };
-            let c = &mut b.choices;
-            c.banks = if tiles.bpp8 { 1 } else { palette.banks() };
-            c.bank = c.bank.min(c.banks.saturating_sub(1));
-            let what = format!("{} tuiles {} bpp{}", tiles.count(), if tiles.bpp8 { 8 } else { 4 }, if tiles.linear { " (bitmap)" } else { "" });
-            match kind {
-                Kind::Tiles => {
-                    if c.width == 0 {
-                        c.width = tiles.default_width();
-                    }
-                    let img = g2d::render_tiles(&tiles, &palette, c.bank, c.width);
-                    show(b, &img, what);
-                }
-                Kind::Screen => {
-                    let screen = g2d::read_screen(&bytes).map_err(|e| e.to_string())?;
-                    let img = g2d::render_screen(&screen, &tiles, &palette);
-                    show(b, &img, format!("ecran {}x{}, {what}", screen.width, screen.height));
-                }
-                _ => {
-                    let cells = g2d::read_cells(&bytes).map_err(|e| e.to_string())?;
-                    c.cells = cells.cells.len();
-                    c.cell = c.cell.min(c.cells.saturating_sub(1));
-                    let objs = cells.cells.get(c.cell).map_or(0, |o| o.len());
-                    let img = g2d::render_cell(&cells, c.cell, &tiles, &palette);
-                    show(b, &img, format!("{} cellules ({objs} OBJ), {what}", cells.cells.len()));
-                }
-            }
-        }
-        Kind::Textures => {
-            let cont = model3d::read(&bytes).map_err(|e| e.to_string())?;
-            let all = model3d::texture_sheet(&cont);
-            let ok: Vec<Rgba> = all.iter().filter_map(|(_, r)| r.as_ref().ok().cloned()).collect();
-            let names: Vec<String> = all.iter().map(|(n, _)| n.clone()).take(12).collect();
-            let more = if all.len() > 12 { ", ..." } else { "" };
-            show(b, &sheet(&ok), format!("{} textures, {} palettes : {}{more}", cont.textures.len(), cont.palettes.len(), names.join(", ")));
-        }
-        Kind::Model => {
-            let own = model3d::read(&bytes).map_err(|e| e.to_string())?;
-            let others = match b.choices.texture {
-                0 => Vec::new(),
-                n => match load(b, &b.choices.textures, n - 1)? {
-                    Some(t) => vec![model3d::read(&t).map_err(|e| e.to_string())?],
-                    None => Vec::new(),
-                },
-            };
-            let models = model3d::build_models(&own, &others);
-            b.choices.models = models.len();
-            b.choices.model = b.choices.model.min(models.len().saturating_sub(1));
-            let m = models.get(b.choices.model).ok_or("aucun modele dans le fichier")?;
-            spawn_model(m, commands, images, meshes, materials);
+        Decoded::Model { model: m, own_textures } => {
+            spawn_model(&m, commands, images, meshes, materials);
             let center = (Vec3::from(m.min) + Vec3::from(m.max)) / 2.0;
             let radius = ((Vec3::from(m.max) - Vec3::from(m.min)).length() / 2.0).max(0.01);
             b.orbit = Orbit { target: center, radius, distance: radius * 2.6, ..Orbit::default() };
             b.is3d = true;
             b.image = Some((b.view3d.clone(), UVec2::new(VIEW_W, VIEW_H)));
             let warn = if m.warnings.is_empty() { String::new() } else { format!("\n! {}", m.warnings.join(" ; ")) };
-            b.info = format!(
-                "modele 3D ({})  -  {} : {} triangles, {} sommets, {} materiaux, {} textures dans le fichier{warn}",
-                size_text(size),
-                m.name,
-                m.triangle_count,
-                m.vertex_count,
-                m.materials.len(),
-                own.textures.len()
-            );
+            b.info = format!("modele 3D ({})  -  {} : {} triangles, {} sommets, {} materiaux, {own_textures} textures dans le fichier{warn}", size_text(size), m.name, m.triangle_count, m.vertex_count, m.materials.len());
         }
-        _ => return Err("format non pris en charge".into()),
     }
     Ok(())
 }

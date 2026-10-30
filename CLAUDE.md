@@ -15,7 +15,8 @@
   `devtools` (F5 fenetre Code, surveillance des sources -> cargo build -> relance avec LaunchOptions),
   `options` (F1 fenetre Options), `controllers` (manettes : controllers/<id>.toml, detection, dessin),
   `save` (GameSaves : sauvegardes des jeux dans data_dir()/saves), `settings` (options.toml), `saves_page`,
-  `asset_browser` (F6 fenetre Assets : fichiers des jeux decompiles, apercu 2D/3D, chemin NitroFS).
+  `asset_browser` (F6 fenetre Assets : fichiers des jeux decompiles, apercu 2D/3D, chemin NitroFS, menus jeux et formats),
+  `asset_scan` (liste, decodage, index des jeux : pourcentages + essai d'un fichier par format, `--example asset_audit`).
 - `crates/nitro` (nds-nitro) : formats Nintendo DS standard (NSBMD/NSBTX via le code d'apicula 0BSD, NCGR/NCLR/NSCR/NCER, NARC, LZ77) ;
   essai sans fenetre : `cargo run -p nds-nitro --example probe -- sortie.png <fichier> [palette/tuiles...]`.
 - `app` (nds-game-studio) : le binaire + jeux de demo dans `app/src/games/<id>/` (game.toml + mod.rs).

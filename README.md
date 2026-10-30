@@ -88,6 +88,17 @@ décompilés, pour voir leurs modèles 3D et leurs images et nommer les objets d
   alors le numéro n seul, la clé de DS Decomp Studio (onglet Data, « Archive (rom.bin) »). Un
   modèle sans textures prend le `.nsbtx` au numéro le plus proche qui les a (flèches pour en
   changer, ou « celles du modele » = sans texture).
+- **Menu des jeux** : de haut en bas, avec une recherche (taper du texte, Entree = premier resultat,
+  Echap = fermer) et deux pourcentages. *Extrait* = part des octets de donnees lisibles fichier par
+  fichier : ne comptent pas comme extraits un `rom.bin` pas (tout) sorti, un `.narc` illisible, et tout
+  gros fichier (4 Mo et plus) de signature inconnue, comme `Glob.bin` ; le son et les videos ne
+  comptent pas. *Regardable* = part des fichiers (ceux des archives compris) que l'app sait montrer.
+- **Menu des formats** : toutes les extensions des jeux, avec une coche : `[x]` regardable, `[~]` en
+  partie, `[!]` l'essai a echoue, `[ ]` pas dans l'app. Un fichier de chaque format de chaque jeu est
+  vraiment decode pour le dire. Clic = ne lister que ce format dans le jeu ouvert.
+- Ces chiffres sont calcules en arriere-plan (17 min pour 62 jeux, une seule fois) et gardes dans
+  `assets_index.json` ; un jeu est refait quand son dossier change. Essai sans fenetre :
+  `cargo run --release -p nds-engine --example asset_audit -- <projets> <sortie.tsv> [--fresh]`.
 - Lancer directement : `nds-game-studio --assets=<jeu> --asset=<chemin>`.
 - Lecture des formats : crate `crates/nitro` (la 3D reprend le code
   d'[apicula](https://github.com/scurest/apicula), licence 0BSD).
