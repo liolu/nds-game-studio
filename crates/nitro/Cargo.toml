@@ -1,0 +1,14 @@
+[package]
+name = "nds-nitro"
+version.workspace = true
+# Code repris d'apicula (edition 2021)
+edition = "2021"
+description = "Lecture des formats Nintendo standard des jeux DS : NSBMD/NSBTX (code d'apicula, 0BSD), NCGR/NCLR/NSCR/NCER, NARC, LZ77"
+license = "0BSD AND MIT"
+
+[dependencies]
+cgmath = "0.18"
+log = "0.4"
+
+[dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }

@@ -346,11 +346,11 @@ fn toast_messages(mut messages: MessageReader<ShowToast>, mut toasts: Query<(&mu
     }
 }
 
-/// Fermer un écran quitte le studio ; fermer la fenêtre du code (F5) ou des options ne ferme qu'elle.
+/// Fermer un écran quitte le studio ; fermer la fenêtre du code (F5), des options ou des assets (F6) ne ferme qu'elle.
 fn close_all(
     mut commands: Commands,
     mut requests: MessageReader<WindowCloseRequested>,
-    code_windows: Query<(), Or<(With<crate::devtools::CodeWindow>, With<crate::options::OptionsWindow>)>>,
+    code_windows: Query<(), Or<(With<crate::devtools::CodeWindow>, With<crate::options::OptionsWindow>, With<crate::asset_browser::AssetsWindow>)>>,
     mut exit: MessageWriter<AppExit>,
 ) {
     for request in requests.read() {

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/engine", "app", "tools/common", "tools/installer", "tools/updater", "tools/launcher", "future/multijoueur/nds-net"]
+members = ["crates/engine", "crates/nitro", "app", "tools/common", "tools/installer", "tools/updater", "tools/launcher", "future/multijoueur/nds-net"]
 
 # Version du studio : c'est la SEULE a modifier pour changer de version
 # (ex. 0.2.0). Sinon la CI augmente automatiquement le dernier chiffre.
