@@ -20,6 +20,8 @@
   `asset_scan` (liste, decodage, index des jeux : pourcentages + essai d'un fichier par format, `--example asset_audit`).
 - `crates/nitro` (nds-nitro) : formats Nintendo DS standard (NSBMD/NSBTX via le code d'apicula 0BSD, NCGR/NCLR/NSCR/NCER, NARC, LZ77) ;
   essai sans fenetre : `cargo run -p nds-nitro --example probe -- sortie.png <fichier> [palette/tuiles...]`.
+- `crates/video` (nds-video, LGPL 2.1+ : portage de FFmpeg et mobipeg, garde sa licence) : videos VX, MODS, Bink 1, image et son ; `engine/src/video.rs` (`VideoPlayer`) les joue dans une image Bevy ;
+  essai sans fenetre : `cargo run -p nds-video --release --example vcheck -- <fichier> [dossier de sortie] [n images]`.
 - `app` (nds-game-studio) : le binaire. Plus de jeux de demo : les jeux sont les roms de l'utilisateur, joues par decompilation + runtime (pas d'emulation). Un module natif s'enregistre avec `add_ds_game` et le `game_code` de sa rom.
 - `tools/` : common / installer / updater / launcher (repris de SpaceSpore).
 - Une entite de jeu doit avoir `Engine::Main.layers()` ou `Engine::Sub.layers()` (sinon invisible) et `in_game()`.

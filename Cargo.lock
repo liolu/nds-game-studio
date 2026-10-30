@@ -4483,6 +4483,7 @@ dependencies = [
  "dirs",
  "encoding_rs",
  "nds-nitro",
+ "nds-video",
  "serde",
  "serde_json",
  "toml 1.1.8+spec-1.1.0",
@@ -4556,6 +4557,13 @@ dependencies = [
  "cgmath",
  "image",
  "log",
+]
+
+[[package]]
+name = "nds-video"
+version = "0.2.0"
+dependencies = [
+ "image",
 ]
 
 [[package]]
