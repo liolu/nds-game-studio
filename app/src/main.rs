@@ -9,6 +9,12 @@ use bevy::prelude::*;
 use nds_engine::prelude::*;
 
 fn main() {
+    // L'app de validation des fichiers (Options > Developpement, avec l'acces developpeur)
+    if std::env::args().any(|arg| arg == nds_engine::asset_browser::review::REVIEW_ARG) {
+        nds_engine::asset_browser::review::run();
+        return;
+    }
+
     // Raccourcis qui ouvriraient le studio sans passer par le launcher : redirigés vers lui
     std::thread::spawn(ndsgs_common::repair_shortcuts);
 

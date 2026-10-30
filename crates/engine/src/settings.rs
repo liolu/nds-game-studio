@@ -2,7 +2,7 @@
 //!
 //! - **Langue** : anglais par défaut, français au choix (`i18n`) ;
 //! - **Affichage** : format, écrans fusionnés ou séparés, plein écran, rendu HD ou pixel ;
-//! - **Développement** : recompiler et relancer à l'enregistrement ;
+//! - **Développement** : recompiler et relancer à l'enregistrement, accès développeur ;
 //! - **Manettes** : modèle choisi à la main dans Options > Manettes ;
 //! - **Fenêtre principale** : place (pixels physiques), taille (pixels logiques), agrandie.
 //!
@@ -49,11 +49,13 @@ impl Default for DisplaySettings {
 #[serde(default)]
 pub struct DevOptions {
     pub auto_reload: bool,
+    pub developer_access: bool,
 }
 
 impl Default for DevOptions {
     fn default() -> Self {
-        Self { auto_reload: DevSettings::default().auto_reload }
+        let dev = DevSettings::default();
+        Self { auto_reload: dev.auto_reload, developer_access: dev.developer_access }
     }
 }
 
@@ -205,7 +207,7 @@ impl Plugin for SettingsPlugin {
         }
         world.insert_resource(layout);
         world.insert_resource(player.render());
-        world.insert_resource(DevSettings { auto_reload: player.dev.auto_reload });
+        world.insert_resource(DevSettings { auto_reload: player.dev.auto_reload, developer_access: player.dev.developer_access });
         let mut language = Language::default();
         i18n::set_language(&mut language, Lang::from_code(&player.language));
         world.insert_resource(language);
@@ -332,6 +334,7 @@ fn snapshot(player: &Settings, layout: &ScreenLayout, style: RenderStyle, dev: &
     now.display.merged = layout.merged;
     now.display.render = render_name(style).into();
     now.dev.auto_reload = dev.auto_reload;
+    now.dev.developer_access = dev.developer_access;
     now.controllers.model = if view.model_chosen { view.model.clone() } else { None };
     let Some(window) = window else { return now };
     let fullscreen = window.mode != WindowMode::Windowed;
@@ -391,6 +394,7 @@ fn watch(
         take!(display.fullscreen);
         take!(display.render);
         take!(dev.auto_reload);
+        take!(dev.developer_access);
         take!(controllers.model);
         take!(window.position);
         take!(window.size);
@@ -414,7 +418,7 @@ mod tests {
         let settings = Settings {
             language: "fr".into(),
             display: DisplaySettings { aspect: "16:9".into(), merged: false, fullscreen: true, render: "pixel".into() },
-            dev: DevOptions { auto_reload: false },
+            dev: DevOptions { auto_reload: false, developer_access: true },
             controllers: ControllerOptions { model: Some("xbox-series".into()) },
             window: WindowOptions { position: Some([-10, 40]), size: Some([512.0, 800.0]), maximized: true },
         };
@@ -442,6 +446,7 @@ mod tests {
         assert_eq!(defaults.aspect(), ScreenLayout::default().aspect);
         assert_eq!(defaults.render(), RenderStyle::default());
         assert!(defaults.dev.auto_reload);
+        assert!(!defaults.dev.developer_access);
         assert_eq!(Lang::from_code(&defaults.language), Lang::En);
     }
 }

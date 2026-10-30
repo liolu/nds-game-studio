@@ -8,7 +8,8 @@
 //!   s'affiche (un clic sur une touche dessinée l'affiche aussi) ;
 //! - **Clavier** : touches du clavier et de la manette pour chaque bouton DS ;
 //! - **Sauvegardes** : les sauvegardes des jeux (`saves_page`) ;
-//! - **Développement** : recompiler et relancer à l'enregistrement, fenêtre Code, fenêtre Assets.
+//! - **Développement** : recompiler et relancer à l'enregistrement, fenêtre Code, fenêtre Assets ; avec l'accès
+//!   développeur, l'app de validation des fichiers des jeux (`asset_browser::review`).
 
 use bevy::camera::RenderTarget;
 use bevy::picking::hover::Hovered;
@@ -19,7 +20,7 @@ use bevy::window::{WindowMode, WindowRef, WindowResolution};
 
 use crate::controllers::{self, first_gamepad, ControllerDef, PadButtonView};
 use crate::devtools::{DevSettings, ToggleCodeWindow};
-use crate::i18n::{t, tr, Lang, Language, Tr};
+use crate::i18n::{lang, t, tr, Lang, Language, Tr};
 use crate::input::{pad_buttons_of, DsButton, KeyMap};
 use crate::screens::{Aspect, DsScreens, RenderStyle, ScreenLayout};
 use crate::settings::ResetSettings;
@@ -66,6 +67,7 @@ enum Setting {
     Fullscreen,
     Render,
     AutoReload,
+    DeveloperAccess,
 }
 
 #[derive(Resource, Default)]
@@ -80,9 +82,11 @@ pub(crate) struct OptionsView {
     pub(crate) model_chosen: bool,
     dropdown_open: bool,
     /// Ce qui est construit dans le panneau (pour savoir quand le refaire).
-    built: Option<(Page, Option<String>, bool, Lang)>,
+    built: Option<(Page, Option<String>, bool, Lang, bool)>,
     /// Dernière touche pressée ou cliquée.
     press: String,
+    /// L'app de validation lancée (une seule à la fois).
+    review: Option<std::process::Child>,
 }
 
 #[derive(Component)]
@@ -108,6 +112,9 @@ struct ResetButton;
 
 #[derive(Component)]
 struct AssetsWindowButton;
+
+#[derive(Component)]
+struct ReviewButton;
 
 #[derive(Component)]
 struct ConnectedText;
@@ -219,9 +226,9 @@ fn current_model(view: &OptionsView) -> &'static ControllerDef {
     view.model.as_deref().and_then(controllers::by_id).unwrap_or(&controllers::controllers()[0])
 }
 
-fn build_page(mut commands: Commands, mut view: ResMut<OptionsView>, keymap: Res<KeyMap>, language: Res<Language>, children: Query<&Children>) {
+fn build_page(mut commands: Commands, mut view: ResMut<OptionsView>, keymap: Res<KeyMap>, language: Res<Language>, dev: Res<DevSettings>, children: Query<&Children>) {
     let (Some(_), Some(content)) = (view.window, view.content) else { return };
-    let key = (view.page, view.model.clone(), view.dropdown_open, language.0);
+    let key = (view.page, view.model.clone(), view.dropdown_open, language.0, dev.developer_access);
     if view.built.as_ref() == Some(&key) {
         return;
     }
@@ -308,6 +315,16 @@ fn build_page(mut commands: Commands, mut view: ResMut<OptionsView>, keymap: Res
                 })
                 .with_child(label(tr("Open / close the Assets window (F6)", "Ouvrir / fermer la fenetre Assets (F6)"), 15.0, TEXT));
             c.spawn(label(tr("3D models and images of decompiled games (standard Nintendo formats), with their path in NitroFS.", "Modeles 3D et images des jeux decompiles (formats Nintendo standard), avec leur chemin dans NitroFS."), 13.0, DIM));
+            c.spawn(Node { margin: UiRect::top(px(10)), ..default() }).with_children(|row| {
+                choice_row(row, tr("Developer access", "Acces developpeur"), Setting::DeveloperAccess, &[tr("No", "Non"), tr("Yes", "Oui")]);
+            });
+            if dev.developer_access {
+                c.spawn((Button, Hovered::default(), Node { align_self: AlignSelf::FlexStart, ..item_node() }, BackgroundColor(ITEM), ReviewButton))
+                    .observe(start_review)
+                    .with_child(label(tr("Validate the game files", "Valider les fichiers des jeux"), 15.0, TEXT));
+                let report = crate::asset_browser::review::default_out_dir();
+                c.spawn(label(t!("A few files of each format, game after game: buttons say what is wrong. Report: {}", "Quelques fichiers de chaque format, jeu apres jeu : des boutons disent ce qui ne va pas. Rapport : {}", report.display()), 13.0, DIM));
+            }
         }
     });
 }
@@ -321,6 +338,18 @@ fn choice_row(c: &mut ChildSpawnerCommands, title: &str, setting: Setting, value
             }
         });
     });
+}
+
+/// Lance l'app de validation dans son propre processus : un fichier qui la fait tomber laisse le studio ouvert.
+fn start_review(_: On<Activate>, mut view: ResMut<OptionsView>) {
+    if view.review.as_mut().is_some_and(|child| matches!(child.try_wait(), Ok(None))) {
+        return;
+    }
+    let language = format!("--lang={}", lang().code());
+    match std::env::current_exe().and_then(|exe| std::process::Command::new(exe).args([crate::asset_browser::review::REVIEW_ARG, language.as_str()]).spawn()) {
+        Ok(child) => view.review = Some(child),
+        Err(e) => warn!("validation des fichiers non lancee : {e}"),
+    }
 }
 
 const ASPECTS: [Aspect; 4] = [Aspect::Fill, Aspect::Ds, Aspect::Wide16x9, Aspect::Wide16x10];
@@ -340,6 +369,7 @@ fn apply_choice(
         Setting::Screens => layout.merged = choice.value == 0,
         Setting::Render => *style = if choice.value == 0 { RenderStyle::Hd } else { RenderStyle::Pixel },
         Setting::AutoReload => dev.auto_reload = choice.value == 0,
+        Setting::DeveloperAccess => dev.developer_access = choice.value == 1,
         Setting::Fullscreen => {
             if let Ok(mut window) = windows.get_mut(screens.main_window()) {
                 window.mode = if choice.value == 1 { WindowMode::BorderlessFullscreen(MonitorSelection::Current) } else { WindowMode::Windowed };
@@ -369,6 +399,7 @@ fn refresh_choices(
             Setting::Fullscreen => usize::from(fullscreen),
             Setting::Render => usize::from(*style == RenderStyle::Pixel),
             Setting::AutoReload => usize::from(!dev.auto_reload),
+            Setting::DeveloperAccess => usize::from(dev.developer_access),
         };
         let wanted = if current == choice.value || pressed { ITEM_ON } else if hovered.get() { ITEM_HOVER } else { ITEM };
         if color.0 != wanted {
@@ -445,7 +476,7 @@ fn refresh_press(mut view: ResMut<OptionsView>, clicked: Query<(&PadButtonView, 
     }
 }
 
-fn item_looks(view: Res<OptionsView>, mut items: Query<(&Hovered, Has<Pressed>, &mut BackgroundColor, Option<&PageButton>, Option<&ModelItem>), Or<(With<PageButton>, With<ModelItem>, With<DropdownButton>, With<CodeWindowButton>, With<ResetButton>, With<AssetsWindowButton>)>>) {
+fn item_looks(view: Res<OptionsView>, mut items: Query<(&Hovered, Has<Pressed>, &mut BackgroundColor, Option<&PageButton>, Option<&ModelItem>), Or<(With<PageButton>, With<ModelItem>, With<DropdownButton>, With<CodeWindowButton>, With<ResetButton>, With<AssetsWindowButton>, With<ReviewButton>)>>) {
     for (hovered, pressed, mut color, page, model) in &mut items {
         let selected = page.is_some_and(|p| p.0 == view.page) || model.is_some_and(|m| view.model.as_deref() == Some(m.0.as_str()));
         let wanted = if selected || pressed { ITEM_ON } else if hovered.get() { ITEM_HOVER } else { ITEM };

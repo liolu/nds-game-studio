@@ -173,11 +173,13 @@ struct Dev {
 pub struct DevSettings {
     /// Recompiler et relancer quand un fichier est enregistré.
     pub auto_reload: bool,
+    /// Accès développeur : montre les outils de validation dans Options > Développement.
+    pub developer_access: bool,
 }
 
 impl Default for DevSettings {
     fn default() -> Self {
-        Self { auto_reload: true }
+        Self { auto_reload: true, developer_access: false }
     }
 }
 
