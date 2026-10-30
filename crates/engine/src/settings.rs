@@ -72,6 +72,9 @@ pub struct WindowOptions {
     pub maximized: bool,
 }
 
+/// Position que Windows donne à une fenêtre réduite (-32000) : jamais une vraie place.
+const MINIMIZED_POS: i32 = -30000;
+
 /// Tout ce qui est gardé dans options.toml.
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -206,10 +209,12 @@ impl Plugin for SettingsPlugin {
 
         let mut primary = world.query_filtered::<&mut Window, With<PrimaryWindow>>();
         if let Ok(mut window) = primary.single_mut(world) {
-            if let (None, Some([x, y])) = (cli.at, player.window.position) {
+            // Place gardée pendant que la fenêtre était réduite (anciennes versions) : ignorée
+            let minimized = player.window.position.is_some_and(|[x, y]| x <= MINIMIZED_POS || y <= MINIMIZED_POS);
+            if let (None, Some([x, y]), false) = (cli.at, player.window.position, minimized) {
                 window.position = WindowPosition::At(IVec2::new(x, y));
             }
-            if let (None, Some([w, h])) = (cli.size, player.window.size) {
+            if let (None, Some([w, h]), false) = (cli.size, player.window.size, minimized) {
                 window.resolution = WindowResolution::new(w.max(128.0) as u32, h.max(128.0) as u32);
             }
             if player.display.fullscreen {
@@ -319,7 +324,14 @@ fn snapshot(player: &Settings, layout: &ScreenLayout, style: RenderStyle, dev: &
     if fullscreen {
         return now;
     }
-    let (maximized, at) = WINIT_WINDOWS.with_borrow(|w| w.get_window(main).map(|w| (w.is_maximized(), w.outer_position().ok().map(|p| [p.x, p.y])))).unwrap_or((false, None));
+    let (maximized, minimized, at) = WINIT_WINDOWS
+        .with_borrow(|w| w.get_window(main).map(|w| (w.is_maximized(), w.is_minimized().unwrap_or(false), w.outer_position().ok().map(|p| [p.x, p.y]))))
+        .unwrap_or((false, false, None));
+    // Réduite dans la barre des tâches, Windows la met en (-32000, -32000) en 160x28 : on garde
+    // la place d'avant (sinon le studio se rouvrirait réduit)
+    if minimized || at.is_some_and(|[x, y]| x <= MINIMIZED_POS || y <= MINIMIZED_POS) {
+        return now;
+    }
     now.window.maximized = maximized;
     if !maximized {
         if at.is_some() {
