@@ -82,6 +82,12 @@ décompilés, pour voir leurs modèles 3D et leurs images et nommer les objets d
   textures `.nsbtx`, palettes `.nclr`, tuiles `.ncgr` / `.ncbr`, écrans `.nscr`, cellules `.ncer`.
   La palette et les tuiles qui vont avec sont devinées (même dossier, nom le plus proche) et se
   changent avec les flèches `<` `>`. Les formats maison (Traveller's Tales, EA...) ne sont pas lus.
+- **rom.bin** (Lego Star Wars II, Les Sims 2...) : les fichiers de l'archive numérotée, une fois
+  sortis dans `<jeu>/build/romarc` par `python ../../studio/gametools/romarc.py extract` (lancé dans
+  le dossier du jeu), sont listés `rom.bin#n` (filtre « rom.bin »). « Copier le chemin » copie
+  alors le numéro n seul, la clé de DS Decomp Studio (onglet Data, « Archive (rom.bin) »). Un
+  modèle sans textures prend le `.nsbtx` au numéro le plus proche qui les a (flèches pour en
+  changer, ou « celles du modele » = sans texture).
 - Lancer directement : `nds-game-studio --assets=<jeu> --asset=<chemin>`.
 - Lecture des formats : crate `crates/nitro` (la 3D reprend le code
   d'[apicula](https://github.com/scurest/apicula), licence 0BSD).
