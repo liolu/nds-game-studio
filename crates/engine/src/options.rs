@@ -7,7 +7,7 @@
 //!   s'affiche (un clic sur une touche dessinée l'affiche aussi) ;
 //! - **Clavier** : touches du clavier et de la manette pour chaque bouton DS ;
 //! - **Sauvegardes** : les sauvegardes des jeux (`saves_page`) ;
-//! - **Développement** : recompiler et relancer à l'enregistrement, fenêtre Code.
+//! - **Développement** : recompiler et relancer à l'enregistrement, fenêtre Code, fenêtre Assets.
 
 use bevy::camera::RenderTarget;
 use bevy::picking::hover::Hovered;
@@ -100,6 +100,9 @@ struct CodeWindowButton;
 
 #[derive(Component)]
 struct ResetButton;
+
+#[derive(Component)]
+struct AssetsWindowButton;
 
 #[derive(Component)]
 struct ConnectedText;
@@ -290,6 +293,12 @@ fn build_page(mut commands: Commands, mut view: ResMut<OptionsView>, keymap: Res
                 })
                 .with_child(label("Ouvrir / fermer la fenetre Code (F5)", 15.0, TEXT));
             c.spawn(label("Marche avec le depot sur ce PC (compilation locale).", 13.0, DIM));
+            c.spawn((Button, Hovered::default(), Node { align_self: AlignSelf::FlexStart, margin: UiRect::top(px(10)), ..item_node() }, BackgroundColor(ITEM), AssetsWindowButton))
+                .observe(|_: On<Activate>, mut toggle: MessageWriter<crate::asset_browser::ToggleAssets>| {
+                    toggle.write(crate::asset_browser::ToggleAssets);
+                })
+                .with_child(label("Ouvrir / fermer la fenetre Assets (F6)", 15.0, TEXT));
+            c.spawn(label("Modeles 3D et images des jeux decompiles (formats Nintendo standard), avec leur chemin dans NitroFS.", 13.0, DIM));
         }
     });
 }
@@ -427,7 +436,7 @@ fn refresh_press(mut view: ResMut<OptionsView>, clicked: Query<(&PadButtonView, 
     }
 }
 
-fn item_looks(view: Res<OptionsView>, mut items: Query<(&Hovered, Has<Pressed>, &mut BackgroundColor, Option<&PageButton>, Option<&ModelItem>), Or<(With<PageButton>, With<ModelItem>, With<DropdownButton>, With<CodeWindowButton>, With<ResetButton>)>>) {
+fn item_looks(view: Res<OptionsView>, mut items: Query<(&Hovered, Has<Pressed>, &mut BackgroundColor, Option<&PageButton>, Option<&ModelItem>), Or<(With<PageButton>, With<ModelItem>, With<DropdownButton>, With<CodeWindowButton>, With<ResetButton>, With<AssetsWindowButton>)>>) {
     for (hovered, pressed, mut color, page, model) in &mut items {
         let selected = page.is_some_and(|p| p.0 == view.page) || model.is_some_and(|m| view.model.as_deref() == Some(m.0.as_str()));
         let wanted = if selected || pressed { ITEM_ON } else if hovered.get() { ITEM_HOVER } else { ITEM };

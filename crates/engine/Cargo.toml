@@ -6,6 +6,7 @@ description = "Moteur de jeux DS natifs (Bevy) : deux ecrans 256x192, fenetres l
 
 [dependencies]
 bevy.workspace = true
+nds-nitro = { path = "../nitro" }
 serde = { version = "1", features = ["derive"] }
 toml = "1.1"
 serde_json = "1"

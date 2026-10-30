@@ -8,8 +8,10 @@
 //! - chaque jeu a sa spécification (`spec`, fichier game.toml) : écran principal, 2D ou 3D par
 //!   écran, échelle, écart entre les écrans, cadence, touches ;
 //! - le studio (`studio`) liste les jeux enregistrés, applique leur spécification et les lance ;
-//! - F5 montre le code du jeu, et enregistrer un fichier recompile et relance le studio (`devtools`).
+//! - F5 montre le code du jeu, et enregistrer un fichier recompile et relance le studio (`devtools`) ;
+//! - F6 montre les fichiers (modèles 3D, images) des jeux décompilés (`asset_browser`).
 
+pub mod asset_browser;
 pub mod controllers;
 pub mod devtools;
 pub mod input;
@@ -74,7 +76,7 @@ impl Plugin for NdsEnginePlugin {
                 }),
         )
         .add_plugins((screens::ScreensPlugin, link::LinkPlugin, input::InputPlugin, studio::StudioPlugin, titlebar::TitleBarPlugin, devtools::DevToolsPlugin, options::OptionsPlugin))
-            .add_plugins((save::SavePlugin, settings::SettingsPlugin, saves_page::SavesPagePlugin));
+            .add_plugins((save::SavePlugin, settings::SettingsPlugin, saves_page::SavesPagePlugin, asset_browser::AssetBrowserPlugin));
         options.apply_to_app(app);
     }
 }

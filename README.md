@@ -64,6 +64,28 @@ Ajouter une manette : un fichier `crates/engine/controllers/<id>.toml` (format d
   Code et le jeu continue avec l'ancien code.
 - Marche avec le dépôt sur le PC (compilation locale), pas dans une version installée.
 
+## Assets des jeux décompilés (F6)
+
+**F6** (ou Options > Développement) ouvre la fenêtre « Assets » : les fichiers des jeux DS
+décompilés, pour voir leurs modèles 3D et leurs images et nommer les objets du jeu.
+
+- Les jeux sont les dossiers `<projets>/<jeu>/extract/<version>/files` (NitroFS extrait par dsd).
+  `<projets>` = `--projects=<dossier>`, ou la variable `NDS_DECOMP_PROJECTS`, ou
+  `D:\... logiciel\decomp\decomp ds\projets`.
+- La liste donne le **chemin de chaque fichier dans NitroFS** (celui que le code du jeu charge ;
+  `archive.narc#n` = n-ième fichier d'une archive NARC). Les fichiers sont reconnus par leur
+  signature (aussi compressés en LZ77). Taper du texte filtre, Retour arrière / Échap efface, la
+  molette fait défiler. « Copier le chemin » le met dans le presse-papiers (pour le relier aux
+  fonctions du jeu dans DS Decomp Studio).
+- Formats Nintendo standard : modèles `.nsbmd` en 3D (glisser = tourner, clic droit = déplacer,
+  molette = zoom) avec leurs textures (celles du fichier, ou le `.nsbtx` qui en donne le plus),
+  textures `.nsbtx`, palettes `.nclr`, tuiles `.ncgr` / `.ncbr`, écrans `.nscr`, cellules `.ncer`.
+  La palette et les tuiles qui vont avec sont devinées (même dossier, nom le plus proche) et se
+  changent avec les flèches `<` `>`. Les formats maison (Traveller's Tales, EA...) ne sont pas lus.
+- Lancer directement : `nds-game-studio --assets=<jeu> --asset=<chemin>`.
+- Lecture des formats : crate `crates/nitro` (la 3D reprend le code
+  d'[apicula](https://github.com/scurest/apicula), licence 0BSD).
+
 ## Un moteur pour des jeux différents
 
 Chaque jeu a un `game.toml` qui dit ce qu'il attend de la console :
