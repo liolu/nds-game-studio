@@ -12,7 +12,11 @@
 //!   `.ncer` ; la palette, les tuiles ou les textures qui vont avec sont devinées (même dossier,
 //!   nom le plus proche) et se changent avec les flèches ;
 //! - « Copier le chemin » met le chemin NitroFS dans le presse-papiers (pour le relier aux
-//!   fonctions du jeu dans DS Decomp Studio).
+//!   fonctions du jeu dans DS Decomp Studio) ;
+//! - section « rom.bin » : les fichiers de l'archive numérotée rom.bin (Lego Star Wars II, Les
+//!   Sims 2...) sortis par `studio/gametools/romarc.py extract` dans `<jeu>/build/romarc`, montrés
+//!   `rom.bin#n` ; « Copier le chemin » y copie le n° n seul (clé de DS Decomp Studio) et les
+//!   textures d'un modèle sont cherchées dans les `.nsbtx` aux numéros les plus proches.
 //!
 //! Lecture des formats : crate `nds-nitro` (code d'apicula pour la 3D).
 
@@ -84,6 +88,8 @@ struct Entry {
     /// Dossier (ou archive) : les fichiers qui vont ensemble y sont cherchés d'abord.
     dir: String,
     stem: String,
+    /// N° dans l'archive rom.bin (fichiers sortis par `romarc.py extract` dans build/romarc).
+    rom_index: Option<u32>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -347,7 +353,7 @@ fn scan(files: &Path) -> Vec<Entry> {
         let kind = kind_of(&head[..n], || small.then(|| std::fs::read(&disk).ok()).flatten());
         let dir = path.rsplit_once('/').map_or(String::new(), |(d, _)| d.to_string());
         let stem = stem_of(&path);
-        entries.push(Entry { path: path.clone(), member_name: None, disk: disk.clone(), member: None, kind, size, dir, stem });
+        entries.push(Entry { path: path.clone(), member_name: None, disk: disk.clone(), member: None, kind, size, dir, stem, rom_index: None });
         if kind != Kind::Archive {
             continue;
         }
@@ -359,9 +365,37 @@ fn scan(files: &Path) -> Vec<Entry> {
             let member_path = format!("{path}#{}", m.index);
             let named = !m.name.chars().all(|c| c.is_ascii_digit());
             let stem = if named { stem_of(&m.name) } else { String::new() };
-            entries.push(Entry { path: member_path, member_name: named.then(|| m.name.clone()), disk: disk.clone(), member: Some((m.start, m.end)), kind, size: m.end - m.start, dir: path.clone(), stem });
+            entries.push(Entry { path: member_path, member_name: named.then(|| m.name.clone()), disk: disk.clone(), member: Some((m.start, m.end)), kind, size: m.end - m.start, dir: path.clone(), stem, rom_index: None });
         }
     }
+    entries.extend(scan_romarc(files));
+    entries
+}
+
+/// Dossier des fichiers sortis de rom.bin : `<jeu>/build/romarc` (files = `<jeu>/extract/<v>/files`).
+fn romarc_dir(files: &Path) -> Option<PathBuf> {
+    Some(files.parent()?.parent()?.parent()?.join("build").join("romarc"))
+}
+
+/// Les fichiers de l'archive numérotée rom.bin (jeux Traveller's Tales, EA...) une fois sortis
+/// par `studio/gametools/romarc.py extract` : `<n sur 5 chiffres>.<ext>`.
+fn scan_romarc(files: &Path) -> Vec<Entry> {
+    let Some(dir) = romarc_dir(files) else { return Vec::new() };
+    let mut paths = Vec::new();
+    walk(&dir, &mut paths);
+    let mut entries: Vec<Entry> = paths
+        .into_iter()
+        .filter_map(|disk| {
+            let name = disk.file_name()?.to_string_lossy().to_string();
+            let n: u32 = name.split('.').next()?.parse().ok()?;
+            let size = disk.metadata().map(|m| m.len() as usize).unwrap_or(0);
+            let mut head = [0u8; 4];
+            let read = std::fs::File::open(&disk).and_then(|mut f| f.read(&mut head)).unwrap_or(0);
+            let kind = kind_of(&head[..read], || (size < 4 << 20).then(|| std::fs::read(&disk).ok()).flatten());
+            Some(Entry { path: format!("rom.bin#{n}"), member_name: Some(name), disk, member: None, kind, size, dir: "rom.bin".into(), stem: n.to_string(), rom_index: Some(n) })
+        })
+        .collect();
+    entries.sort_by_key(|e| e.rom_index);
     entries
 }
 
@@ -403,6 +437,13 @@ impl AssetBrowser {
         self.list_dirty = true;
         let viewable = self.entries.iter().filter(|e| e.kind.viewable()).count();
         self.status = format!("{} fichiers, {} montrables (formats Nintendo standard)", self.entries.len(), viewable);
+        let files = self.game.map(|g| self.games[g].files.clone()).unwrap_or_default();
+        let romarc = self.entries.iter().filter(|e| e.rom_index.is_some()).count();
+        if romarc > 0 {
+            self.status += &format!(" ; rom.bin : {romarc} fichiers (build/romarc, filtre 'rom.bin')");
+        } else if files.join("rom.bin").is_file() {
+            self.status += " ; rom.bin pas encore extrait : dans le dossier du jeu, python ../../studio/gametools/romarc.py extract";
+        }
         if let Some(i) = self.want_file.take().and_then(|f| self.entries.iter().position(|e| e.path.eq_ignore_ascii_case(&f))) {
             self.filter_entries();
             self.scroll = self.shown.iter().position(|&s| s == i).unwrap_or(0).saturating_sub(ROWS / 2);
@@ -430,6 +471,10 @@ impl AssetBrowser {
     fn companions(&self, sel: usize, kinds: &[Kind]) -> Vec<usize> {
         let me = &self.entries[sel];
         let closeness = |e: &Entry| {
+            // rom.bin : les fichiers qui vont ensemble ont des numéros proches
+            if let (Some(a), Some(b)) = (me.rom_index, e.rom_index) {
+                return (false, std::cmp::Reverse(usize::MAX - a.abs_diff(b) as usize));
+            }
             let common = me.stem.chars().zip(e.stem.chars()).take_while(|(a, b)| a == b).count();
             (e.stem != me.stem, std::cmp::Reverse(common))
         };
@@ -587,7 +632,8 @@ fn toggle_window(
                     row.spawn((Button, Hovered::default(), item_node(), BackgroundColor(ITEM), CopyButton))
                         .observe(|_: On<Activate>, mut b: ResMut<AssetBrowser>, mut clipboard: ResMut<Clipboard>| {
                             let Some(sel) = b.selected else { return };
-                            let path = b.entries[sel].path.clone();
+                            // rom.bin : le n° seul, la clé de DS Decomp Studio (onglet Data, « Archive (rom.bin) »)
+                            let path = b.entries[sel].rom_index.map_or_else(|| b.entries[sel].path.clone(), |n| n.to_string());
                             b.status = match clipboard.set_text(path.clone()) {
                                 Ok(()) => format!("Copie : {path}"),
                                 Err(e) => format!("Presse-papiers indisponible : {e:?}"),
@@ -796,7 +842,10 @@ fn refresh_texts(
         } else if info.is_some() {
             if b.info.is_empty() { b.status.clone() } else { format!("{}\n{}", b.info, b.status) }
         } else if path.is_some() {
-            b.selected.map_or(String::new(), |s| b.entries[s].path.clone())
+            b.selected.map_or(String::new(), |s| match b.entries[s].rom_index {
+                Some(n) => format!("{}   (n = {n})", b.entries[s].path),
+                None => b.entries[s].path.clone(),
+            })
         } else {
             continue;
         };
