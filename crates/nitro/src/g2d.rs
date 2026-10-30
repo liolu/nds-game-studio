@@ -217,6 +217,9 @@ pub fn read_screen(file: &[u8]) -> Result<Screen> {
     let b = block(file, &[b"NRCS", b"SCRN"])?;
     let width = u16_at(b, 0)? as u32;
     let height = u16_at(b, 2)? as u32;
+    if width > 4096 || height > 4096 {
+        bail!("ecran de {}x{} : fichier inattendu", width, height);
+    }
     let size = u32_at(b, 8)? as usize;
     let data = b.get(12..).unwrap_or(&[]);
     let data = &data[..size.min(data.len())];
