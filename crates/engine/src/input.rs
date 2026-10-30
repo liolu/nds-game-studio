@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 
-use crate::screens::{letterbox, DsScreens, Screen, SCREEN_H, SCREEN_W};
+use crate::screens::{Screen, ScreenPlaces};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -66,7 +66,7 @@ impl DsButton {
         }
     }
 
-    fn pad_buttons(self) -> &'static [GamepadButton] {
+    pub(crate) fn pad_buttons(self) -> &'static [GamepadButton] {
         use GamepadButton::*;
         match self {
             DsButton::A => &[East],
@@ -83,6 +83,11 @@ impl DsButton {
             DsButton::Right => &[DPadRight],
         }
     }
+}
+
+/// Touches de manette qui commandent ce bouton DS.
+pub(crate) fn pad_buttons_of(button: DsButton) -> &'static [GamepadButton] {
+    button.pad_buttons()
 }
 
 /// Touches du clavier pour chaque bouton (la spécification du jeu peut les changer).
@@ -122,7 +127,8 @@ impl DsInput {
     }
 }
 
-/// Stylet sur l'écran du bas, en pixels DS (0,0 en haut à gauche).
+/// Stylet sur l'écran du bas, en pixels DS (0,0 en haut à gauche de la zone 256x192 ; en format
+/// large, x peut sortir de 0..256 sur les côtés).
 #[derive(Resource, Default)]
 pub struct Stylus {
     /// Dernière position du stylet sur l'écran (même relevé).
@@ -161,10 +167,19 @@ impl Plugin for InputPlugin {
     }
 }
 
-fn read_buttons(map: Res<KeyMap>, keys: Res<ButtonInput<KeyCode>>, pads: Query<&Gamepad>, mut input: ResMut<DsInput>) {
+fn read_buttons(
+    map: Res<KeyMap>,
+    keys: Res<ButtonInput<KeyCode>>,
+    pads: Query<&Gamepad>,
+    focus: Option<Res<bevy::input_focus::InputFocus>>,
+    editors: Query<(), With<crate::devtools::CodeEditor>>,
+    mut input: ResMut<DsInput>,
+) {
+    // On tape dans l'éditeur de code (F5) : le clavier n'est pas au jeu
+    let typing = crate::devtools::typing_in_editor(focus.as_deref(), &editors);
     let mut held = 0;
     for button in DsButton::ALL {
-        let key = map.0.get(&button).is_some_and(|k| keys.any_pressed(k.iter().copied()));
+        let key = !typing && map.0.get(&button).is_some_and(|k| keys.any_pressed(k.iter().copied()));
         let pad = pads.iter().any(|p| p.any_pressed(button.pad_buttons().iter().copied()));
         // Le stick gauche sert aussi de croix
         let stick = pads.iter().any(|p| {
@@ -188,18 +203,15 @@ fn read_buttons(map: Res<KeyMap>, keys: Res<ButtonInput<KeyCode>>, pads: Query<&
 fn read_stylus(
     buttons: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
-    screens: Res<DsScreens>,
+    places: Res<ScreenPlaces>,
     windows: Query<&Window>,
     mut stylus: ResMut<Stylus>,
 ) {
     stylus.was_down = stylus.down;
-    let Ok(window) = windows.get(screens.window(Screen::Bottom)) else { return };
+    let Some(place) = places.get(Screen::Bottom) else { return };
+    let Ok(window) = windows.get(place.window) else { return };
     let alt = keys.any_pressed([KeyCode::AltLeft, KeyCode::AltRight]); // Alt + clic = déplacer la fenêtre
-    let inside = window.cursor_position().and_then(|cursor| {
-        let (offset, scale) = letterbox(window.size());
-        let p = (cursor - offset) / scale;
-        (p.x >= 0.0 && p.y >= 0.0 && p.x < SCREEN_W as f32 && p.y < SCREEN_H as f32).then_some(p)
-    });
+    let inside = window.cursor_position().and_then(|cursor| place.to_ds(cursor));
     match inside {
         Some(p) => {
             stylus.position = p;

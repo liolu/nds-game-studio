@@ -124,6 +124,9 @@ struct LauncherApp {
     picked: Option<String>,
     /// Version verrouillée (voir `LauncherConfig::pinned`).
     pinned: Option<String>,
+    /// `--versions` (Options > Launcher du studio) : rester ouvert pour choisir une version.
+    /// Sinon, rien à installer = le studio s'ouvre tout de suite : c'est lui qui montre les jeux.
+    stay_open: bool,
 }
 
 impl LauncherApp {
@@ -150,6 +153,7 @@ impl LauncherApp {
             launch_error: None,
             picked: None,
             pinned: load_pinned(),
+            stay_open: std::env::args().any(|a| a == "--versions"),
         };
         app.start_check();
         app
@@ -391,6 +395,9 @@ impl eframe::App for LauncherApp {
                         });
                     }
                     Stage::ReadyToPlay(msg) => {
+                        if !self.stay_open {
+                            self.launch_game(&ctx);
+                        }
                         ui.label(msg);
                         ui.add_space(10.0);
                         if ui.add_sized([140.0, 34.0], egui::Button::new("Jouer")).clicked() {

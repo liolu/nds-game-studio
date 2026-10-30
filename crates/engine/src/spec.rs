@@ -4,9 +4,11 @@
 //! id = "platformer"
 //! name = "Mini Platformer"
 //! genre = "plateforme"
+//! game_code = "AQIE" # la rom de ce jeu, pour le launcher
 //!
 //! [screens]
 //! main = "top"     # écran qui affiche le moteur principal (top | bottom), échangeable en jeu
+//! render = "hd"    # hd (résolution de la fenêtre) | pixel (256x192 agrandi, rendu rétro)
 //! scale = 3        # taille de départ des fenêtres (x 256x192)
 //! gap = 0          # écart entre les écrans liés, en pixels DS
 //! main_mode = "2d" # 2d | 3d (3d = caméra 3D sous la 2D)
@@ -29,7 +31,7 @@ use bevy::prelude::*;
 use serde::Deserialize;
 
 use crate::input::{DsButton, KeyMap};
-use crate::screens::Screen;
+use crate::screens::{Aspect, RenderStyle, Screen};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -45,7 +47,11 @@ pub enum ScreenMode {
 #[serde(default)]
 pub struct ScreensSpec {
     pub main: Screen,
-    pub scale: u32,
+    pub render: RenderStyle,
+    /// Format imposé par le jeu ; sans, celui choisi par le joueur (F8, « remplir » au départ).
+    pub aspect: Option<Aspect>,
+    /// Taille imposée aux fenêtres (x 256x192) ; sans, on garde la taille choisie par le joueur.
+    pub scale: Option<u32>,
     pub gap: u32,
     pub main_mode: ScreenMode,
     pub sub_mode: ScreenMode,
@@ -57,7 +63,9 @@ impl Default for ScreensSpec {
     fn default() -> Self {
         Self {
             main: Screen::Top,
-            scale: crate::DEFAULT_SCALE,
+            render: RenderStyle::Hd,
+            aspect: None,
+            scale: None,
             gap: 0,
             main_mode: ScreenMode::TwoD,
             sub_mode: ScreenMode::TwoD,
@@ -94,6 +102,9 @@ pub struct GameSpec {
     pub genre: String,
     #[serde(default)]
     pub description: String,
+    /// Code de la rom de ce jeu (`AQIE`) : c'est lui que « Jouer » lance pour cette rom.
+    #[serde(default)]
+    pub game_code: String,
     #[serde(default)]
     pub screens: ScreensSpec,
     #[serde(default)]
@@ -191,6 +202,8 @@ mod tests {
             name = "Demo"
             [screens]
             main = "bottom"
+            render = "pixel"
+            aspect = "16:9"
             main_mode = "3d"
             gap = 12
             main_clear = "#ff0000"
@@ -204,10 +217,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(spec.screens.main, Screen::Bottom);
+        assert_eq!(spec.screens.render, RenderStyle::Pixel);
+        assert_eq!(spec.screens.aspect, Some(Aspect::Wide16x9));
         assert_eq!(spec.mode(true), ScreenMode::ThreeD);
         assert_eq!(spec.mode(false), ScreenMode::TwoD);
         assert_eq!(spec.screens.gap, 12);
-        assert_eq!(spec.screens.scale, crate::DEFAULT_SCALE);
+        assert_eq!(spec.screens.scale, None);
         assert_eq!(spec.timing.fps, 30.0);
         assert_eq!(spec.key_map().0[&DsButton::A], vec![KeyCode::Space, KeyCode::KeyK]);
         assert_eq!(spec.key_map().0[&DsButton::B], vec![KeyCode::KeyZ]);
@@ -218,6 +233,7 @@ mod tests {
     fn minimal_spec_uses_ds_defaults() {
         let spec = GameSpec::from_toml("id = \"x\"\nname = \"X\"").unwrap();
         assert_eq!(spec.screens.main, Screen::Top);
+        assert_eq!(spec.screens.render, RenderStyle::Hd);
         assert_eq!(spec.timing.fps, 60.0);
         assert!(GameSpec::from_toml("name = \"sans id\"").is_err());
     }

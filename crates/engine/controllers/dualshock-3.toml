@@ -1,0 +1,233 @@
+id = "dualshock-3"
+name = "Manette PlayStation 3 (DualShock 3)"
+names = ["playstation(r)3", "playstation 3", "ps3", "dualshock 3", "dualshock3", "sixaxis"]
+vendor_ids = [0x054C]
+product_ids = [0x0268]
+
+# Corps noir brillant : partie centrale + zone des sticks + deux longues poignees
+[[part]]
+x = 60
+y = 65
+w = 360
+h = 140
+radius = 60
+color = "#141416"
+
+[[part]]
+x = 135
+y = 140
+w = 210
+h = 95
+radius = 40
+color = "#141416"
+
+[[part]]
+x = 45
+y = 130
+w = 120
+h = 155
+radius = 58
+color = "#141416"
+
+[[part]]
+x = 315
+y = 130
+w = 120
+h = 155
+radius = 58
+color = "#141416"
+
+# Reflet du dessus (aspect brillant)
+[[part]]
+x = 150
+y = 72
+w = 180
+h = 30
+radius = 15
+color = "#202024"
+
+# Gachettes et boutons de tranche, vus de dessus
+[[button]]
+input = "LeftTrigger2"
+label = "L2"
+x = 80
+y = 12
+w = 80
+h = 24
+radius = 10
+color = "#2a2a2e"
+label_color = "#e6e6e6"
+
+[[button]]
+input = "RightTrigger2"
+label = "R2"
+x = 320
+y = 12
+w = 80
+h = 24
+radius = 10
+color = "#2a2a2e"
+label_color = "#e6e6e6"
+
+[[button]]
+input = "LeftTrigger"
+label = "L1"
+x = 80
+y = 42
+w = 80
+h = 20
+radius = 8
+color = "#333338"
+label_color = "#e6e6e6"
+
+[[button]]
+input = "RightTrigger"
+label = "R1"
+x = 320
+y = 42
+w = 80
+h = 20
+radius = 8
+color = "#333338"
+label_color = "#e6e6e6"
+
+# Croix (4 touches separees)
+[[button]]
+input = "DPadUp"
+label = ""
+x = 109
+y = 98
+w = 22
+h = 26
+radius = 4
+color = "#2c2c31"
+label_color = "#ffffff"
+
+[[button]]
+input = "DPadDown"
+label = ""
+x = 109
+y = 146
+w = 22
+h = 26
+radius = 4
+color = "#2c2c31"
+label_color = "#ffffff"
+
+[[button]]
+input = "DPadLeft"
+label = ""
+x = 83
+y = 124
+w = 26
+h = 22
+radius = 4
+color = "#2c2c31"
+label_color = "#ffffff"
+
+[[button]]
+input = "DPadRight"
+label = ""
+x = 131
+y = 124
+w = 26
+h = 22
+radius = 4
+color = "#2c2c31"
+label_color = "#ffffff"
+
+# Boutons de face : Triangle vert, Rond rouge, Croix bleue, Carre rose
+[[button]]
+input = "North"
+label = "/\\"
+x = 346
+y = 94
+w = 28
+h = 28
+radius = 14
+color = "#2a2a2e"
+label_color = "#3fbf8f"
+
+[[button]]
+input = "West"
+label = "[]"
+x = 316
+y = 121
+w = 28
+h = 28
+radius = 14
+color = "#2a2a2e"
+label_color = "#e58ac8"
+
+[[button]]
+input = "East"
+label = "O"
+x = 376
+y = 121
+w = 28
+h = 28
+radius = 14
+color = "#2a2a2e"
+label_color = "#ef4b4b"
+
+[[button]]
+input = "South"
+label = "X"
+x = 346
+y = 148
+w = 28
+h = 28
+radius = 14
+color = "#2a2a2e"
+label_color = "#7aa8ff"
+
+# Centre
+[[button]]
+input = "Select"
+label = "SELECT"
+x = 192
+y = 124
+w = 40
+h = 14
+radius = 7
+color = "#2c2c31"
+label_color = "#c8c8c8"
+
+[[button]]
+input = "Start"
+label = "START"
+x = 248
+y = 124
+w = 40
+h = 14
+radius = 7
+color = "#2c2c31"
+label_color = "#c8c8c8"
+
+[[button]]
+input = "Mode"
+label = "PS"
+x = 226
+y = 162
+w = 28
+h = 28
+radius = 14
+color = "#2c2c31"
+label_color = "#e0e0e0"
+
+# Sticks
+[[stick]]
+side = "left"
+x = 150
+y = 160
+size = 56
+color = "#0b0b0c"
+cap_color = "#2e2e33"
+
+[[stick]]
+side = "right"
+x = 274
+y = 160
+size = 56
+color = "#0b0b0c"
+cap_color = "#2e2e33"

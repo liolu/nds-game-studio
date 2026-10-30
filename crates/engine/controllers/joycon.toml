@@ -1,0 +1,234 @@
+id = "joycon"
+name = "Joy-Con (paire)"
+names = ["joy-con", "joycon", "joy con"]
+vendor_ids = [0x057E]
+product_ids = [0x2006, 0x2007, 0x200E]
+
+# Corps : Joy-Con gauche (bleu) et droit (rouge), cote a cote comme sur une poignee.
+# Chaque Joy-Con = une part tres arrondie + une part peu arrondie cote interieur.
+[[part]]
+x = 130
+y = 70
+w = 90
+h = 215
+radius = 40
+color = "#00a7e1"
+
+[[part]]
+x = 180
+y = 70
+w = 40
+h = 215
+radius = 8
+color = "#00a7e1"
+
+[[part]]
+x = 260
+y = 70
+w = 90
+h = 215
+radius = 40
+color = "#ff4554"
+
+[[part]]
+x = 260
+y = 70
+w = 40
+h = 215
+radius = 8
+color = "#ff4554"
+
+# Gachettes et boutons de tranche, vus de dessus
+[[button]]
+input = "LeftTrigger2"
+label = "ZL"
+x = 135
+y = 12
+w = 80
+h = 24
+radius = 10
+color = "#2b2d31"
+label_color = "#e6e6e6"
+
+[[button]]
+input = "RightTrigger2"
+label = "ZR"
+x = 265
+y = 12
+w = 80
+h = 24
+radius = 10
+color = "#2b2d31"
+label_color = "#e6e6e6"
+
+[[button]]
+input = "LeftTrigger"
+label = "L"
+x = 135
+y = 42
+w = 80
+h = 20
+radius = 8
+color = "#3a3d43"
+label_color = "#e6e6e6"
+
+[[button]]
+input = "RightTrigger"
+label = "R"
+x = 265
+y = 42
+w = 80
+h = 20
+radius = 8
+color = "#3a3d43"
+label_color = "#e6e6e6"
+
+# Joy-Con gauche : -, stick, 4 boutons de direction, Capture
+[[button]]
+input = "Select"
+label = "-"
+x = 196
+y = 77
+w = 18
+h = 12
+radius = 6
+color = "#1b1c1f"
+label_color = "#e6e6e6"
+
+[[stick]]
+side = "left"
+x = 150
+y = 92
+size = 50
+color = "#1b1c1f"
+cap_color = "#3e4148"
+
+[[button]]
+input = "DPadUp"
+label = ""
+x = 163
+y = 153
+w = 24
+h = 24
+radius = 12
+color = "#1b1c1f"
+label_color = "#ffffff"
+
+[[button]]
+input = "DPadDown"
+label = ""
+x = 163
+y = 193
+w = 24
+h = 24
+radius = 12
+color = "#1b1c1f"
+label_color = "#ffffff"
+
+[[button]]
+input = "DPadLeft"
+label = ""
+x = 137
+y = 173
+w = 24
+h = 24
+radius = 12
+color = "#1b1c1f"
+label_color = "#ffffff"
+
+[[button]]
+input = "DPadRight"
+label = ""
+x = 189
+y = 173
+w = 24
+h = 24
+radius = 12
+color = "#1b1c1f"
+label_color = "#ffffff"
+
+[[button]]
+input = "C"
+label = "C"
+x = 190
+y = 234
+w = 16
+h = 16
+radius = 3
+color = "#1b1c1f"
+label_color = "#c8c8c8"
+
+# Joy-Con droit : +, boutons X A B Y, stick, HOME
+[[button]]
+input = "Start"
+label = "+"
+x = 266
+y = 77
+w = 18
+h = 12
+radius = 6
+color = "#1b1c1f"
+label_color = "#e6e6e6"
+
+[[button]]
+input = "North"
+label = "X"
+x = 293
+y = 82
+w = 24
+h = 24
+radius = 12
+color = "#1b1c1f"
+label_color = "#ffffff"
+
+[[button]]
+input = "West"
+label = "Y"
+x = 267
+y = 108
+w = 24
+h = 24
+radius = 12
+color = "#1b1c1f"
+label_color = "#ffffff"
+
+[[button]]
+input = "East"
+label = "A"
+x = 319
+y = 108
+w = 24
+h = 24
+radius = 12
+color = "#1b1c1f"
+label_color = "#ffffff"
+
+[[button]]
+input = "South"
+label = "B"
+x = 293
+y = 134
+w = 24
+h = 24
+radius = 12
+color = "#1b1c1f"
+label_color = "#ffffff"
+
+[[stick]]
+side = "right"
+x = 280
+y = 172
+size = 50
+color = "#1b1c1f"
+cap_color = "#3e4148"
+
+[[button]]
+input = "Mode"
+label = "H"
+x = 274
+y = 234
+w = 18
+h = 18
+radius = 9
+color = "#3a3d43"
+label_color = "#e6e6e6"

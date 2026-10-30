@@ -1,0 +1,215 @@
+id = "generic"
+name = "Manette generique (USB, Logitech F310...)"
+names = ["usb", "gamepad", "joystick", "f310", "f710", "generic"]
+vendor_ids = [0x046D, 0x0079, 0x0810]
+
+# Corps : partie centrale + deux poignees
+[[part]]
+x = 60
+y = 80
+w = 360
+h = 150
+radius = 60
+color = "#2a2c30"
+
+[[part]]
+x = 50
+y = 150
+w = 120
+h = 130
+radius = 55
+color = "#2a2c30"
+
+[[part]]
+x = 310
+y = 150
+w = 120
+h = 130
+radius = 55
+color = "#2a2c30"
+
+# Boutons de tranche et gachettes, vus de dessus
+[[button]]
+input = "LeftTrigger2"
+label = "LT"
+x = 85
+y = 12
+w = 70
+h = 26
+radius = 10
+color = "#3a3d43"
+label_color = "#e6e6e6"
+
+[[button]]
+input = "RightTrigger2"
+label = "RT"
+x = 325
+y = 12
+w = 70
+h = 26
+radius = 10
+color = "#3a3d43"
+label_color = "#e6e6e6"
+
+[[button]]
+input = "LeftTrigger"
+label = "LB"
+x = 80
+y = 46
+w = 80
+h = 22
+radius = 8
+color = "#44474e"
+label_color = "#e6e6e6"
+
+[[button]]
+input = "RightTrigger"
+label = "RB"
+x = 320
+y = 46
+w = 80
+h = 22
+radius = 8
+color = "#44474e"
+label_color = "#e6e6e6"
+
+# Croix
+[[button]]
+input = "DPadUp"
+label = ""
+x = 103
+y = 103
+w = 22
+h = 26
+radius = 4
+color = "#1b1c1f"
+label_color = "#ffffff"
+
+[[button]]
+input = "DPadDown"
+label = ""
+x = 103
+y = 151
+w = 22
+h = 26
+radius = 4
+color = "#1b1c1f"
+label_color = "#ffffff"
+
+[[button]]
+input = "DPadLeft"
+label = ""
+x = 77
+y = 129
+w = 26
+h = 22
+radius = 4
+color = "#1b1c1f"
+label_color = "#ffffff"
+
+[[button]]
+input = "DPadRight"
+label = ""
+x = 125
+y = 129
+w = 26
+h = 22
+radius = 4
+color = "#1b1c1f"
+label_color = "#ffffff"
+
+# Boutons de face
+[[button]]
+input = "North"
+label = "4"
+x = 351
+y = 100
+w = 28
+h = 28
+radius = 14
+color = "#c9a227"
+label_color = "#ffffff"
+
+[[button]]
+input = "West"
+label = "1"
+x = 321
+y = 128
+w = 28
+h = 28
+radius = 14
+color = "#2f6fc0"
+label_color = "#ffffff"
+
+[[button]]
+input = "East"
+label = "3"
+x = 381
+y = 128
+w = 28
+h = 28
+radius = 14
+color = "#c03a33"
+label_color = "#ffffff"
+
+[[button]]
+input = "South"
+label = "2"
+x = 351
+y = 156
+w = 28
+h = 28
+radius = 14
+color = "#3a9a3a"
+label_color = "#ffffff"
+
+# Centre
+[[button]]
+input = "Select"
+label = "BACK"
+x = 196
+y = 120
+w = 38
+h = 16
+radius = 8
+color = "#1b1c1f"
+label_color = "#c8c8c8"
+
+[[button]]
+input = "Start"
+label = "START"
+x = 246
+y = 120
+w = 38
+h = 16
+radius = 8
+color = "#1b1c1f"
+label_color = "#c8c8c8"
+
+[[button]]
+input = "Mode"
+label = "MODE"
+x = 222
+y = 92
+w = 36
+h = 20
+radius = 10
+color = "#1b1c1f"
+label_color = "#7fb3ff"
+
+# Sticks
+[[stick]]
+side = "left"
+x = 165
+y = 165
+size = 54
+color = "#1b1c1f"
+cap_color = "#3e4148"
+
+[[stick]]
+side = "right"
+x = 261
+y = 165
+size = 54
+color = "#1b1c1f"
+cap_color = "#3e4148"
