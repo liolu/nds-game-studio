@@ -58,6 +58,8 @@ pub struct ToggleAssets;
 const LAYER: usize = 24;
 const ROWS: usize = 36;
 const ROW_H: f32 = 21.0;
+/// Lignes montrées de l'aperçu en texte.
+const TEXT_ROWS: usize = 42;
 /// Menus déroulants : largeur, lignes visibles, hauteur d'une ligne, largeur d'une colonne.
 const MENU_W: f32 = 860.0;
 const MENU_ROWS: usize = 28;
@@ -94,7 +96,17 @@ enum Ctl {
     Width,
     Cell,
     Model,
+    Link,
+    Anim,
 }
+
+/// Le texte montré pour un fichier qu'on ne sait pas décoder.
+#[derive(Component)]
+struct PreviewText;
+
+/// Le son en cours (arrêté en changeant de fichier).
+#[derive(Component)]
+struct PreviewSound;
 
 #[derive(Resource)]
 pub(crate) struct AssetBrowser {
@@ -143,6 +155,23 @@ pub(crate) struct AssetBrowser {
     /// Fichier à montrer quand la lecture est finie.
     want_file: Option<String>,
     start_menu: Option<(Menu, String)>,
+    /// Aperçu animé : images 2D (poignée, durée en secondes) ou modèle 3D.
+    frames: Vec<(Handle<Image>, f32)>,
+    model_anim: Option<ModelAnim>,
+    anim_time: f32,
+    sound: Option<Handle<bevy::audio::AudioSource>>,
+    /// Aperçu en texte, et sa première ligne visible.
+    text_lines: Vec<String>,
+    text_scroll: usize,
+    text_font: Option<Handle<Font>>,
+    text_shown: Option<(usize, usize)>,
+}
+
+struct ModelAnim {
+    meshes: Vec<Handle<Mesh>>,
+    frames: Vec<Vec<(Vec<[f32; 3]>, Vec<[f32; 3]>)>>,
+    seconds_per_frame: f32,
+    shown: usize,
 }
 
 impl Default for AssetBrowser {
@@ -188,6 +217,14 @@ impl Default for AssetBrowser {
             scanning: None,
             want_file: None,
             start_menu: None,
+            frames: Vec::new(),
+            model_anim: None,
+            anim_time: 0.0,
+            sound: None,
+            text_lines: Vec::new(),
+            text_scroll: 0,
+            text_font: None,
+            text_shown: None,
         }
     }
 }
@@ -270,7 +307,7 @@ impl Plugin for AssetBrowserPlugin {
         }
         app.insert_resource(browser).add_message::<ToggleAssets>().add_systems(
             Update,
-            (redo_on_language, toggle_window, poll_scan, type_filter, rebuild_menu, rebuild_list, render_preview, rebuild_controls, refresh_texts, fit_image, place_camera, looks).chain(),
+            (redo_on_language, toggle_window, poll_scan, type_filter, rebuild_menu, rebuild_list, render_preview, play_preview, show_preview_text, rebuild_controls, refresh_texts, fit_image, place_camera, looks).chain(),
         );
     }
 }
@@ -402,6 +439,10 @@ impl AssetBrowser {
         self.scanning = None;
         self.list_dirty = true;
         let viewable = self.entries.iter().filter(|e| e.kind.viewable()).count();
+        // Rien de montrable (Myst) : la liste montre tous les fichiers plutôt que rien
+        if viewable == 0 {
+            self.all_files = true;
+        }
         self.status = t!("{} files, {} viewable (standard Nintendo formats)", "{} fichiers, {} montrables (formats Nintendo standard)", self.entries.len(), viewable);
         let romarc = self.entries.iter().filter(|e| e.rom_index.is_some()).count();
         if romarc > 0 {
@@ -578,8 +619,17 @@ fn toggle_window(
                 let controls = panel.spawn(Node { flex_direction: FlexDirection::Row, column_gap: px(14), row_gap: px(6), flex_wrap: FlexWrap::Wrap, ..default() }).id();
                 ids.insert("controls", controls);
                 let image_box = panel
-                    .spawn((Node { flex_grow: 1.0, width: percent(100), justify_content: JustifyContent::Center, align_items: AlignItems::Center, overflow: Overflow::clip(), ..default() }, BackgroundColor(Color::srgb(0.13, 0.14, 0.16))))
+                    .spawn((Node { flex_grow: 1.0, width: percent(100), justify_content: JustifyContent::Center, align_items: AlignItems::Center, overflow: Overflow::clip(), ..default() }, BackgroundColor(Color::srgb(0.13, 0.14, 0.16)), Pickable::default()))
+                    .observe(|scroll: On<PointerScroll>, mut b: ResMut<AssetBrowser>| {
+                        let lines = match scroll.unit {
+                            MouseScrollUnit::Line => scroll.y * 3.0,
+                            MouseScrollUnit::Pixel => scroll.y / ROW_H,
+                        };
+                        let max = b.text_lines.len().saturating_sub(TEXT_ROWS) as i64;
+                        b.text_scroll = (b.text_scroll as i64 - lines.round() as i64).clamp(0, max) as usize;
+                    })
                     .with_children(|b| {
+                        b.spawn((Text::new(""), TextFont::from_font_size(14.0), TextColor(TEXT), Node { position_type: PositionType::Absolute, left: px(10), top: px(8), display: Display::None, ..default() }, PreviewText));
                         let node = b
                             .spawn((ImageNode::default(), Node { width: px(1), height: px(1), ..default() }, Visibility::Hidden, Pickable::default()))
                             .observe(orbit_drag)
@@ -971,6 +1021,14 @@ fn rebuild_controls(mut commands: Commands, mut b: ResMut<AssetBrowser>, childre
     if c.cells > 0 {
         steps.push((Ctl::Cell, t!("Cell: {} / {}", "Cellule : {} / {}", c.cell + 1, c.cells)));
     }
+    if !c.linked.is_empty() {
+        let kind = b.selected.map(|s| b.entries[s].kind);
+        let what = if kind == Some(Kind::ModelAnim) { tr("Model", "Modele") } else { tr("Cells", "Cellules") };
+        steps.push((Ctl::Link, format!("{what}: {}", name(&c.linked, c.link))));
+    }
+    if c.anims > 1 {
+        steps.push((Ctl::Anim, t!("Animation: {} / {}", "Animation : {} / {}", c.anim + 1, c.anims)));
+    }
     if c.models > 1 {
         steps.push((Ctl::Model, t!("Model: {} / {}", "Modele : {} / {}", c.model + 1, c.models)));
     }
@@ -978,7 +1036,11 @@ fn rebuild_controls(mut commands: Commands, mut b: ResMut<AssetBrowser>, childre
         let tex = if c.texture == 0 { tr("the model's own", "celles du modele").to_string() } else { name(&c.textures, c.texture - 1) };
         steps.push((Ctl::Textures, t!("Textures: {tex}", "Textures : {tex}")));
     }
+    let has_sound = b.sound.is_some();
     commands.entity(controls).with_children(|row| {
+        if has_sound {
+            row.spawn((Button, Hovered::default(), item_node(), BackgroundColor(ITEM), PlayButton)).observe(toggle_sound).with_child(label(tr("Play / Stop", "Jouer / Arreter"), 14.0, TEXT));
+        }
         for (ctl, text) in steps {
             row.spawn(Node { flex_direction: FlexDirection::Row, column_gap: px(4), align_items: AlignItems::Center, ..default() }).with_children(|step| {
                 step.spawn((Button, Hovered::default(), item_node(), BackgroundColor(ITEM), StepButton(ctl, -1))).observe(step_choice).with_child(label("<", 14.0, TEXT));
@@ -1001,9 +1063,94 @@ fn step_choice(activate: On<Activate>, steps: Query<&StepButton>, mut b: ResMut<
         Ctl::Width => c.width = (c.width as i64 + dir as i64).clamp(1, 256) as u32,
         Ctl::Cell => c.cell = wrap(c.cell, c.cells),
         Ctl::Model => c.model = wrap(c.model, c.models),
+        Ctl::Link => c.link = wrap(c.link, c.linked.len()),
+        Ctl::Anim => c.anim = wrap(c.anim, c.anims),
     }
     b.preview_dirty = true;
     b.controls_dirty = true;
+}
+
+#[derive(Component)]
+struct PlayButton;
+
+fn toggle_sound(_: On<Activate>, mut commands: Commands, b: Res<AssetBrowser>, playing: Query<Entity, With<PreviewSound>>) {
+    let mut stopped = false;
+    for sound in &playing {
+        commands.entity(sound).despawn();
+        stopped = true;
+    }
+    if let (false, Some(sound)) = (stopped, &b.sound) {
+        commands.spawn((AudioPlayer::new(sound.clone()), PlaybackSettings::DESPAWN, PreviewSound));
+    }
+}
+
+/// Fait avancer l'aperçu animé (images 2D ou modèle 3D).
+fn play_preview(time: Res<Time>, mut b: ResMut<AssetBrowser>, mut meshes: ResMut<Assets<Mesh>>, mut commands: Commands, sounds: Query<Entity, With<PreviewSound>>) {
+    if b.window.is_none() {
+        for sound in &sounds {
+            commands.entity(sound).despawn();
+        }
+        return;
+    }
+    b.anim_time += time.delta_secs();
+    let now = b.anim_time;
+    if !b.frames.is_empty() {
+        let total: f32 = b.frames.iter().map(|f| f.1).sum();
+        let mut left = now % total.max(0.001);
+        let mut shown = b.frames.len() - 1;
+        for (i, frame) in b.frames.iter().enumerate() {
+            if left < frame.1 {
+                shown = i;
+                break;
+            }
+            left -= frame.1;
+        }
+        let handle = b.frames[shown].0.clone();
+        if let Some((current, _)) = &mut b.image {
+            if *current != handle {
+                *current = handle;
+            }
+        }
+    }
+    let Some(anim) = &mut b.model_anim else { return };
+    let frame = (now / anim.seconds_per_frame) as usize % anim.frames.len().max(1);
+    if frame == anim.shown {
+        return;
+    }
+    anim.shown = frame;
+    for (handle, (positions, normals)) in anim.meshes.iter().zip(&anim.frames[frame]) {
+        if let Some(mut mesh) = meshes.get_mut(handle) {
+            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions.clone());
+            mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals.clone());
+        }
+    }
+}
+
+/// Montre les lignes visibles de l'aperçu en texte.
+fn show_preview_text(mut b: ResMut<AssetBrowser>, mut texts: Query<(&mut Text, &mut Node, &mut TextFont), With<PreviewText>>) {
+    let Ok((mut text, mut node, mut font)) = texts.single_mut() else { return };
+    let wanted = if b.text_lines.is_empty() { Display::None } else { Display::Flex };
+    if node.display != wanted {
+        node.display = wanted;
+    }
+    let key = (b.text_scroll, b.text_lines.len());
+    if b.text_shown == Some(key) {
+        return;
+    }
+    b.text_shown = Some(key);
+    if let Some(handle) = &b.text_font {
+        if font.font != handle.clone().into() {
+            font.font = handle.clone().into();
+        }
+    }
+    text.0 = b.text_lines.iter().skip(b.text_scroll).take(TEXT_ROWS).cloned().collect::<Vec<_>>().join("\n");
+}
+
+/// Police à chasse fixe avec le japonais, pour les textes des jeux.
+fn preview_font(fonts: &mut Assets<Font>) -> Option<Handle<Font>> {
+    let windir = std::env::var_os("WINDIR").map(std::path::PathBuf::from).unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"));
+    let bytes = std::fs::read(windir.join("Fonts").join("msgothic.ttc")).ok()?;
+    Some(fonts.add(Font::from_bytes(bytes)))
 }
 
 fn to_image(rgba: &Rgba, sampler: ImageSampler) -> Image {
@@ -1025,7 +1172,9 @@ fn render_preview(
     mut images: ResMut<Assets<Image>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    old: Query<Entity, With<Preview3d>>,
+    mut audio: ResMut<Assets<bevy::audio::AudioSource>>,
+    mut fonts: ResMut<Assets<Font>>,
+    old: Query<Entity, Or<(With<Preview3d>, With<PreviewSound>)>>,
     mut cameras: Query<&mut Camera>,
 ) {
     if b.window.is_none() || !b.preview_dirty {
@@ -1038,8 +1187,18 @@ fn render_preview(
     b.is3d = false;
     b.image = None;
     b.info.clear();
+    b.frames.clear();
+    b.model_anim = None;
+    b.anim_time = 0.0;
+    b.sound = None;
+    b.text_lines.clear();
+    b.text_scroll = 0;
+    b.text_shown = None;
+    if b.text_font.is_none() {
+        b.text_font = preview_font(&mut fonts);
+    }
     if let Some(sel) = b.selected {
-        let result = preview(&mut b, sel, &mut commands, &mut images, &mut meshes, &mut materials);
+        let result = preview(&mut b, sel, &mut commands, &mut images, &mut meshes, &mut materials, &mut audio);
         if let Err(e) = result {
             b.info = t!("{}  :  cannot show it: {e}", "{}  :  impossible de l'afficher : {e}", kind_text(b.entries[sel].kind));
         }
@@ -1049,12 +1208,39 @@ fn render_preview(
     }
 }
 
-fn preview(b: &mut AssetBrowser, sel: usize, commands: &mut Commands, images: &mut Assets<Image>, meshes: &mut Assets<Mesh>, materials: &mut Assets<StandardMaterial>) -> Result<(), String> {
+#[allow(clippy::too_many_arguments)]
+fn preview(b: &mut AssetBrowser, sel: usize, commands: &mut Commands, images: &mut Assets<Image>, meshes: &mut Assets<Mesh>, materials: &mut Assets<StandardMaterial>, audio: &mut Assets<bevy::audio::AudioSource>) -> Result<(), String> {
     let (kind, size) = (b.entries[sel].kind, b.entries[sel].size);
     let mut choices = std::mem::take(&mut b.choices);
     let decoded = decode(&b.entries, sel, &mut choices);
     b.choices = choices;
+    b.controls_dirty = true;
     match decoded? {
+        Decoded::Frames { frames, info } => {
+            let side = frames.first().map_or(UVec2::ONE, |(i, _)| UVec2::new(i.width, i.height));
+            b.frames = frames.iter().map(|(image, duration)| (images.add(to_image(image, ImageSampler::nearest())), *duration as f32 / 60.0)).collect();
+            b.image = b.frames.first().map(|f| (f.0.clone(), side));
+            b.info = format!("{}  ({})  -  {info}", kind_text(kind), size_text(size));
+        }
+        Decoded::Animated { model: m, animation } => {
+            let handles = spawn_model(&m, commands, images, meshes, materials);
+            let center = (Vec3::from(animation.min) + Vec3::from(animation.max)) / 2.0;
+            let radius = ((Vec3::from(animation.max) - Vec3::from(animation.min)).length() / 2.0).max(0.01);
+            b.orbit = Orbit { target: center, radius, distance: radius * 2.6, ..Orbit::default() };
+            b.is3d = true;
+            b.image = Some((b.view3d.clone(), UVec2::new(VIEW_W, VIEW_H)));
+            b.info = t!("3D animation ({})  -  {}: {} frames, on the model {}", "animation 3D ({})  -  {} : {} images, sur le modele {}", size_text(size), animation.name, animation.frames.len(), m.name);
+            b.model_anim = Some(ModelAnim { meshes: handles, frames: animation.frames, seconds_per_frame: animation.step as f32 / 60.0, shown: usize::MAX });
+        }
+        Decoded::Audio { wav, waveform, info } => {
+            b.image = Some((images.add(to_image(&waveform, ImageSampler::linear())), UVec2::new(waveform.width, waveform.height)));
+            b.sound = Some(audio.add(bevy::audio::AudioSource { bytes: wav.into() }));
+            b.info = format!("{}  ({})  -  {info}", kind_text(kind), size_text(size));
+        }
+        Decoded::Text { lines, info } => {
+            b.text_lines = lines;
+            b.info = format!("{}  -  {info}", size_text(size));
+        }
         Decoded::Image { rgba, info } => {
             b.image = Some((images.add(to_image(&rgba, ImageSampler::nearest())), UVec2::new(rgba.width, rgba.height)));
             b.info = format!("{}  ({})  -  {info}", kind_text(kind), size_text(size));
@@ -1077,7 +1263,9 @@ fn srgb_to_linear(c: f32) -> f32 {
     if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
 }
 
-fn spawn_model(m: &model3d::ModelOut, commands: &mut Commands, images: &mut Assets<Image>, meshes: &mut Assets<Mesh>, materials: &mut Assets<StandardMaterial>) {
+/// Les maillages, un par morceau du modèle (dans le même ordre).
+fn spawn_model(m: &model3d::ModelOut, commands: &mut Commands, images: &mut Assets<Image>, meshes: &mut Assets<Mesh>, materials: &mut Assets<StandardMaterial>) -> Vec<Handle<Mesh>> {
+    let mut handles = Vec::new();
     let mut cache: HashMap<(usize, bool), Handle<StandardMaterial>> = HashMap::new();
     let textures: Vec<Option<(Handle<Image>, bool, bool)>> = m
         .materials
@@ -1132,8 +1320,11 @@ fn spawn_model(m: &model3d::ModelOut, commands: &mut Commands, images: &mut Asse
                 })
             })
             .clone();
-        commands.spawn((Mesh3d(meshes.add(mesh)), MeshMaterial3d(material), Transform::default(), RenderLayers::layer(LAYER), Preview3d));
+        let handle = meshes.add(mesh);
+        handles.push(handle.clone());
+        commands.spawn((Mesh3d(handle), MeshMaterial3d(material), Transform::default(), RenderLayers::layer(LAYER), Preview3d));
     }
+    handles
 }
 
 /// L'image (2D, ou la vue 3D) remplit le panneau en gardant ses proportions ; les petites
