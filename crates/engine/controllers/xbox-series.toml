@@ -1,5 +1,6 @@
 id = "xbox-series"
-name = "Manette Xbox One / Series"
+name = "Xbox One / Series Controller"
+name_fr = "Manette Xbox One / Series"
 names = ["xbox one", "xbox series", "xbox wireless", "xbox controller", "xbox elite", "xinput"]
 vendor_ids = [0x045E]
 # One (2013), One (2015), One S USB, One S BT, One S BT (fw recent), Elite, Elite 2, Series X|S USB, Series X|S BT

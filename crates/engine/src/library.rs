@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::i18n::{t, tr};
+
 const HEADER_SIZE: usize = 0x200;
 /// CRC du logo Nintendo, le même dans toutes les roms DS.
 const LOGO_CRC: u16 = 0xCF56;
@@ -38,13 +40,13 @@ impl RomInfo {
         match self.code.as_bytes().get(3) {
             Some(b'E') => "USA",
             Some(b'P') => "Europe",
-            Some(b'J') => "Japon",
+            Some(b'J') => tr("Japan", "Japon"),
             Some(b'F') => "France",
-            Some(b'D') => "Allemagne",
-            Some(b'S') => "Espagne",
-            Some(b'I') => "Italie",
-            Some(b'K') => "Coree",
-            _ => "Autre",
+            Some(b'D') => tr("Germany", "Allemagne"),
+            Some(b'S') => tr("Spain", "Espagne"),
+            Some(b'I') => tr("Italy", "Italie"),
+            Some(b'K') => tr("Korea", "Coree"),
+            _ => tr("Other", "Autre"),
         }
     }
 
@@ -127,9 +129,9 @@ pub fn read_rom(path: &Path) -> Result<RomInfo, String> {
     let mut file = File::open(path).map_err(|e| format!("{file_name} : {e}"))?;
     let size = file.metadata().map_err(|e| format!("{file_name} : {e}"))?.len();
     let mut header = [0u8; HEADER_SIZE];
-    file.read_exact(&mut header).map_err(|_| format!("{file_name} : pas une rom DS (trop petit)"))?;
+    file.read_exact(&mut header).map_err(|_| t!("{file_name}: not a DS rom (too small)", "{file_name} : pas une rom DS (trop petit)"))?;
     if le16(&header, 0x15C) != LOGO_CRC {
-        return Err(format!("{file_name} : pas une rom DS"));
+        return Err(t!("{file_name}: not a DS rom", "{file_name} : pas une rom DS"));
     }
     let banner_at = u64::from(le32(&header, 0x68));
     let mut banner = vec![0u8; BANNER_SIZE];
@@ -188,7 +190,7 @@ fn same_start(a: &Path, b: &Path) -> bool {
 /// Copie une rom dans le dossier (fichier temporaire puis renommage : jamais de rom à moitié écrite).
 pub fn import_rom(source: &Path, dir: &Path) -> Result<Imported, String> {
     let info = read_rom(source)?;
-    let name = source.file_name().ok_or("nom de fichier invalide")?;
+    let name = source.file_name().ok_or(tr("invalid file name", "nom de fichier invalide"))?;
     std::fs::create_dir_all(dir).map_err(|e| format!("{} : {e}", dir.display()))?;
     let mut target = dir.join(name);
     // Même nom mais autre rom (autre version du jeu) : les deux sont gardées
@@ -203,10 +205,10 @@ pub fn import_rom(source: &Path, dir: &Path) -> Result<Imported, String> {
         n += 1;
     }
     let part = target.with_extension("part");
-    std::fs::copy(source, &part).map_err(|e| format!("copie impossible : {e}"))?;
+    std::fs::copy(source, &part).map_err(|e| t!("cannot copy: {e}", "copie impossible : {e}"))?;
     std::fs::rename(&part, &target).map_err(|e| {
         let _ = std::fs::remove_file(&part);
-        format!("copie impossible : {e}")
+        t!("cannot copy: {e}", "copie impossible : {e}")
     })?;
     Ok(Imported { title: info.title, already: false })
 }

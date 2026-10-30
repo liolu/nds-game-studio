@@ -1,5 +1,6 @@
 id = "dualsense"
-name = "Manette PlayStation 5 (DualSense)"
+name = "PlayStation 5 Controller (DualSense)"
+name_fr = "Manette PlayStation 5 (DualSense)"
 names = ["dualsense", "ps5", "dualsense edge", "dualsense wireless"]
 vendor_ids = [0x054C]
 product_ids = [0x0CE6, 0x0DF2]

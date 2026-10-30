@@ -65,8 +65,8 @@ impl Channel {
     pub fn label(self) -> &'static str {
         match self {
             Channel::Stable => "Stable",
-            Channel::Experimental => "Experimentale",
-            Channel::Dev => "Developpement",
+            Channel::Experimental => tr("Experimental", "Experimentale"),
+            Channel::Dev => tr("Development", "Developpement"),
         }
     }
 
@@ -77,6 +77,21 @@ impl Channel {
             Channel::Dev => None,
         }
     }
+}
+
+/// La langue choisie dans le studio est le français (`language = "fr"` dans options.toml). Lue une
+/// fois : sans fichier, l'anglais. Même dossier que `data_dir` du moteur.
+pub fn is_french() -> bool {
+    static FRENCH: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FRENCH.get_or_init(|| {
+        let dir = std::env::var_os("NDSGS_DATA_DIR").map(PathBuf::from).or_else(|| dirs::data_dir().map(|d| d.join("Nds Game Studio")));
+        dir.and_then(|d| std::fs::read_to_string(d.join("options.toml")).ok()).is_some_and(|text| text.lines().any(|l| l.trim() == "language = \"fr\""))
+    })
+}
+
+/// Le texte dans la langue choisie dans le studio.
+pub fn tr(en: &'static str, fr: &'static str) -> &'static str {
+    if is_french() { fr } else { en }
 }
 
 /// Date et heure de compilation (UTC), AA.MM.JJ_HH:MM (voir `build.rs`).
@@ -95,8 +110,8 @@ pub fn display_version() -> String {
 pub fn installed_label() -> String {
     match CHANNEL {
         Channel::Stable => display_version(),
-        Channel::Experimental => format!("{} experimentale (build {})", display_version(), BUILD),
-        Channel::Dev => format!("{} (compilation locale)", display_version()),
+        Channel::Experimental => format!("{} {} (build {})", display_version(), tr("experimental", "experimentale"), BUILD),
+        Channel::Dev => format!("{} ({})", display_version(), tr("local build", "compilation locale")),
     }
 }
 
@@ -160,7 +175,7 @@ impl VersionInfo {
     /// Texte de la version distante, ex. "v0.6.5" ou "experimentale build 42".
     pub fn label(&self) -> String {
         if self.build > 0 {
-            format!("v{} experimentale (build {})", self.version, self.build)
+            format!("v{} {} (build {})", self.version, tr("experimental", "experimentale"), self.build)
         } else {
             format!("v{}", self.version)
         }

@@ -69,6 +69,9 @@ pub struct StickDef {
 pub struct ControllerDef {
     pub id: String,
     pub name: String,
+    /// Nom en français, s'il est différent.
+    #[serde(default)]
+    pub name_fr: Option<String>,
     #[serde(default)]
     pub names: Vec<String>,
     #[serde(default)]
@@ -81,6 +84,16 @@ pub struct ControllerDef {
     pub buttons: Vec<ButtonDef>,
     #[serde(default, rename = "stick")]
     pub sticks: Vec<StickDef>,
+}
+
+impl ControllerDef {
+    /// Nom montré, dans la langue choisie.
+    pub fn display_name(&self) -> &str {
+        match (&self.name_fr, crate::i18n::lang()) {
+            (Some(name), crate::i18n::Lang::Fr) => name,
+            _ => &self.name,
+        }
+    }
 }
 
 /// Tous les modèles connus (le générique en dernier).

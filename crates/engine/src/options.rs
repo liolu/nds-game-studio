@@ -19,6 +19,7 @@ use bevy::window::{WindowMode, WindowRef, WindowResolution};
 
 use crate::controllers::{self, first_gamepad, ControllerDef, PadButtonView};
 use crate::devtools::{DevSettings, ToggleCodeWindow};
+use crate::i18n::{t, tr, Lang, Language, Tr};
 use crate::input::{pad_buttons_of, DsButton, KeyMap};
 use crate::screens::{Aspect, DsScreens, RenderStyle, ScreenLayout};
 use crate::settings::ResetSettings;
@@ -45,14 +46,15 @@ enum Page {
 impl Page {
     const ALL: [Page; 6] = [Page::Launcher, Page::Display, Page::Controllers, Page::Keyboard, Page::Saves, Page::Dev];
 
-    fn label(self) -> &'static str {
+    /// Nom en anglais et en français.
+    fn names(self) -> (&'static str, &'static str) {
         match self {
-            Page::Launcher => "Launcher",
-            Page::Display => "Affichage",
-            Page::Controllers => "Manettes",
-            Page::Keyboard => "Clavier",
-            Page::Saves => "Sauvegardes",
-            Page::Dev => "Developpement",
+            Page::Launcher => ("Launcher", "Launcher"),
+            Page::Display => ("Display", "Affichage"),
+            Page::Controllers => ("Controllers", "Manettes"),
+            Page::Keyboard => ("Keyboard", "Clavier"),
+            Page::Saves => ("Saves", "Sauvegardes"),
+            Page::Dev => ("Development", "Developpement"),
         }
     }
 }
@@ -78,7 +80,7 @@ pub(crate) struct OptionsView {
     pub(crate) model_chosen: bool,
     dropdown_open: bool,
     /// Ce qui est construit dans le panneau (pour savoir quand le refaire).
-    built: Option<(Page, Option<String>, bool)>,
+    built: Option<(Page, Option<String>, bool, Lang)>,
     /// Dernière touche pressée ou cliquée.
     press: String,
 }
@@ -174,9 +176,12 @@ fn toggle_window(
         .with_children(|root| {
             root.spawn((Node { width: px(210), height: percent(100), flex_direction: FlexDirection::Column, padding: UiRect::all(px(12)), row_gap: px(6), ..default() }, BackgroundColor(SIDEBAR)))
                 .with_children(|side| {
-                    side.spawn((label("Options", 22.0, TEXT), Node { margin: UiRect::bottom(px(12)), ..default() }));
+                    side.spawn((label(tr("Settings", "Options"), 22.0, TEXT), Tr("Settings", "Options"), Node { margin: UiRect::bottom(px(12)), ..default() }));
                     for page in Page::ALL {
-                        side.spawn((Button, Hovered::default(), item_node(), BackgroundColor(ITEM), PageButton(page))).observe(select_page).with_child(label(page.label(), 16.0, TEXT));
+                        side.spawn((Button, Hovered::default(), item_node(), BackgroundColor(ITEM), PageButton(page))).observe(select_page).with_child({
+                            let (en, fr) = page.names();
+                            (label(tr(en, fr), 16.0, TEXT), Tr(en, fr))
+                        });
                     }
                 });
             content = Some(
@@ -214,9 +219,9 @@ fn current_model(view: &OptionsView) -> &'static ControllerDef {
     view.model.as_deref().and_then(controllers::by_id).unwrap_or(&controllers::controllers()[0])
 }
 
-fn build_page(mut commands: Commands, mut view: ResMut<OptionsView>, keymap: Res<KeyMap>, children: Query<&Children>) {
+fn build_page(mut commands: Commands, mut view: ResMut<OptionsView>, keymap: Res<KeyMap>, language: Res<Language>, children: Query<&Children>) {
     let (Some(_), Some(content)) = (view.window, view.content) else { return };
-    let key = (view.page, view.model.clone(), view.dropdown_open);
+    let key = (view.page, view.model.clone(), view.dropdown_open, language.0);
     if view.built.as_ref() == Some(&key) {
         return;
     }
@@ -232,29 +237,29 @@ fn build_page(mut commands: Commands, mut view: ResMut<OptionsView>, keymap: Res
     commands.entity(content).with_children(|c| match page {
         Page::Launcher => crate::launcher::spawn_options_page(c),
         Page::Display => {
-            c.spawn(label("Affichage", 24.0, TEXT));
-            choice_row(c, "Format de l'image (F8)", Setting::Aspect, &["Remplir", "4:3 (DS)", "16:9", "16:10"]);
-            choice_row(c, "Ecrans (F9, ou le bouton de la barre de titre)", Setting::Screens, &["Fusionnes", "Separes"]);
-            choice_row(c, "Plein ecran", Setting::Fullscreen, &["Non", "Oui"]);
-            choice_row(c, "Rendu", Setting::Render, &["HD (qualite maximale)", "Pixel (comme la console)"]);
-            c.spawn(label("Le jeu suivant peut imposer son format ou son rendu dans son game.toml.", 13.0, DIM));
+            c.spawn(label(tr("Display", "Affichage"), 24.0, TEXT));
+            choice_row(c, tr("Picture format (F8)", "Format de l'image (F8)"), Setting::Aspect, &[tr("Fill", "Remplir"), "4:3 (DS)", "16:9", "16:10"]);
+            choice_row(c, tr("Screens (F9, or the title bar button)", "Ecrans (F9, ou le bouton de la barre de titre)"), Setting::Screens, &[tr("Merged", "Fusionnes"), tr("Separate", "Separes")]);
+            choice_row(c, tr("Fullscreen", "Plein ecran"), Setting::Fullscreen, &[tr("No", "Non"), tr("Yes", "Oui")]);
+            choice_row(c, tr("Rendering", "Rendu"), Setting::Render, &[tr("HD (maximum quality)", "HD (qualite maximale)"), tr("Pixel (like the console)", "Pixel (comme la console)")]);
+            c.spawn(label(tr("The next game can force its format or rendering in its game.toml.", "Le jeu suivant peut imposer son format ou son rendu dans son game.toml."), 13.0, DIM));
             // Toutes les options (aussi manettes, developpement, place de la fenetre) : options.toml efface
             c.spawn((Button, Hovered::default(), Node { align_self: AlignSelf::FlexStart, margin: UiRect::top(px(10)), ..item_node() }, BackgroundColor(ITEM), ResetButton))
                 .observe(|_: On<Activate>, mut reset: MessageWriter<ResetSettings>| {
                     reset.write(ResetSettings);
                 })
-                .with_child(label("Reinitialiser les options", 15.0, TEXT));
+                .with_child(label(tr("Reset settings", "Reinitialiser les options"), 15.0, TEXT));
         }
         Page::Controllers => {
-            c.spawn(label("Manettes", 24.0, TEXT));
+            c.spawn(label(tr("Controllers", "Manettes"), 24.0, TEXT));
             c.spawn((label("", 14.0, DIM), ConnectedText));
             // Menu déroulant des modèles (la liste passe par-dessus le dessin)
             c.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(10), ..default() }).with_children(|row| {
-                row.spawn(label("Modele :", 15.0, TEXT));
+                row.spawn(label(tr("Model:", "Modele :"), 15.0, TEXT));
                 row.spawn(Node { position_type: PositionType::Relative, ..default() }).with_children(|drop| {
                     drop.spawn((Button, Hovered::default(), Node { min_width: px(380), ..item_node() }, BackgroundColor(ITEM), DropdownButton))
                         .observe(toggle_dropdown)
-                        .with_child(label(format!("{}   {}", model.name, if dropdown_open { "^" } else { "v" }), 15.0, TEXT));
+                        .with_child(label(format!("{}   {}", model.display_name(), if dropdown_open { "^" } else { "v" }), 15.0, TEXT));
                     if dropdown_open {
                         drop.spawn((
                             Node { position_type: PositionType::Absolute, top: px(38), left: px(0), min_width: px(380), flex_direction: FlexDirection::Column, padding: UiRect::all(px(4)), row_gap: px(2), border_radius: BorderRadius::all(px(6)), ..default() },
@@ -265,7 +270,7 @@ fn build_page(mut commands: Commands, mut view: ResMut<OptionsView>, keymap: Res
                             for def in controllers::controllers() {
                                 list.spawn((Button, Hovered::default(), Node { justify_content: JustifyContent::FlexStart, ..item_node() }, BackgroundColor(ITEM), ModelItem(def.id.clone())))
                                     .observe(pick_model)
-                                    .with_child(label(def.name.clone(), 15.0, TEXT));
+                                    .with_child(label(def.display_name().to_string(), 15.0, TEXT));
                             }
                         });
                     }
@@ -275,34 +280,34 @@ fn build_page(mut commands: Commands, mut view: ResMut<OptionsView>, keymap: Res
             c.spawn((label("", 17.0, TEXT), PressText));
         }
         Page::Keyboard => {
-            c.spawn(label("Clavier et manette", 24.0, TEXT));
-            c.spawn(label("Touches du clavier par position (pareil en AZERTY et en QWERTY). Un jeu peut les changer dans son game.toml.", 13.0, DIM));
+            c.spawn(label(tr("Keyboard and controller", "Clavier et manette"), 24.0, TEXT));
+            c.spawn(label(tr("Keyboard keys by position (same on AZERTY and QWERTY). A game can change them in its game.toml.", "Touches du clavier par position (pareil en AZERTY et en QWERTY). Un jeu peut les changer dans son game.toml."), 13.0, DIM));
             for button in DsButton::ALL {
-                let keys: Vec<String> = keymap.0.get(&button).map(|k| k.iter().map(|k| format!("{k:?}").replace("Key", "").replace("Arrow", "fleche ")).collect()).unwrap_or_default();
+                let keys: Vec<String> = keymap.0.get(&button).map(|k| k.iter().map(|k| format!("{k:?}").replace("Key", "").replace("Arrow", tr("arrow ", "fleche "))).collect()).unwrap_or_default();
                 let pad: Vec<String> = pad_buttons_of(button).iter().map(|b| format!("{b:?}")).collect();
                 c.spawn(Node { flex_direction: FlexDirection::Row, column_gap: px(16), ..default() }).with_children(|row| {
                     row.spawn((label(format!("{button:?}"), 16.0, TEXT), Node { width: px(90), ..default() }));
-                    row.spawn((label(format!("clavier : {}", keys.join(" ou ")), 15.0, TEXT), Node { width: px(300), ..default() }));
-                    row.spawn(label(format!("manette : {}", pad.join(" ou ")), 15.0, DIM));
+                    row.spawn((label(t!("keyboard: {}", "clavier : {}", keys.join(tr(" or ", " ou "))), 15.0, TEXT), Node { width: px(300), ..default() }));
+                    row.spawn(label(t!("controller: {}", "manette : {}", pad.join(tr(" or ", " ou "))), 15.0, DIM));
                 });
             }
         }
         Page::Saves => crate::saves_page::spawn_page(c),
         Page::Dev => {
-            c.spawn(label("Developpement", 24.0, TEXT));
-            choice_row(c, "Recompiler et relancer quand un fichier est enregistre", Setting::AutoReload, &["Oui", "Non"]);
+            c.spawn(label(tr("Development", "Developpement"), 24.0, TEXT));
+            choice_row(c, tr("Rebuild and restart when a file is saved", "Recompiler et relancer quand un fichier est enregistre"), Setting::AutoReload, &[tr("Yes", "Oui"), tr("No", "Non")]);
             c.spawn((Button, Hovered::default(), Node { align_self: AlignSelf::FlexStart, ..item_node() }, BackgroundColor(ITEM), CodeWindowButton))
                 .observe(|_: On<Activate>, mut toggle: MessageWriter<ToggleCodeWindow>| {
                     toggle.write(ToggleCodeWindow);
                 })
-                .with_child(label("Ouvrir / fermer la fenetre Code (F5)", 15.0, TEXT));
-            c.spawn(label("Marche avec le depot sur ce PC (compilation locale).", 13.0, DIM));
+                .with_child(label(tr("Open / close the Code window (F5)", "Ouvrir / fermer la fenetre Code (F5)"), 15.0, TEXT));
+            c.spawn(label(tr("Works with the repository on this PC (local build).", "Marche avec le depot sur ce PC (compilation locale)."), 13.0, DIM));
             c.spawn((Button, Hovered::default(), Node { align_self: AlignSelf::FlexStart, margin: UiRect::top(px(10)), ..item_node() }, BackgroundColor(ITEM), AssetsWindowButton))
                 .observe(|_: On<Activate>, mut toggle: MessageWriter<crate::asset_browser::ToggleAssets>| {
                     toggle.write(crate::asset_browser::ToggleAssets);
                 })
-                .with_child(label("Ouvrir / fermer la fenetre Assets (F6)", 15.0, TEXT));
-            c.spawn(label("Modeles 3D et images des jeux decompiles (formats Nintendo standard), avec leur chemin dans NitroFS.", 13.0, DIM));
+                .with_child(label(tr("Open / close the Assets window (F6)", "Ouvrir / fermer la fenetre Assets (F6)"), 15.0, TEXT));
+            c.spawn(label(tr("3D models and images of decompiled games (standard Nintendo formats), with their path in NitroFS.", "Modeles 3D et images des jeux decompiles (formats Nintendo standard), avec leur chemin dans NitroFS."), 13.0, DIM));
         }
     });
 }
@@ -390,15 +395,15 @@ fn refresh_connected(view: Res<OptionsView>, pads: Query<(Entity, &Gamepad, Opti
     let mut lines: Vec<String> = pads
         .iter()
         .map(|(_, g, n)| {
-            let name = n.map_or("Manette", |n| n.as_str());
-            format!("Branchee : {name}  ->  reconnue comme {}", controllers::detect(name, g.vendor_id(), g.product_id()).name)
+            let name = n.map_or(tr("Controller", "Manette"), |n| n.as_str());
+            t!("Connected: {name}  ->  recognized as {}", "Branchee : {name}  ->  reconnue comme {}", controllers::detect(name, g.vendor_id(), g.product_id()).display_name())
         })
         .collect();
     if lines.is_empty() {
-        lines.push("Aucune manette branchee. Branchez-en une : elle est reconnue toute seule.".into());
+        lines.push(tr("No controller connected. Plug one in: it is recognized automatically.", "Aucune manette branchee. Branchez-en une : elle est reconnue toute seule.").into());
     }
     if view.model_chosen {
-        lines.push("Modele choisi a la main dans la liste.".into());
+        lines.push(tr("Model chosen by hand in the list.", "Modele choisi a la main dans la liste.").into());
     }
     let joined = lines.join("\n");
     if text.0 != joined {
@@ -414,16 +419,16 @@ fn read_presses(mut view: ResMut<OptionsView>, pads: Query<(Entity, &Gamepad, Op
     let Some((_, pad, _)) = first_gamepad(&pads).and_then(|e| pads.get(e).ok()) else { return };
     let model = current_model(&view);
     if let Some(button) = pad.get_just_pressed().next().copied() {
-        view.press = describe(model, button, "Touche pressee");
+        view.press = describe(model, button, tr("Button pressed", "Touche pressee"));
     }
 }
 
 fn describe(model: &ControllerDef, button: GamepadButton, what: &str) -> String {
     let drawn = model.buttons.iter().find(|b| controllers::pad_button(&b.input) == Some(button)).map(|b| b.label.clone()).filter(|l| !l.is_empty());
-    let ds = controllers::ds_button_for(button).map_or("aucun".to_string(), |d| format!("{d:?}"));
+    let ds = controllers::ds_button_for(button).map_or(tr("none", "aucun").to_string(), |d| format!("{d:?}"));
     match drawn {
-        Some(name) => format!("{what} : {name}  ({button:?})  ->  bouton DS : {ds}"),
-        None => format!("{what} : {button:?}  ->  bouton DS : {ds}"),
+        Some(name) => t!("{what}: {name}  ({button:?})  ->  DS button: {ds}", "{what} : {name}  ({button:?})  ->  bouton DS : {ds}"),
+        None => t!("{what}: {button:?}  ->  DS button: {ds}", "{what} : {button:?}  ->  bouton DS : {ds}"),
     }
 }
 
@@ -431,10 +436,10 @@ fn refresh_press(mut view: ResMut<OptionsView>, clicked: Query<(&PadButtonView, 
     // Clic sur une touche dessinée
     if let Some((button, _)) = clicked.iter().next() {
         let model = current_model(&view);
-        view.press = describe(model, button.input, "Touche cliquee");
+        view.press = describe(model, button.input, tr("Button clicked", "Touche cliquee"));
     }
     let Ok(mut text) = texts.single_mut() else { return };
-    let wanted = if view.press.is_empty() { "Appuyez sur une touche de la manette (ou cliquez une touche du dessin).".to_string() } else { view.press.clone() };
+    let wanted = if view.press.is_empty() { tr("Press a button on the controller (or click a button on the drawing).", "Appuyez sur une touche de la manette (ou cliquez une touche du dessin).").to_string() } else { view.press.clone() };
     if text.0 != wanted {
         text.0 = wanted;
     }

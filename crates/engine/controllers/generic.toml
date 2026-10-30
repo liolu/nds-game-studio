@@ -1,5 +1,6 @@
 id = "generic"
-name = "Manette generique (USB, Logitech F310...)"
+name = "Generic controller (USB, Logitech F310...)"
+name_fr = "Manette generique (USB, Logitech F310...)"
 names = ["usb", "gamepad", "joystick", "f310", "f710", "generic"]
 vendor_ids = [0x046D, 0x0079, 0x0810]
 

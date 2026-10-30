@@ -46,7 +46,8 @@ use bevy::ui_widgets::{Activate, Button};
 use bevy::window::{WindowRef, WindowResolution};
 use nds_nitro::{model3d, Kind, Rgba};
 
-use crate::asset_scan::{all_formats, choices_for, decode, find_games, run_index, scan, size_text, Choices, Decoded, Entry, FormatStat, GameDir, IndexState};
+use crate::i18n::{t, tr, Language, Tr};
+use crate::asset_scan::{all_formats, choices_for, decode, find_games, run_index, scan, kind_text, size_text, Choices, Decoded, Entry, FormatStat, GameDir, IndexState};
 
 /// La fenêtre des assets (la fermer ne quitte pas le studio).
 #[derive(Component)]
@@ -279,7 +280,7 @@ impl Plugin for AssetBrowserPlugin {
         }
         app.insert_resource(browser).add_message::<ToggleAssets>().add_systems(
             Update,
-            (toggle_window, poll_scan, type_filter, rebuild_menu, rebuild_list, render_preview, rebuild_controls, refresh_texts, fit_image, place_camera, looks).chain(),
+            (redo_on_language, toggle_window, poll_scan, type_filter, rebuild_menu, rebuild_list, render_preview, rebuild_controls, refresh_texts, fit_image, place_camera, looks).chain(),
         );
     }
 }
@@ -348,7 +349,7 @@ impl AssetBrowser {
     fn pick_format(&mut self, ext: &str, all_viewable: bool) {
         self.close_menu();
         if self.game.is_none() {
-            self.status = "Choisissez d'abord un jeu : le format filtre ses fichiers".into();
+            self.status = tr("Choose a game first: the format filters its files", "Choisissez d'abord un jeu : le format filtre ses fichiers").into();
             return;
         }
         self.filter.clear();
@@ -379,7 +380,7 @@ impl AssetBrowser {
         self.list_dirty = true;
         self.controls_dirty = true;
         self.preview_dirty = true;
-        self.status = format!("Lecture des fichiers de {}...", self.games[index].label);
+        self.status = t!("Reading the files of {}...", "Lecture des fichiers de {}...", self.games[index].label);
     }
 
     fn scan_done(&mut self, entries: Vec<Entry>) {
@@ -387,13 +388,13 @@ impl AssetBrowser {
         self.scanning = None;
         self.list_dirty = true;
         let viewable = self.entries.iter().filter(|e| e.kind.viewable()).count();
-        self.status = format!("{} fichiers, {} montrables (formats Nintendo standard)", self.entries.len(), viewable);
+        self.status = t!("{} files, {} viewable (standard Nintendo formats)", "{} fichiers, {} montrables (formats Nintendo standard)", self.entries.len(), viewable);
         let files = self.game.map(|g| self.games[g].files.clone()).unwrap_or_default();
         let romarc = self.entries.iter().filter(|e| e.rom_index.is_some()).count();
         if romarc > 0 {
-            self.status += &format!(" ; rom.bin : {romarc} fichiers (build/romarc, filtre 'rom.bin')");
+            self.status += &t!(" ; rom.bin: {romarc} files (build/romarc, filter 'rom.bin')", " ; rom.bin : {romarc} fichiers (build/romarc, filtre 'rom.bin')");
         } else if files.join("rom.bin").is_file() {
-            self.status += " ; rom.bin pas encore extrait : dans le dossier du jeu, python ../../studio/gametools/romarc.py extract";
+            self.status += tr(" ; rom.bin not extracted yet: in the game folder, python ../../studio/gametools/romarc.py extract", " ; rom.bin pas encore extrait : dans le dossier du jeu, python ../../studio/gametools/romarc.py extract");
         }
         if let Some(i) = self.want_file.take().and_then(|f| self.entries.iter().position(|e| e.path.eq_ignore_ascii_case(&f))) {
             self.filter_entries();
@@ -432,6 +433,16 @@ impl AssetBrowser {
 // --------------------------------------------------------------------------------------------
 //  Fenêtre
 // --------------------------------------------------------------------------------------------
+
+/// Les listes sont refaites dans la nouvelle langue.
+fn redo_on_language(language: Res<Language>, mut browser: ResMut<AssetBrowser>) {
+    if language.is_changed() && !language.is_added() {
+        browser.menu_dirty = true;
+        browser.list_dirty = true;
+        browser.controls_dirty = true;
+        browser.preview_dirty = true;
+    }
+}
 
 fn toggle_window(
     mut commands: Commands,
@@ -495,7 +506,7 @@ fn toggle_window(
             root.spawn((Node { width: px(560), flex_shrink: 0.0, height: percent(100), flex_direction: FlexDirection::Column, padding: UiRect::all(px(10)), row_gap: px(6), ..default() }, BackgroundColor(SIDEBAR)))
                 .with_children(|side| {
                     side.spawn(Node { flex_direction: FlexDirection::Row, column_gap: px(8), align_items: AlignItems::Center, ..default() }).with_children(|row| {
-                        row.spawn(label("Jeu :", 15.0, DIM));
+                        row.spawn((label(tr("Game:", "Jeu :"), 15.0, DIM), Tr("Game:", "Jeu :")));
                         row.spawn((Button, Hovered::default(), Node { flex_grow: 1.0, justify_content: JustifyContent::FlexStart, ..item_node() }, BackgroundColor(ITEM), GameButton))
                             .observe(|_: On<Activate>, mut b: ResMut<AssetBrowser>| {
                                 b.open_menu(Menu::Games);
@@ -544,11 +555,11 @@ fn toggle_window(
                             // rom.bin : le n° seul, la clé de DS Decomp Studio (onglet Data, « Archive (rom.bin) »)
                             let path = b.entries[sel].rom_index.map_or_else(|| b.entries[sel].path.clone(), |n| n.to_string());
                             b.status = match clipboard.set_text(path.clone()) {
-                                Ok(()) => format!("Copie : {path}"),
-                                Err(e) => format!("Presse-papiers indisponible : {e:?}"),
+                                Ok(()) => t!("Copied: {path}", "Copie : {path}"),
+                                Err(e) => t!("Clipboard unavailable: {e:?}", "Presse-papiers indisponible : {e:?}"),
                             };
                         })
-                        .with_child(label("Copier le chemin", 14.0, TEXT));
+                        .with_child((label(tr("Copy the path", "Copier le chemin"), 14.0, TEXT), Tr("Copy the path", "Copier le chemin")));
                     row.spawn((label("", 18.0, TEXT), PathText));
                 });
                 panel.spawn((label("", 13.0, DIM), InfoText));
@@ -608,9 +619,9 @@ fn toggle_window(
         browser.games = find_games(&browser.root);
         let root_dir = browser.root.display().to_string();
         browser.status = if browser.games.is_empty() {
-            format!("Aucun jeu dans {root_dir} (--projects=<dossier> ou NDS_DECOMP_PROJECTS)")
+            t!("No games in {root_dir} (--projects=<folder> or NDS_DECOMP_PROJECTS)", "Aucun jeu dans {root_dir} (--projects=<dossier> ou NDS_DECOMP_PROJECTS)")
         } else {
-            format!("{} jeux dans {root_dir} : choisissez un jeu", browser.games.len())
+            t!("{} games in {root_dir}: choose a game", "{} jeux dans {root_dir} : choisissez un jeu", browser.games.len())
         };
     }
     browser.menu = if browser.game.is_none() && !browser.games.is_empty() { Menu::Games } else { Menu::None };
@@ -745,8 +756,8 @@ fn rebuild_menu(mut commands: Commands, mut b: ResMut<AssetBrowser>, mut nodes: 
     if b.menu == Menu::None {
         return;
     }
-    let query = if b.menu_query.is_empty() { "tapez pour chercher".to_string() } else { format!("{}_", b.menu_query) };
-    let progress = if done < total { format!("analyse des jeux : {done} / {total}") } else { String::new() };
+    let query = if b.menu_query.is_empty() { tr("type to search", "tapez pour chercher").to_string() } else { format!("{}_", b.menu_query) };
+    let progress = if done < total { t!("analyzing the games: {done} / {total}", "analyse des jeux : {done} / {total}") } else { String::new() };
     // Une ligne : (coche et sa couleur, nom, colonnes de droite, action)
     enum Pick {
         Game(usize),
@@ -764,7 +775,7 @@ fn rebuild_menu(mut commands: Commands, mut b: ResMut<AssetBrowser>, mut nodes: 
                 };
                 rows.push((None, label, cells, Pick::Game(i)));
             }
-            (vec!["extrait", "regardable"], "extrait = octets de donnees lisibles fichier par fichier ; regardable = fichiers que l'app sait montrer")
+            (vec![tr("extracted", "extrait"), tr("viewable", "regardable")], tr("extracted = data bytes readable file by file ; viewable = files the app can show", "extrait = octets de donnees lisibles fichier par fichier ; regardable = fichiers que l'app sait montrer"))
         }
         _ => {
             for (ext, stat) in b.matching_formats() {
@@ -779,7 +790,7 @@ fn rebuild_menu(mut commands: Commands, mut b: ResMut<AssetBrowser>, mut nodes: 
                 let all_viewable = stat.viewable == stat.count;
                 rows.push((Some((check, color)), name, vec![stat.count.to_string(), stat.viewable.to_string(), stat.games.to_string()], Pick::Format(ext, all_viewable)));
             }
-            (vec!["fichiers", "regardables", "jeux"], "[x] regardable   [~] en partie   [!] l'essai a echoue   [ ] pas dans l'app   ;  clic = filtrer le jeu ouvert")
+            (vec![tr("files", "fichiers"), tr("viewable", "regardables"), tr("games", "jeux")], tr("[x] viewable   [~] partly   [!] the test failed   [ ] not in the app   ;  click = filter the open game", "[x] regardable   [~] en partie   [!] l'essai a echoue   [ ] pas dans l'app   ;  clic = filtrer le jeu ouvert"))
         }
     };
     b.menu_len = rows.len();
@@ -789,7 +800,7 @@ fn rebuild_menu(mut commands: Commands, mut b: ResMut<AssetBrowser>, mut nodes: 
     let scroll = b.menu_scroll;
     commands.entity(overlay).with_children(|menu| {
         // Barre de recherche
-        menu.spawn((Node { padding: UiRect::axes(px(10), px(6)), border_radius: BorderRadius::all(px(6)), margin: UiRect::bottom(px(4)), ..default() }, BackgroundColor(Color::srgb(0.07, 0.075, 0.09)))).with_child(label(format!("Recherche : {query}"), 15.0, TEXT));
+        menu.spawn((Node { padding: UiRect::axes(px(10), px(6)), border_radius: BorderRadius::all(px(6)), margin: UiRect::bottom(px(4)), ..default() }, BackgroundColor(Color::srgb(0.07, 0.075, 0.09)))).with_child(label(t!("Search: {query}", "Recherche : {query}"), 15.0, TEXT));
         menu.spawn(label(format!("{first}-{last} / {count}   {progress}"), 12.0, DIM));
         menu.spawn(label(legend, 12.0, DIM));
         menu.spawn(Node { flex_direction: FlexDirection::Row, justify_content: JustifyContent::FlexEnd, column_gap: px(8), padding: UiRect::horizontal(px(6)), ..default() }).with_children(|head| {
@@ -846,7 +857,7 @@ fn rebuild_list(mut commands: Commands, mut b: ResMut<AssetBrowser>, children: Q
             Some(n) => format!("{}  ({n})", e.path),
             None => e.path.clone(),
         };
-        (i, name, format!("{}  {}", e.kind.label(), size_text(e.size)))
+        (i, name, format!("{}  {}", kind_text(e.kind), size_text(e.size)))
     }).collect();
     commands.entity(list).with_children(|list| {
         for (i, name, kind) in rows {
@@ -873,15 +884,15 @@ fn refresh_texts(
     }
     for (mut text, game, filter, title, info, path, formats) in &mut texts {
         let wanted = if game.is_some() {
-            format!("{}   {}", b.game.map_or("(choisir)", |g| b.games[g].label.as_str()), if b.menu == Menu::Games { "^" } else { "v" })
+            format!("{}   {}", b.game.map_or(tr("(choose)", "(choisir)"), |g| b.games[g].label.as_str()), if b.menu == Menu::Games { "^" } else { "v" })
         } else if formats.is_some() {
             format!("Formats   {}", if b.menu == Menu::Formats { "^" } else { "v" })
         } else if filter.is_some() {
-            if b.all_files { "Tous les fichiers".into() } else { "Fichiers montrables".into() }
+            if b.all_files { tr("All files", "Tous les fichiers").into() } else { tr("Viewable files", "Fichiers montrables").into() }
         } else if title.is_some() {
             let range = if b.shown.is_empty() { "0".to_string() } else { format!("{}-{}", b.scroll + 1, (b.scroll + ROWS).min(b.shown.len())) };
-            let filter = if b.filter.is_empty() { "tapez pour filtrer".to_string() } else { format!("filtre : {}_", b.filter) };
-            let format = b.format_filter.as_ref().map_or(String::new(), |f| format!("   format : {f} (Echap = tous)"));
+            let filter = if b.filter.is_empty() { tr("type to filter", "tapez pour filtrer").to_string() } else { t!("filter: {}_", "filtre : {}_", b.filter) };
+            let format = b.format_filter.as_ref().map_or(String::new(), |f| t!("   format: {f} (Esc = all)", "   format : {f} (Echap = tous)"));
             format!("{range} / {}   ({filter}){format}", b.shown.len())
         } else if info.is_some() {
             if b.info.is_empty() { b.status.clone() } else { format!("{}\n{}", b.info, b.status) }
@@ -932,29 +943,29 @@ fn rebuild_controls(mut commands: Commands, mut b: ResMut<AssetBrowser>, childre
         }
     }
     let c = &b.choices;
-    let name = |list: &[usize], i: usize| list.get(i).map_or("aucun".to_string(), |&e| b.entries[e].path.clone());
+    let name = |list: &[usize], i: usize| list.get(i).map_or(tr("none", "aucun").to_string(), |&e| b.entries[e].path.clone());
     let mut steps: Vec<(Ctl, String)> = Vec::new();
     if !c.tiles.is_empty() {
-        steps.push((Ctl::Tiles, format!("Tuiles : {}", name(&c.tiles, c.tile))));
+        steps.push((Ctl::Tiles, t!("Tiles: {}", "Tuiles : {}", name(&c.tiles, c.tile))));
     }
     if !c.palettes.is_empty() {
-        steps.push((Ctl::Palette, format!("Palette : {}", name(&c.palettes, c.palette))));
+        steps.push((Ctl::Palette, t!("Palette: {}", "Palette : {}", name(&c.palettes, c.palette))));
     }
     if c.banks > 1 {
-        steps.push((Ctl::Bank, format!("Couleurs : {} / {}", c.bank + 1, c.banks)));
+        steps.push((Ctl::Bank, t!("Colors: {} / {}", "Couleurs : {} / {}", c.bank + 1, c.banks)));
     }
     if c.width > 0 {
-        steps.push((Ctl::Width, format!("Largeur : {} tuiles", c.width)));
+        steps.push((Ctl::Width, t!("Width: {} tiles", "Largeur : {} tuiles", c.width)));
     }
     if c.cells > 0 {
-        steps.push((Ctl::Cell, format!("Cellule : {} / {}", c.cell + 1, c.cells)));
+        steps.push((Ctl::Cell, t!("Cell: {} / {}", "Cellule : {} / {}", c.cell + 1, c.cells)));
     }
     if c.models > 1 {
-        steps.push((Ctl::Model, format!("Modele : {} / {}", c.model + 1, c.models)));
+        steps.push((Ctl::Model, t!("Model: {} / {}", "Modele : {} / {}", c.model + 1, c.models)));
     }
     if b.selected.is_some_and(|s| b.entries[s].kind == Kind::Model) {
-        let tex = if c.texture == 0 { "celles du modele".to_string() } else { name(&c.textures, c.texture - 1) };
-        steps.push((Ctl::Textures, format!("Textures : {tex}")));
+        let tex = if c.texture == 0 { tr("the model's own", "celles du modele").to_string() } else { name(&c.textures, c.texture - 1) };
+        steps.push((Ctl::Textures, t!("Textures: {tex}", "Textures : {tex}")));
     }
     commands.entity(controls).with_children(|row| {
         for (ctl, text) in steps {
@@ -1019,7 +1030,7 @@ fn render_preview(
     if let Some(sel) = b.selected {
         let result = preview(&mut b, sel, &mut commands, &mut images, &mut meshes, &mut materials);
         if let Err(e) = result {
-            b.info = format!("{}  :  impossible de l'afficher : {e}", b.entries[sel].kind.label());
+            b.info = t!("{}  :  cannot show it: {e}", "{}  :  impossible de l'afficher : {e}", kind_text(b.entries[sel].kind));
         }
     }
     if let Some(mut camera) = b.camera3d.and_then(|c| cameras.get_mut(c).ok()) {
@@ -1035,7 +1046,7 @@ fn preview(b: &mut AssetBrowser, sel: usize, commands: &mut Commands, images: &m
     match decoded? {
         Decoded::Image { rgba, info } => {
             b.image = Some((images.add(to_image(&rgba, ImageSampler::nearest())), UVec2::new(rgba.width, rgba.height)));
-            b.info = format!("{}  ({})  -  {info}", kind.label(), size_text(size));
+            b.info = format!("{}  ({})  -  {info}", kind_text(kind), size_text(size));
         }
         Decoded::Model { model: m, own_textures } => {
             spawn_model(&m, commands, images, meshes, materials);
@@ -1045,7 +1056,7 @@ fn preview(b: &mut AssetBrowser, sel: usize, commands: &mut Commands, images: &m
             b.is3d = true;
             b.image = Some((b.view3d.clone(), UVec2::new(VIEW_W, VIEW_H)));
             let warn = if m.warnings.is_empty() { String::new() } else { format!("\n! {}", m.warnings.join(" ; ")) };
-            b.info = format!("modele 3D ({})  -  {} : {} triangles, {} sommets, {} materiaux, {own_textures} textures dans le fichier{warn}", size_text(size), m.name, m.triangle_count, m.vertex_count, m.materials.len());
+            b.info = t!("3D model ({})  -  {}: {} triangles, {} vertices, {} materials, {own_textures} textures in the file{warn}", "modele 3D ({})  -  {} : {} triangles, {} sommets, {} materiaux, {own_textures} textures dans le fichier{warn}", size_text(size), m.name, m.triangle_count, m.vertex_count, m.materials.len());
         }
     }
     Ok(())

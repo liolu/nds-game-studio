@@ -1,5 +1,6 @@
 //! Options gardées d'un lancement à l'autre (fichier `options.toml` dans le dossier des données).
 //!
+//! - **Langue** : anglais par défaut, français au choix (`i18n`) ;
 //! - **Affichage** : format, écrans fusionnés ou séparés, plein écran, rendu HD ou pixel ;
 //! - **Développement** : recompiler et relancer à l'enregistrement ;
 //! - **Manettes** : modèle choisi à la main dans Options > Manettes ;
@@ -18,6 +19,7 @@ use bevy::winit::WINIT_WINDOWS;
 use serde::{Deserialize, Serialize};
 
 use crate::devtools::{DevSettings, LaunchOptions};
+use crate::i18n::{self, Lang, Language};
 use crate::options::OptionsView;
 use crate::screens::{Aspect, DsScreens, RenderStyle, ScreenLayout};
 use crate::studio::StudioState;
@@ -81,6 +83,8 @@ const MIN_LAUNCHER_W: f32 = 960.0;
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    /// en | fr (écrit en premier : le launcher de mise à jour lit cette ligne)
+    pub language: String,
     pub display: DisplaySettings,
     pub dev: DevOptions,
     pub controllers: ControllerOptions,
@@ -202,6 +206,9 @@ impl Plugin for SettingsPlugin {
         world.insert_resource(layout);
         world.insert_resource(player.render());
         world.insert_resource(DevSettings { auto_reload: player.dev.auto_reload });
+        let mut language = Language::default();
+        i18n::set_language(&mut language, Lang::from_code(&player.language));
+        world.insert_resource(language);
         if let Some(model) = player.controllers.model.clone() {
             if let Some(mut view) = world.get_resource_mut::<OptionsView>() {
                 view.model = Some(model);
@@ -290,6 +297,7 @@ fn reset(
     mut style: ResMut<RenderStyle>,
     mut dev: ResMut<DevSettings>,
     mut view: ResMut<OptionsView>,
+    mut language: ResMut<Language>,
     screens: Option<Res<DsScreens>>,
     mut windows: Query<&mut Window>,
 ) {
@@ -307,6 +315,7 @@ fn reset(
     layout.merged = defaults.display.merged;
     *style = defaults.render();
     *dev = DevSettings::default();
+    i18n::set_language(&mut language, Lang::default());
     view.model = None;
     view.model_chosen = false;
     if let Some(mut window) = screens.and_then(|s| windows.get_mut(s.main_window()).ok()) {
@@ -318,6 +327,7 @@ fn reset(
 /// Ce qui est à l'écran ; place et taille gardées d'avant tant que la fenêtre est agrandie ou en plein écran.
 fn snapshot(player: &Settings, layout: &ScreenLayout, style: RenderStyle, dev: &DevSettings, view: &OptionsView, main: Entity, window: Option<&Window>) -> Settings {
     let mut now = player.clone();
+    now.language = i18n::lang().code().into();
     now.display.aspect = aspect_name(layout.aspect).into();
     now.display.merged = layout.merged;
     now.display.render = render_name(style).into();
@@ -375,6 +385,7 @@ fn watch(
                 }
             };
         }
+        take!(language);
         take!(display.aspect);
         take!(display.merged);
         take!(display.fullscreen);
@@ -401,6 +412,7 @@ mod tests {
     #[test]
     fn round_trip() {
         let settings = Settings {
+            language: "fr".into(),
             display: DisplaySettings { aspect: "16:9".into(), merged: false, fullscreen: true, render: "pixel".into() },
             dev: DevOptions { auto_reload: false },
             controllers: ControllerOptions { model: Some("xbox-series".into()) },
@@ -410,6 +422,8 @@ mod tests {
         assert_eq!(parsed, settings);
         assert_eq!(parsed.aspect(), Aspect::Wide16x9);
         assert_eq!(parsed.render(), RenderStyle::Pixel);
+        // Le launcher de mise à jour cherche cette ligne
+        assert!(settings.to_toml().lines().any(|l| l == "language = \"fr\""));
     }
 
     #[test]
@@ -428,5 +442,6 @@ mod tests {
         assert_eq!(defaults.aspect(), ScreenLayout::default().aspect);
         assert_eq!(defaults.render(), RenderStyle::default());
         assert!(defaults.dev.auto_reload);
+        assert_eq!(Lang::from_code(&defaults.language), Lang::En);
     }
 }

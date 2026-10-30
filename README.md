@@ -5,6 +5,14 @@ Il fait tourner sur PC des jeux pensés comme des jeux DS : deux écrans, bouton
 2D et 3D. Il n'y a pas d'émulation. Les jeux comptent en pixels DS (256x192), mais le rendu est
 natif en qualité maximale : résolution réelle de la fenêtre, anticrénelage MSAA x4, texte net.
 
+## Langue
+
+L'interface est en anglais par défaut. **Options > Launcher > Langue** la passe en français, tout de
+suite et sans relancer ; le choix est gardé dans `options.toml` (`language = "fr"`). La fenêtre de mise
+à jour suit ce choix ; l'installeur est en anglais, puisqu'aucun choix n'existe encore à ce moment-là.
+Un texte s'écrit là où il sert, les deux langues côte à côte : `tr("Play", "Jouer")` ou
+`t!("{n} games", "{n} jeux")` (voir `crates/engine/src/i18n.rs`).
+
 ## Le launcher
 
 La fenêtre du studio s'ouvre sur le launcher, la bibliothèque des jeux de l'utilisateur.

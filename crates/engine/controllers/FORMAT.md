@@ -17,7 +17,8 @@ manette, la touche dessinée s'allume.
 
 ```toml
 id = "xbox-series"                      # = nom du fichier, minuscules et tirets
-name = "Manette Xbox One / Series"      # affiché dans le menu déroulant
+name = "Xbox One / Series Controller"   # affiché dans le menu déroulant (anglais)
+name_fr = "Manette Xbox One / Series"   # facultatif : le nom en français
 # Reconnaissance d'une manette branchée (au moins une des deux listes)
 names = ["xbox one", "xbox series", "xbox wireless"]   # morceaux du nom donné par le pilote, en minuscules
 vendor_ids = [0x045E]                   # identifiant USB du fabricant

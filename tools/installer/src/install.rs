@@ -23,12 +23,12 @@ pub fn fetch_version_info() -> Result<ndsgs_common::VersionInfo, String> {
     let body: String = agent
         .get(ndsgs_common::VERSION_URL)
         .call()
-        .map_err(|e| format!("Erreur reseau: {}\n\nVerifiez que GitHub Pages est active sur le depot.", e))?
+        .map_err(|e| format!("Network error: {}", e))?
         .body_mut()
         .read_to_string()
-        .map_err(|e| format!("Erreur lecture: {}", e))?;
+        .map_err(|e| format!("Read error: {}", e))?;
 
-    serde_json::from_str(&body).map_err(|e| format!("Erreur JSON: {}", e))
+    serde_json::from_str(&body).map_err(|e| format!("JSON error: {}", e))
 }
 
 /// Télécharge l'archive de la plateforme courante et l'extrait dans `install_dir`.
@@ -44,12 +44,12 @@ pub fn download_and_extract(
 
     let url = info.platform_download_url().ok_or_else(|| {
         format!(
-            "Aucune version de Nds Game Studio n'est encore publiee pour {}.",
+            "No version of Nds Game Studio is published yet for {}.",
             ndsgs_common::PLATFORM
         )
     })?;
 
-    fs::create_dir_all(install_dir).map_err(|e| format!("Impossible de creer le dossier: {}", e))?;
+    fs::create_dir_all(install_dir).map_err(|e| format!("Cannot create the folder: {}", e))?;
 
     let temp_zip = std::env::temp_dir().join("nds-game-studio-install.zip");
     download_file(url, &temp_zip, progress, total, notify)?;
@@ -71,7 +71,7 @@ fn download_file(
 
     let response = agent.get(url)
         .call()
-        .map_err(|e| format!("Erreur telechargement: {}", e))?;
+        .map_err(|e| format!("Download error: {}", e))?;
 
     let content_length = response
         .headers()
@@ -83,15 +83,15 @@ fn download_file(
     total_size.store(content_length, Ordering::Relaxed);
 
     let mut body = response.into_body();
-    let mut file = fs::File::create(dest).map_err(|e| format!("Erreur fichier: {}", e))?;
+    let mut file = fs::File::create(dest).map_err(|e| format!("File error: {}", e))?;
     let mut downloaded: u64 = 0;
     let mut buf = [0u8; 8192];
     let mut last_notify = std::time::Instant::now();
 
     loop {
-        let n = body.as_reader().read(&mut buf).map_err(|e| format!("Erreur lecture: {}", e))?;
+        let n = body.as_reader().read(&mut buf).map_err(|e| format!("Read error: {}", e))?;
         if n == 0 { break; }
-        file.write_all(&buf[..n]).map_err(|e| format!("Erreur ecriture: {}", e))?;
+        file.write_all(&buf[..n]).map_err(|e| format!("Write error: {}", e))?;
         downloaded += n as u64;
         progress.store(downloaded, Ordering::Relaxed);
 
@@ -103,18 +103,18 @@ fn download_file(
     notify();
 
     if content_length > 0 && downloaded != content_length {
-        return Err(format!("Telechargement incomplet: {} / {}", downloaded, content_length));
+        return Err(format!("Incomplete download: {} / {}", downloaded, content_length));
     }
 
     Ok(())
 }
 
 fn extract_zip(zip_path: &Path, install_dir: &Path) -> Result<(), String> {
-    let file = fs::File::open(zip_path).map_err(|e| format!("Erreur ouverture zip: {}", e))?;
-    let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("Erreur zip: {}", e))?;
+    let file = fs::File::open(zip_path).map_err(|e| format!("Cannot open the zip: {}", e))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("Zip error: {}", e))?;
 
     for i in 0..archive.len() {
-        let mut entry = archive.by_index(i).map_err(|e| format!("Erreur zip entry: {}", e))?;
+        let mut entry = archive.by_index(i).map_err(|e| format!("Zip entry error: {}", e))?;
         let raw_name = entry.name().to_string();
 
         let relative = raw_name.split('/').skip(1).collect::<Vec<_>>().join("/");
@@ -127,7 +127,7 @@ fn extract_zip(zip_path: &Path, install_dir: &Path) -> Result<(), String> {
         } else {
             let mode = entry.unix_mode();
             ndsgs_common::write_extracted_file(&out_path, &mut entry, mode)
-                .map_err(|e| format!("Erreur extraction {}: {}", relative, e))?;
+                .map_err(|e| format!("Extraction error {}: {}", relative, e))?;
         }
     }
 
