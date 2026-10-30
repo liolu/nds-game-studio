@@ -16,13 +16,13 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use nds_nitro::{g2d, model3d, narc, nitrofs, romarc, sniff, unpack, Kind, Rgba};
+use nds_nitro::{g2d, model3d, narc, nitrofs, romarc, sadl, sniff, unpack, Kind, Rgba};
 use serde::{Deserialize, Serialize};
 
 use crate::i18n::{t, tr};
 
 /// À changer quand le calcul change : l'index gardé est alors refait.
-const INDEX_VERSION: u32 = 2;
+const INDEX_VERSION: u32 = 3;
 const BIG_FILE: usize = 4 << 20;
 
 /// Une rom du dossier `rom` du launcher.
@@ -127,6 +127,14 @@ pub fn scan(rom_path: &Path) -> Vec<Entry> {
         if path.rsplit('/').next().is_some_and(|n| n.eq_ignore_ascii_case("rom.bin")) {
             rom_bin = scan_rom_bin(rom_path, data, file.start);
         }
+        if kind == Kind::Other && !path.to_lowercase().ends_with("rom.bin") {
+            let bytes = unpack(data.to_vec());
+            for (n, (start, end, ext)) in embedded_files(&bytes).into_iter().enumerate() {
+                let inner = &bytes[start..end];
+                entries.push(Entry { path: format!("{path}#{n}"), member_name: Some(format!("{n:03}.{ext}")), rom: rom_path.to_path_buf(), span, member: Some((start, end)), kind: sniff(inner), size: end - start, dir: path.clone(), stem: String::new(), rom_index: None });
+            }
+            continue;
+        }
         if kind != Kind::Archive {
             continue;
         }
@@ -143,6 +151,40 @@ pub fn scan(rom_path: &Path) -> Vec<Entry> {
     }
     entries.extend(rom_bin);
     entries
+}
+
+/// Les fichiers Nitro collés dans un fichier maison (`.dat`, souvent) : leur en-tête donne leur taille.
+fn embedded_files(bytes: &[u8]) -> Vec<(usize, usize, &'static str)> {
+    const SIGNATURES: [(&[u8; 4], &str); 12] = [
+        (b"RLCN", "nclr"),
+        (b"RPCN", "nclr"),
+        (b"RGCN", "ncgr"),
+        (b"RCBN", "ncbr"),
+        (b"RCSN", "nscr"),
+        (b"RECN", "ncer"),
+        (b"RNAN", "nanr"),
+        (b"BMD0", "nsbmd"),
+        (b"BTX0", "nsbtx"),
+        (b"BCA0", "nsbca"),
+        (b"JNCD", "bncd"),
+        (b"JNCL", "bncl"),
+    ];
+    let mut found = Vec::new();
+    let mut at = 0;
+    while at + 16 <= bytes.len() {
+        let size = u32::from_le_bytes([bytes[at + 8], bytes[at + 9], bytes[at + 10], bytes[at + 11]]) as usize;
+        let known = SIGNATURES.iter().find(|(magic, _)| &bytes[at..at + 4] == magic.as_slice());
+        match known {
+            // En-tête complet : 0xFEFF, taille, taille de l'en-tête (16), nombre de blocs. Sans ça, ce sont
+            // les premiers octets d'un fichier compressé (Livly Garden).
+            Some((_, ext)) if bytes[at + 4..at + 6] == [0xFF, 0xFE] && bytes[at + 12..at + 14] == [16, 0] && matches!(bytes[at + 14..at + 16], [1..=8, 0]) && size >= 16 && at + size <= bytes.len() => {
+                found.push((at, at + size, *ext));
+                at += size.next_multiple_of(4);
+            }
+            _ => at += 4,
+        }
+    }
+    found
 }
 
 /// Les fichiers de l'archive numérotée rom.bin : `rom.bin#n`, nommés `<n sur 5 chiffres>.<ext>`.
@@ -199,6 +241,12 @@ pub struct Choices {
     pub cells: usize,
     pub model: usize,
     pub models: usize,
+    /// Fichier lié : le modèle d'une animation 3D, les cellules d'une animation 2D ou d'une mise en page.
+    pub linked: Vec<usize>,
+    pub link: usize,
+    /// Séquence ou animation montrée, dans le fichier.
+    pub anim: usize,
+    pub anims: usize,
 }
 
 /// Les fichiers d'une sorte qui vont le mieux avec `sel` : même dossier d'abord, puis le nom
@@ -245,6 +293,18 @@ fn best_textures(entries: &[Entry], model: usize, candidates: &[usize]) -> usize
     best.1
 }
 
+/// Les modèles qui ont le squelette de l'animation (le même nombre d'os), les plus proches d'abord.
+fn models_for_animation(entries: &[Entry], sel: usize) -> Vec<usize> {
+    let Some(bones) = read_entry(&entries[sel]).ok().and_then(|b| model3d::read(&b).ok()).and_then(|c| c.animations.first().map(|a| a.objects_curves.len())) else { return Vec::new() };
+    // Écart entre le squelette du modèle et l'animation : un modèle peut avoir quelques os de plus
+    let gap = |i: usize| read_entry(&entries[i]).ok().and_then(|b| model3d::read(&b).ok()).and_then(|c| c.models.iter().filter(|m| m.objects.len() >= bones).map(|m| m.objects.len() - bones).min()).filter(|gap| *gap <= MAX_EXTRA_BONES);
+    let mut found: Vec<(usize, usize)> = companions(entries, sel, &[Kind::Model]).into_iter().take(150).filter_map(|i| gap(i).map(|g| (g, i))).collect();
+    found.sort_by_key(|(g, _)| *g);
+    found.into_iter().map(|(_, i)| i).take(20).collect()
+}
+
+const MAX_EXTRA_BONES: usize = 3;
+
 /// Les fichiers devinés pour montrer `sel`.
 pub fn choices_for(entries: &[Entry], sel: usize) -> Choices {
     let kind = entries[sel].kind;
@@ -255,6 +315,20 @@ pub fn choices_for(entries: &[Entry], sel: usize) -> Choices {
             if kind != Kind::Tiles {
                 c.tiles = companions(entries, sel, &[Kind::Tiles]);
             }
+        }
+        Kind::CellAnim => {
+            c.linked = companions(entries, sel, &[Kind::Cells]);
+            c.palettes = companions(entries, sel, &[Kind::Palette]);
+            c.tiles = companions(entries, sel, &[Kind::Tiles]);
+        }
+        Kind::JCells => c.palettes = companions(entries, sel, &[Kind::Palette]),
+        Kind::JLayout => {
+            c.linked = companions(entries, sel, &[Kind::JCells]);
+            // La palette va avec les cellules (`training_obj`), pas avec la mise en page (`training`)
+            c.palettes = companions(entries, c.linked.first().copied().unwrap_or(sel), &[Kind::Palette]);
+        }
+        Kind::ModelAnim => {
+            c.linked = catch_unwind(AssertUnwindSafe(|| models_for_animation(entries, sel))).unwrap_or_default();
         }
         Kind::Model => {
             c.textures = companions(entries, sel, &[Kind::Textures]);
@@ -269,6 +343,69 @@ pub fn choices_for(entries: &[Entry], sel: usize) -> Choices {
 pub enum Decoded {
     Image { rgba: Rgba, info: String },
     Model { model: model3d::ModelOut, own_textures: usize },
+    /// Une animation de cellules : chaque image et sa durée (1/60 s).
+    Frames { frames: Vec<(Rgba, u16)>, info: String },
+    /// Un modèle et l'animation jouée dessus.
+    Animated { model: model3d::ModelOut, animation: model3d::AnimOut },
+    Audio { wav: Vec<u8>, waveform: Rgba, info: String },
+    Text { lines: Vec<String>, info: String },
+}
+
+const TEXT_BYTES: usize = 16 * 1024;
+
+/// Les suites de caractères d'un fichier binaire (ASCII et Shift-JIS).
+fn strings_in(bytes: &[u8]) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut start = None;
+    let mut i = 0;
+    let mut close = |start: &mut Option<usize>, end: usize| {
+        if let Some(from) = start.take() {
+            let run: &[u8] = &bytes[from..end];
+            if run.len() >= 4 {
+                let (text, _, bad) = encoding_rs::SHIFT_JIS.decode(run);
+                // Du japonais a des kana (« 謎の男 ») ; des kanji seuls, c'est du binaire lu comme du texte
+                let kana = |c: char| matches!(c, '\u{3040}'..='\u{30FF}');
+                let readable = text.is_ascii() || text.chars().any(kana);
+                if !bad && readable && text.chars().any(|c| c.is_alphanumeric()) {
+                    found.push(text.into_owned());
+                }
+            }
+        }
+    };
+    while i < bytes.len() {
+        let b = bytes[i];
+        let width = match b {
+            0x20..=0x7E => 1,
+            0x81..=0x9F | 0xE0..=0xFC if matches!(bytes.get(i + 1), Some(0x40..=0x7E | 0x80..=0xFC)) => 2,
+            _ => 0,
+        };
+        if width == 0 {
+            close(&mut start, i);
+            i += 1;
+        } else {
+            start.get_or_insert(i);
+            i += width;
+        }
+    }
+    close(&mut start, bytes.len());
+    found
+}
+
+/// Le contenu d'un fichier qu'on ne sait pas décoder : ses textes, puis ses octets.
+pub fn text_lines(bytes: &[u8]) -> Vec<String> {
+    let strings = strings_in(bytes);
+    let in_text: usize = strings.iter().map(String::len).sum();
+    let mut text = vec![t!("Text found: {}", "Textes trouves : {}", strings.len())];
+    text.extend(strings.into_iter().take(2000));
+    let mut hex = vec![t!("Bytes: {} shown of {}", "Octets : {} montres sur {}", bytes.len().min(TEXT_BYTES), bytes.len())];
+    for (row, chunk) in bytes[..bytes.len().min(TEXT_BYTES)].chunks(16).enumerate() {
+        let values: Vec<String> = chunk.iter().map(|b| format!("{b:02x}")).collect();
+        let ascii: String = chunk.iter().map(|&b| if (0x20..0x7F).contains(&b) { b as char } else { '.' }).collect();
+        hex.push(format!("{:06x}  {:<47}  {ascii}", row * 16, values.join(" ")));
+    }
+    // Un fichier surtout fait de texte commence par ce texte ; sinon les quelques mots viennent après les octets
+    let (first, second) = if in_text * 5 >= bytes.len() { (text, hex) } else { (hex, text) };
+    first.into_iter().chain([String::new()]).chain(second).collect()
 }
 
 pub fn size_text(size: usize) -> String {
@@ -289,6 +426,11 @@ pub fn kind_text(kind: Kind) -> &'static str {
         "tuiles" => tr("tiles", "tuiles"),
         "ecran" => tr("screen", "ecran"),
         "cellules" => tr("cells", "cellules"),
+        "animation 3D" => tr("3D animation", "animation 3D"),
+        "animation 2D" => tr("2D animation", "animation 2D"),
+        "cellules J" => tr("cells", "cellules"),
+        "mise en page" => tr("layout", "mise en page"),
+        "son" => tr("sound", "son"),
         other => other,
     }
 }
@@ -318,6 +460,11 @@ fn sheet(images: &[Rgba]) -> Rgba {
     out
 }
 
+/// Sans palette : niveaux de gris.
+fn grey_palette(tiles: &g2d::Tiles) -> g2d::Palette {
+    g2d::Palette { colors: (0..256).map(|i| if tiles.bpp8 { [i as u8, i as u8, i as u8, 255] } else { let v = (i % 16 * 17) as u8; [v, v, v, 255] }).collect() }
+}
+
 fn decode_inner(entries: &[Entry], sel: usize, c: &mut Choices) -> Result<Decoded, String> {
     let bytes = read_entry(&entries[sel])?;
     let kind = entries[sel].kind;
@@ -332,8 +479,7 @@ fn decode_inner(entries: &[Entry], sel: usize, c: &mut Choices) -> Result<Decode
             let tiles = g2d::read_tiles(tiles_bytes.as_deref().ok_or(tr("no tile file (.ncgr) found", "aucun fichier de tuiles (.ncgr) trouve"))?).map_err(|e| e.to_string())?;
             let palette = match load(&c.palettes, c.palette)? {
                 Some(p) => g2d::read_palette(&p).map_err(|e| e.to_string())?,
-                // Sans palette : niveaux de gris
-                None => g2d::Palette { colors: (0..256).map(|i| if tiles.bpp8 { [i as u8, i as u8, i as u8, 255] } else { let v = (i % 16 * 17) as u8; [v, v, v, 255] }).collect() },
+                None => grey_palette(&tiles),
             };
             c.banks = if tiles.bpp8 { 1 } else { palette.banks() };
             c.bank = c.bank.min(c.banks.saturating_sub(1));
@@ -357,6 +503,71 @@ fn decode_inner(entries: &[Entry], sel: usize, c: &mut Choices) -> Result<Decode
                     Ok(Decoded::Image { rgba: g2d::render_cell(&cells, c.cell, &tiles, &palette), info: t!("{} cells ({objs} OBJ), {what}", "{} cellules ({objs} OBJ), {what}", cells.cells.len()) })
                 }
             }
+        }
+        Kind::CellAnim => {
+            let sequences = g2d::read_animations(&bytes).map_err(|e| e.to_string())?;
+            c.anims = sequences.len();
+            c.anim = c.anim.min(c.anims.saturating_sub(1));
+            let sequence = sequences.get(c.anim).ok_or(tr("no sequence in the file", "aucune sequence dans le fichier"))?;
+            let cells_bytes = load(&c.linked, c.link)?.ok_or(tr("no cell file (.ncer) found", "aucun fichier de cellules (.ncer) trouve"))?;
+            let cells = g2d::read_cells(&cells_bytes).map_err(|e| e.to_string())?;
+            let tiles_bytes = load(&c.tiles, c.tile)?.ok_or(tr("no tile file (.ncgr) found", "aucun fichier de tuiles (.ncgr) trouve"))?;
+            let tiles = g2d::read_tiles(&tiles_bytes).map_err(|e| e.to_string())?;
+            let palette = match load(&c.palettes, c.palette)? {
+                Some(p) => g2d::read_palette(&p).map_err(|e| e.to_string())?,
+                None => grey_palette(&tiles),
+            };
+            let frames = g2d::render_sequence(&cells, sequence, &tiles, &palette);
+            let info = t!("{} sequences, {} frames in this one", "{} sequences, {} images dans celle-ci", sequences.len(), frames.len());
+            Ok(Decoded::Frames { frames, info })
+        }
+        Kind::JCells | Kind::JLayout => {
+            let is_layout = kind == Kind::JLayout;
+            let cells_bytes = if is_layout { load(&c.linked, c.link)?.ok_or(tr("no cell file (.bncd) found", "aucun fichier de cellules (.bncd) trouve"))? } else { bytes.clone() };
+            let (cells, tiles) = g2d::read_jcells(&cells_bytes).map_err(|e| e.to_string())?;
+            let palette = match load(&c.palettes, c.palette)? {
+                Some(p) => g2d::read_palette(&p).map_err(|e| e.to_string())?,
+                None => grey_palette(&tiles),
+            };
+            if is_layout {
+                let placements = g2d::read_jlayout(&bytes).map_err(|e| e.to_string())?;
+                let info = t!("{} cells placed on the screen", "{} cellules posees sur l'ecran", placements.len());
+                return Ok(Decoded::Image { rgba: g2d::render_layout(&placements, &cells, &tiles, &palette), info });
+            }
+            c.cells = cells.cells.len();
+            c.cell = c.cell.min(c.cells.saturating_sub(1));
+            let objs = cells.cells.get(c.cell).map_or(0, |o| o.len());
+            let info = t!("{} cells ({objs} OBJ)", "{} cellules ({objs} OBJ)", cells.cells.len());
+            Ok(Decoded::Image { rgba: g2d::render_cell(&cells, c.cell, &tiles, &palette), info })
+        }
+        Kind::ModelAnim => {
+            let cont = model3d::read(&bytes).map_err(|e| e.to_string())?;
+            c.anims = cont.animations.len();
+            c.anim = c.anim.min(c.anims.saturating_sub(1));
+            let animation = cont.animations.get(c.anim).ok_or(tr("no animation in the file", "aucune animation dans le fichier"))?;
+            let Some(&rig) = c.linked.get(c.link) else {
+                // Le modèle n'est pas lisible dans la rom (archive compressée...) : ce que dit l'animation
+                let mut lines = vec![tr("No model with this skeleton found in the rom.", "Aucun modele avec ce squelette trouve dans la rom.").to_string(), String::new()];
+                lines.extend(cont.animations.iter().map(|a| t!("{}: {} frames, {} bones", "{} : {} images, {} os", a.name, a.num_frames, a.objects_curves.len())));
+                return Ok(Decoded::Text { lines, info: t!("{} animations", "{} animations", cont.animations.len()) });
+            };
+            let own = model3d::read(&read_entry(&entries[rig])?).map_err(|e| e.to_string())?;
+            // Les textures du modèle, comme pour le modèle seul
+            let textures = companions(entries, rig, &[Kind::Textures]);
+            let others = match best_textures(entries, rig, &textures) {
+                0 => Vec::new(),
+                n => vec![model3d::read(&read_entry(&entries[textures[n - 1]])?).map_err(|e| e.to_string())?],
+            };
+            let lib = model3d::TextureLib::new(&own, &others);
+            let bones = animation.objects_curves.len();
+            let model = own.models.iter().filter(|m| m.objects.len() >= bones).min_by_key(|m| m.objects.len()).ok_or(tr("no model with this skeleton found", "aucun modele avec ce squelette trouve"))?;
+            let out = model3d::build_animation(model, animation).ok_or(tr("no model with this skeleton found", "aucun modele avec ce squelette trouve"))?;
+            Ok(Decoded::Animated { model: model3d::build_model(model, &lib), animation: out })
+        }
+        Kind::Audio => {
+            let sound = sadl::decode(&bytes).map_err(|e| e.to_string())?;
+            let info = t!("{:.1} s, {} Hz, {} channels", "{:.1} s, {} Hz, {} voies", sound.seconds(), sound.rate, sound.channels);
+            Ok(Decoded::Audio { wav: sound.wav(), waveform: sound.waveform(), info })
         }
         Kind::Textures => {
             let cont = model3d::read(&bytes).map_err(|e| e.to_string())?;
@@ -383,7 +594,8 @@ fn decode_inner(entries: &[Entry], sel: usize, c: &mut Choices) -> Result<Decode
             }
             Ok(Decoded::Model { model: models.swap_remove(c.model), own_textures: own.textures.len() })
         }
-        _ => Err(tr("unsupported format", "format non pris en charge").into()),
+        // Scripts et fichiers maison : leurs textes et leurs octets
+        _ => Ok(Decoded::Text { lines: text_lines(&bytes), info: t!("Not decoded: its text and bytes", "Pas decode : ses textes et ses octets") }),
     }
 }
 
@@ -510,6 +722,15 @@ fn try_show(entries: &[Entry], sel: usize) -> Result<String, String> {
                 Err(format!("image vide {}x{}", rgba.width, rgba.height))
             }
         }
+        Decoded::Frames { frames, .. } => {
+            if frames.iter().any(|(image, _)| image.data.chunks_exact(4).any(|p| p[3] != 0)) {
+                Ok(format!("animation {} images", frames.len()))
+            } else {
+                Err("animation vide".into())
+            }
+        }
+        Decoded::Animated { animation, .. } => Ok(format!("animation {} images", animation.frames.len())),
+        Decoded::Audio { info, .. } | Decoded::Text { info, .. } => Ok(info),
         Decoded::Model { model, .. } => {
             if model.triangle_count == 0 {
                 Err("modele sans triangles".into())
@@ -647,6 +868,33 @@ mod tests {
         let path = dir.join("jeu.nds");
         std::fs::write(&path, rom).unwrap();
         path
+    }
+
+    #[test]
+    fn finds_nitro_files_stuck_in_a_file() {
+        let mut bytes = vec![0u8; 8];
+        bytes.extend(b"RLCN\xFF\xFE\x00\x01\x14\x00\x00\x00\x10\x00\x01\x00");
+        bytes.extend([0u8; 4]);
+        bytes.extend(b"RLCN sans en-tete valide........");
+        // Un début de fichier compressé : la taille tient, pas la taille de l'en-tête
+        bytes.extend(b"RGCN\xFF\xFE\x01\x01\x08\x00\x00\x00\x01\x00RAHC");
+        assert_eq!(embedded_files(&bytes), [(8, 28, "nclr")]);
+    }
+
+    #[test]
+    fn shows_text_and_bytes_of_unknown_files() {
+        let mut bytes = b"\x00\x01boss_broly.ima\x00".to_vec();
+        bytes.extend([0x83, 0x75, 0x83, 0x8D, 0x83, 0x8A, 0x00]);
+        let lines = text_lines(&bytes);
+        assert_eq!(lines[1], "boss_broly.ima");
+        assert_eq!(lines[2], "\u{30d6}\u{30ed}\u{30ea}");
+        assert!(lines.last().unwrap().starts_with("000010  "));
+        // Surtout du binaire : les octets d'abord, et des kanji seuls ne sont pas du texte
+        let mut noise = vec![0xFFu8; 64];
+        noise.extend([0x8A, 0xA3, 0x8E, 0x94, 0x00]);
+        let lines = text_lines(&noise);
+        assert!(lines[0].starts_with("Bytes"));
+        assert!(lines.iter().any(|l| l == "Text found: 0"));
     }
 
     #[test]

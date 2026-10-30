@@ -1,11 +1,11 @@
-//! Modèles NSBMD -> maillages et images RGBA (pose de repos, sans animation).
+//! Modèles NSBMD -> maillages et images RGBA (pose de repos), et animations de squelette NSBCA.
 //!
 //! Les textures d'un matériau sont cherchées par nom, comme le fait apicula (`connection.rs`) :
 //! d'abord dans le fichier du modèle, puis dans les autres fichiers donnés (souvent un `.nsbtx`
 //! à côté) ; la palette d'abord dans le fichier de la texture.
 
 use crate::errors::Result;
-use crate::nitro::{Container, Model, Name, Palette, Texture};
+use crate::nitro::{Animation, Container, Model, Name, Palette, Texture};
 use crate::primitives::{DynamicState, PolyType, Primitives};
 use crate::util::cur::Cur;
 use crate::Rgba;
@@ -169,6 +169,52 @@ pub fn build_model(model: &Model, lib: &TextureLib) -> ModelOut {
     }
     warnings.dedup();
     ModelOut { name: model.name.to_string(), parts, materials, min, max, vertex_count: prims.vertices.len(), triangle_count, warnings }
+}
+
+/// Une animation prête à jouer : pour chaque image, positions et normales de chaque morceau (les mêmes
+/// morceaux, dans le même ordre, que `build_model`).
+pub struct AnimOut {
+    pub name: String,
+    pub frames: Vec<Vec<(Vec<[f32; 3]>, Vec<[f32; 3]>)>>,
+    /// Images (1/60 s) entre deux images gardées : les très longues animations sont réduites.
+    pub step: u16,
+    pub min: [f32; 3],
+    pub max: [f32; 3],
+}
+
+const MAX_ANIM_FRAMES: u16 = 240;
+
+/// `None` si l'animation a plus d'os que le modèle. S'il en a moins, les derniers os du modèle restent
+/// en place (les os sont liés par leur n°).
+pub fn build_animation(model: &Model, animation: &Animation) -> Option<AnimOut> {
+    if animation.objects_curves.len() > model.objects.len() || animation.num_frames == 0 {
+        return None;
+    }
+    let uv_mats: Vec<_> = model.materials.iter().map(|m| m.texture_mat).collect();
+    let step = animation.num_frames.div_ceil(MAX_ANIM_FRAMES).max(1);
+    let (mut min, mut max) = ([f32::MAX; 3], [f32::MIN; 3]);
+    let mut frames = Vec::new();
+    for frame in (0..animation.num_frames).step_by(step as usize) {
+        let moved = animation.objects_curves.iter().map(|c| c.sample_at(frame));
+        let objects: Vec<_> = moved.chain(model.objects.iter().skip(animation.objects_curves.len()).map(|o| o.matrix)).collect();
+        let prims = Primitives::build(model, PolyType::Tris, DynamicState { objects: &objects, uv_mats: &uv_mats });
+        let mut parts = Vec::new();
+        for call in &prims.draw_calls {
+            let verts = &prims.vertices[call.vertex_range.start as usize..call.vertex_range.end as usize];
+            if verts.is_empty() || call.index_range.is_empty() {
+                continue;
+            }
+            for v in verts {
+                for i in 0..3 {
+                    min[i] = min[i].min(v.position[i]);
+                    max[i] = max[i].max(v.position[i]);
+                }
+            }
+            parts.push((verts.iter().map(|v| v.position).collect(), verts.iter().map(|v| v.normal).collect()));
+        }
+        frames.push(parts);
+    }
+    Some(AnimOut { name: animation.name.to_string(), frames, step, min, max })
 }
 
 /// Toutes les textures d'un fichier (NSBTX ou NSBMD), chacune avec la palette de même nom ou la

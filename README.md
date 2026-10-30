@@ -104,11 +104,18 @@ fichiers des jeux, pour voir leurs modèles 3D et leurs images et nommer les obj
   signature (aussi compressés en LZ77). Taper du texte filtre, Retour arrière / Échap efface, la
   molette fait défiler. « Copier le chemin » le met dans le presse-papiers (pour le relier aux
   fonctions du jeu dans DS Decomp Studio).
+- **Animations** : `.nsbca` jouées sur un modèle du jeu au même squelette (flèches pour en changer ; sans
+  modèle lisible dans la rom, ses infos), `.nanr` jouées avec leurs cellules, tuiles et palette.
+- **Sons** : `.sad` / `sadl` (IMA et Procyon ADPCM), forme d'onde et bouton pour écouter.
+- **Nintendogs** : `.bncd` (cellules) et `.bncl` (mise en page sur l'écran).
+- **Fichiers maison** (`.dat`, `.bnd`...) : les fichiers Nitro collés dedans sont listés `fichier.dat#n`. Tout
+  fichier qu'on ne sait pas décoder (`.sb`, `.scripb`, `.pu`...) montre ses textes (ASCII et Shift-JIS) et
+  ses octets ; la molette fait défiler.
 - Formats Nintendo standard : modèles `.nsbmd` en 3D (glisser = tourner, clic droit = déplacer,
   molette = zoom) avec leurs textures (celles du fichier, ou le `.nsbtx` qui en donne le plus),
   textures `.nsbtx`, palettes `.nclr`, tuiles `.ncgr` / `.ncbr`, écrans `.nscr`, cellules `.ncer`.
   La palette et les tuiles qui vont avec sont devinées (même dossier, nom le plus proche) et se
-  changent avec les flèches `<` `>`. Les formats maison (Traveller's Tales, EA...) ne sont pas lus.
+  changent avec les flèches `<` `>`. Les formats maison (Traveller's Tales, EA...) ne sont pas décodés.
 - **rom.bin** (Lego Star Wars II, Les Sims 2...) : les fichiers de l'archive numérotée, lus et
   dépaquetés depuis la rom, sont listés `rom.bin#n` (filtre « rom.bin »). « Copier le chemin » copie
   alors le numéro n seul, la clé de DS Decomp Studio (onglet Data, « Archive (rom.bin) »). Un modèle

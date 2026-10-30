@@ -28,6 +28,7 @@ pub mod model3d;
 pub mod narc;
 pub mod nitrofs;
 pub mod romarc;
+pub mod sadl;
 
 pub use errors::Result;
 
@@ -49,7 +50,18 @@ pub enum Kind {
     Screen,
     Cells,
     Archive,
-    /// Animations ou autres fichiers Nitro 3D sans rien à montrer (BCA0, BTP0, BTA0...).
+    /// Animation de squelette (BCA0), jouée sur un modèle.
+    ModelAnim,
+    /// Animation de cellules (RNAN).
+    CellAnim,
+    /// Cellules et tuiles dans un seul fichier, et leur mise en page (JNCD, JNCL : Nintendogs).
+    JCells,
+    JLayout,
+    /// Son (sadl).
+    Audio,
+    /// Script compilé (SB, DCPB) : montré en texte et en octets.
+    Script,
+    /// Autres fichiers Nitro 3D sans rien à montrer (BTP0, BTA0...).
     Nitro3dOther,
     /// Autre fichier Nitro 2D (NANR, NMCR...).
     Nitro2dOther,
@@ -66,6 +78,12 @@ impl Kind {
             Kind::Screen => "ecran",
             Kind::Cells => "cellules",
             Kind::Archive => "archive",
+            Kind::ModelAnim => "animation 3D",
+            Kind::CellAnim => "animation 2D",
+            Kind::JCells => "cellules J",
+            Kind::JLayout => "mise en page",
+            Kind::Audio => "son",
+            Kind::Script => "script",
             Kind::Nitro3dOther => "3D (anim)",
             Kind::Nitro2dOther => "2D (anim)",
             Kind::Other => "",
@@ -73,7 +91,7 @@ impl Kind {
     }
 
     pub fn viewable(self) -> bool {
-        matches!(self, Kind::Model | Kind::Textures | Kind::Palette | Kind::Tiles | Kind::Screen | Kind::Cells)
+        matches!(self, Kind::Model | Kind::Textures | Kind::Palette | Kind::Tiles | Kind::Screen | Kind::Cells | Kind::ModelAnim | Kind::CellAnim | Kind::JCells | Kind::JLayout | Kind::Audio | Kind::Script)
     }
 }
 
@@ -82,13 +100,19 @@ pub fn sniff(head: &[u8]) -> Kind {
     match head.get(0..4) {
         Some(b"BMD0") => Kind::Model,
         Some(b"BTX0") => Kind::Textures,
-        Some(b"BCA0" | b"BTP0" | b"BTA0" | b"BMA0" | b"BVA0") => Kind::Nitro3dOther,
+        Some(b"BCA0") => Kind::ModelAnim,
+        Some(b"BTP0" | b"BTA0" | b"BMA0" | b"BVA0") => Kind::Nitro3dOther,
         Some(b"RLCN" | b"NCLR" | b"RPCN") => Kind::Palette,
         Some(b"RGCN" | b"NCGR" | b"RCBN") => Kind::Tiles,
         Some(b"RCSN" | b"NSCR") => Kind::Screen,
         Some(b"RECN" | b"NCER") => Kind::Cells,
         Some(b"NARC") => Kind::Archive,
-        Some(b"RNAN" | b"RCMN" | b"RNMN" | b"RTFN") => Kind::Nitro2dOther,
+        Some(b"RNAN") => Kind::CellAnim,
+        Some(b"JNCD") => Kind::JCells,
+        Some(b"JNCL") => Kind::JLayout,
+        Some(b"sadl") => Kind::Audio,
+        Some(b"SB  " | b"DCPB") => Kind::Script,
+        Some(b"RCMN" | b"RNMN" | b"RTFN") => Kind::Nitro2dOther,
         _ => Kind::Other,
     }
 }

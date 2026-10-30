@@ -269,6 +269,8 @@ pub struct Cells {
     pub cells: Vec<Vec<Obj>>,
     /// NNSG2dCharacterDataMapingType : 0 = 1D 32 Ko, 1 = 1D 64 Ko, 2 = 1D 128 Ko, 3 = 1D 256 Ko, 4 = 2D.
     pub mapping: u32,
+    /// Largeur et hauteur de chaque cellule, quand le fichier les donne (JNCD).
+    pub sizes: Vec<(u32, u32)>,
 }
 
 const OBJ_SIZES: [[(u32, u32); 4]; 3] = [
@@ -312,7 +314,7 @@ pub fn read_cells(file: &[u8]) -> Result<Cells> {
         }
         cells.push(objs);
     }
-    Ok(Cells { cells, mapping })
+    Ok(Cells { cells, mapping, sizes: Vec::new() })
 }
 
 /// Une cellule (les OBJ du premier au dernier sont dessinés du dessus au dessous) ;
@@ -350,6 +352,172 @@ pub fn render_cell(cells: &Cells, index: usize, tiles: &Tiles, palette: &Palette
                 put(&mut out, reach as i64 + obj.x as i64 + x as i64, reach as i64 + obj.y as i64 + y as i64, color);
             }
         }
+    }
+    out
+}
+
+// --------------------------------------------------------------------------------------------
+//  Animations de cellules (NANR)
+// --------------------------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AnimFrame {
+    pub cell: usize,
+    pub x: i32,
+    pub y: i32,
+    /// Durée en images (1/60 s).
+    pub duration: u16,
+}
+
+/// Les séquences d'animation du fichier (chacune, ses images).
+pub fn read_animations(file: &[u8]) -> Result<Vec<Vec<AnimFrame>>> {
+    let b = block(file, &[b"KNBA", b"ABNK"])?;
+    let count = u16_at(b, 0)? as usize;
+    let sequences_at = u32_at(b, 4)? as usize;
+    let frames_at = u32_at(b, 8)? as usize;
+    let data_at = u32_at(b, 12)? as usize;
+    let mut sequences = Vec::with_capacity(count);
+    for s in 0..count {
+        let at = sequences_at + s * 16;
+        let frames = u16_at(b, at)? as usize;
+        // 0 = n° de cellule seul ; 1 = + rotation, échelle, position ; 2 = + position
+        let data_type = u16_at(b, at + 4)? & 0xFF;
+        let first = u32_at(b, at + 12)? as usize;
+        let mut sequence = Vec::with_capacity(frames);
+        for f in 0..frames {
+            let frame = frames_at + first + f * 8;
+            let data = data_at + u32_at(b, frame)? as usize;
+            let duration = u16_at(b, frame + 4)?;
+            let cell = u16_at(b, data)? as usize;
+            let position_at = match data_type {
+                1 => Some(data + 12),
+                2 => Some(data + 4),
+                _ => None,
+            };
+            let (x, y) = match position_at {
+                Some(p) => (u16_at(b, p)? as i16 as i32, u16_at(b, p + 2)? as i16 as i32),
+                None => (0, 0),
+            };
+            sequence.push(AnimFrame { cell, x, y, duration });
+        }
+        sequences.push(sequence);
+    }
+    Ok(sequences)
+}
+
+/// Les images d'une séquence, toutes de la même taille, (0, 0) au centre.
+pub fn render_sequence(cells: &Cells, frames: &[AnimFrame], tiles: &Tiles, palette: &Palette) -> Vec<(Rgba, u16)> {
+    let images: Vec<Rgba> = frames.iter().map(|f| render_cell(cells, f.cell, tiles, palette)).collect();
+    let reach = frames.iter().zip(&images).map(|(f, i)| f.x.abs().max(f.y.abs()) as u32 + i.width / 2).max().unwrap_or(8).max(8);
+    let size = reach * 2;
+    frames
+        .iter()
+        .zip(&images)
+        .map(|(f, image)| {
+            let mut out = Rgba { width: size, height: size, data: vec![0; (size * size * 4) as usize] };
+            let half = image.width as i64 / 2;
+            blit(&mut out, image, reach as i64 + f.x as i64 - half, reach as i64 + f.y as i64 - half);
+            (out, f.duration.max(1))
+        })
+        .collect()
+}
+
+fn blit(out: &mut Rgba, image: &Rgba, px: i64, py: i64) {
+    for y in 0..image.height as i64 {
+        for x in 0..image.width as i64 {
+            let at = ((y as u32 * image.width + x as u32) * 4) as usize;
+            let color = [image.data[at], image.data[at + 1], image.data[at + 2], image.data[at + 3]];
+            put(out, px + x, py + y, color);
+        }
+    }
+}
+
+// --------------------------------------------------------------------------------------------
+//  Cellules JNCD et mise en page JNCL (Nintendogs)
+// --------------------------------------------------------------------------------------------
+
+/// Un JNCD : cellules (6 octets : largeur, hauteur, premier OBJ, nombre), OBJ (12 octets : attributs
+/// OAM, 0, n° de bloc de 128 octets, taille en blocs), et les tuiles dans le même fichier.
+pub fn read_jcells(file: &[u8]) -> Result<(Cells, Tiles)> {
+    if file.get(0..4) != Some(b"JNCD") {
+        bail!("pas un fichier JNCD");
+    }
+    let count = u16_at(file, 6)? as usize;
+    let cells_at = u32_at(file, 8)? as usize;
+    let objs_at = u32_at(file, 12)? as usize;
+    let data_at = u32_at(file, 16)? as usize;
+    let data_size = u32_at(file, 20)? as usize;
+    let mut cells = Vec::with_capacity(count);
+    let mut sizes = Vec::with_capacity(count);
+    let mut bpp8 = false;
+    for c in 0..count {
+        let at = cells_at + c * 6;
+        let size = u16_at(file, at)?;
+        sizes.push(((size & 0xFF) as u32, (size >> 8) as u32));
+        let first = u16_at(file, at + 2)? as usize;
+        let n = u16_at(file, at + 4)? as usize;
+        let mut objs = Vec::with_capacity(n);
+        for o in first..first + n {
+            let p = objs_at + o * 12;
+            let (a0, a1, a2) = (u16_at(file, p)?, u16_at(file, p + 2)?, u16_at(file, p + 4)?);
+            let (width, height) = OBJ_SIZES[((a0 >> 14) & 3).min(2) as usize][((a1 >> 14) & 3) as usize];
+            bpp8 |= a0 & 0x2000 != 0;
+            objs.push(Obj {
+                x: ((a1 & 0x1FF) as i32) << 23 >> 23,
+                y: (a0 & 0xFF) as i8 as i32,
+                width,
+                height,
+                tile: u16_at(file, p + 8)? as u32,
+                bank: (a2 >> 12) as u32,
+                hflip: a0 & 0x100 == 0 && a1 & 0x1000 != 0,
+                vflip: a0 & 0x100 == 0 && a1 & 0x2000 != 0,
+                bpp8: a0 & 0x2000 != 0,
+            });
+        }
+        cells.push(objs);
+    }
+    let data = file.get(data_at..).unwrap_or(&[]);
+    let data = &data[..data_size.min(data.len())];
+    let pixels = if bpp8 { data.to_vec() } else { data.iter().flat_map(|b| [b & 15, b >> 4]).collect() };
+    // Mode 2 = blocs de 128 octets
+    Ok((Cells { cells, mapping: 2, sizes }, Tiles { bpp8, linear: false, pixels, width: None, height: None }))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Placement {
+    pub x: i32,
+    pub y: i32,
+    /// Ce que désigne x, y : 0 = le bord gauche ou haut de la cellule, 1 = son centre, 2 = son bord droit ou bas.
+    pub anchor_x: u8,
+    pub anchor_y: u8,
+    pub cell: usize,
+}
+
+/// Un JNCL : où poser chaque cellule à l'écran (8 octets : x, y, n° ; x et y sur 12 bits, l'ancrage au-dessus).
+pub fn read_jlayout(file: &[u8]) -> Result<Vec<Placement>> {
+    if file.get(0..4) != Some(b"JNCL") {
+        bail!("pas un fichier JNCL");
+    }
+    let count = u16_at(file, 6)? as usize;
+    let mut placements = Vec::with_capacity(count);
+    for i in 0..count {
+        let at = 8 + i * 8;
+        let coordinate = |v: u16| ((v & 0xFFF) as i32) << 20 >> 20;
+        let (x, y) = (u16_at(file, at)?, u16_at(file, at + 2)?);
+        placements.push(Placement { x: coordinate(x), y: coordinate(y), anchor_x: (x >> 12) as u8, anchor_y: (y >> 12) as u8, cell: u32_at(file, at + 4)? as usize });
+    }
+    Ok(placements)
+}
+
+/// La mise en page sur un écran DS ; la première cellule de la liste au-dessus.
+pub fn render_layout(placements: &[Placement], cells: &Cells, tiles: &Tiles, palette: &Palette) -> Rgba {
+    let mut out = Rgba { width: 256, height: 192, data: vec![0; 256 * 192 * 4] };
+    for p in placements.iter().rev() {
+        let image = render_cell(cells, p.cell, tiles, palette);
+        let half = image.width as i64 / 2;
+        let (w, h) = cells.sizes.get(p.cell).copied().unwrap_or((0, 0));
+        let start = |at: i32, size: u32, anchor: u8| at as i64 - size as i64 * anchor as i64 / 2;
+        blit(&mut out, &image, start(p.x, w, p.anchor_x) - half, start(p.y, h, p.anchor_y) - half);
     }
     out
 }
