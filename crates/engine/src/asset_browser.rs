@@ -20,6 +20,8 @@
 //!
 //! Lecture des formats : crate `nds-nitro` (code d'apicula pour la 3D).
 
+pub mod review;
+
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -178,6 +180,10 @@ pub(crate) struct AssetBrowser {
     text_scroll: usize,
     text_font: Option<Handle<Font>>,
     text_shown: Option<(usize, usize)>,
+    /// Mode validation (`review`) : le clavier et F6 lui reviennent ; change à chaque aperçu dessiné.
+    review: bool,
+    review_unfocused: bool,
+    preview_serial: u64,
 }
 
 /// Les vignettes à dessiner (plusieurs fils) et celles qui sont prêtes.
@@ -257,6 +263,9 @@ impl Default for AssetBrowser {
             text_scroll: 0,
             text_font: None,
             text_shown: None,
+            review: false,
+            review_unfocused: false,
+            preview_serial: 0,
         }
     }
 }
@@ -581,7 +590,8 @@ fn toggle_window(
     }
     let start = browser.start.take();
     let requested = requests.read().count() % 2 == 1;
-    if !keys.just_pressed(KeyCode::F6) && !requested && start.is_none() {
+    let pressed = keys.just_pressed(KeyCode::F6) && !browser.review;
+    if !pressed && !requested && start.is_none() {
         return;
     }
     // Déjà ouverte et un jeu demandé (launcher) : elle reste ouverte et montre ce jeu
@@ -601,7 +611,7 @@ fn toggle_window(
         }
         return;
     }
-    let window = commands.spawn((Window { title: "Nds Game Studio - Assets (F6)".into(), resolution: WindowResolution::new(1500, 920), ..default() }, AssetsWindow)).id();
+    let window = commands.spawn((Window { title: "Nds Game Studio - Assets (F6)".into(), resolution: WindowResolution::new(1500, 920), focused: !browser.review_unfocused, ..default() }, AssetsWindow)).id();
     let camera = commands
         .spawn((Camera2d, Camera { order: 7, clear_color: ClearColorConfig::Custom(BG), ..default() }, RenderTarget::Window(WindowRef::Entity(window)), RenderLayers::none()))
         .id();
@@ -803,6 +813,9 @@ fn page(activate: On<Activate>, pages: Query<&PageButton>, mut b: ResMut<AssetBr
 /// Échap vide puis ferme le menu, Entrée prend le premier résultat du menu).
 fn type_filter(mut b: ResMut<AssetBrowser>, mut typed: MessageReader<KeyboardInput>, windows: Query<&Window>) {
     let Some(window) = b.window else { return };
+    if b.review {
+        return;
+    }
     let focused = windows.get(window).is_ok_and(|w| w.focused);
     let in_menu = b.menu != Menu::None;
     let mut changed = false;
@@ -1368,6 +1381,7 @@ fn render_preview(
         return;
     }
     b.preview_dirty = false;
+    b.preview_serial += 1;
     for e in &old {
         commands.entity(e).despawn();
     }
