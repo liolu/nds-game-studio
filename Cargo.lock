@@ -4445,7 +4445,7 @@ dependencies = [
 
 [[package]]
 name = "nds-engine"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bevy",
  "dirs",
@@ -4459,7 +4459,7 @@ dependencies = [
 
 [[package]]
 name = "nds-game-studio"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bevy",
  "nds-engine",
@@ -4509,7 +4509,7 @@ dependencies = [
 
 [[package]]
 name = "nds-net"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "igd-next",
  "serde",
@@ -4518,7 +4518,7 @@ dependencies = [
 
 [[package]]
 name = "nds-nitro"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cgmath",
  "image",
@@ -4527,7 +4527,7 @@ dependencies = [
 
 [[package]]
 name = "ndsgs-common"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dirs",
  "serde",
