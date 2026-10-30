@@ -127,6 +127,8 @@ pub struct Tiles {
     /// Largeur et hauteur en tuiles écrites dans le fichier (absentes en mode 1D).
     pub width: Option<u32>,
     pub height: Option<u32>,
+    /// Groupe de couleurs de chaque tuile, quand le fichier le dit (bloc ATTR des NCCG).
+    pub attrs: Vec<u8>,
 }
 
 impl Tiles {
@@ -164,7 +166,7 @@ pub fn read_tiles(file: &[u8]) -> Result<Tiles> {
         let bpp8 = u16_at(file, 6)? == 1;
         let data = file.get(8..).unwrap_or(&[]);
         let pixels = if bpp8 { data.to_vec() } else { data.iter().flat_map(|p| [p & 15, p >> 4]).collect() };
-        return Ok(Tiles { bpp8, linear: false, pixels, width: None, height: None });
+        return Ok(Tiles { bpp8, linear: false, pixels, width: None, height: None, attrs: Vec::new() });
     }
     if file.get(0..4) == Some(b"NCCG") {
         // Bloc CHAR : largeur et hauteur en tuiles, 1 = 8 bits par pixel, pixels
@@ -172,7 +174,8 @@ pub fn read_tiles(file: &[u8]) -> Result<Tiles> {
         let bpp8 = u32_at(b, 8)? == 1;
         let data = b.get(12..).unwrap_or(&[]);
         let pixels = if bpp8 { data.to_vec() } else { data.iter().flat_map(|p| [p & 15, p >> 4]).collect() };
-        return Ok(Tiles { bpp8, linear: false, pixels, width: Some(u32_at(b, 0)?), height: Some(u32_at(b, 4)?) });
+        let attrs = block(file, &[b"ATTR"]).ok().and_then(|a| a.get(8..)).unwrap_or(&[]).to_vec();
+        return Ok(Tiles { bpp8, linear: false, pixels, width: Some(u32_at(b, 0)?), height: Some(u32_at(b, 4)?), attrs });
     }
     let b = block(file, &[b"RAHC", b"CHAR"])?;
     let h = u16_at(b, 0)?;
@@ -194,7 +197,7 @@ pub fn read_tiles(file: &[u8]) -> Result<Tiles> {
     }
     let width = (w != 0xFFFF && w != 0).then_some(w as u32);
     let height = (h != 0xFFFF && h != 0).then_some(h as u32);
-    Ok(Tiles { bpp8, linear, pixels, width, height })
+    Ok(Tiles { bpp8, linear, pixels, width, height, attrs: Vec::new() })
 }
 
 fn put(out: &mut Rgba, x: i64, y: i64, color: [u8; 4]) {
@@ -232,6 +235,7 @@ pub fn render_tiles(tiles: &Tiles, palette: &Palette, bank: usize, width: u32) -
     }
     for t in 0..tiles.count() {
         let (tx, ty) = (t as u32 % width, t as u32 / width);
+        let bank = tiles.attrs.get(t).map_or(bank, |attr| *attr as usize);
         draw_tile(&mut out, tiles, t, palette, bank, tx as i64 * 8, ty as i64 * 8, false, false);
     }
     out
@@ -247,6 +251,13 @@ pub struct Screen {
     pub height: u32,
     /// Une entrée par tuile de l'écran : n° de tuile (bits 0-9), miroir H (10), V (11), palette (12-15).
     pub entries: Vec<u16>,
+}
+
+/// Le fichier que nomme un NCCG ou un NCSC (bloc LINK) : les tuiles d'un écran, la palette d'une planche.
+pub fn link_name(file: &[u8]) -> Option<String> {
+    let name = block(file, &[b"LINK"]).ok()?;
+    let end = name.iter().position(|b| *b == 0).unwrap_or(name.len());
+    Some(String::from_utf8_lossy(&name[..end]).to_string())
 }
 
 pub fn read_screen(file: &[u8]) -> Result<Screen> {
@@ -532,7 +543,7 @@ pub fn read_jcells(file: &[u8]) -> Result<(Cells, Tiles)> {
     let data = &data[..data_size.min(data.len())];
     let pixels = if bpp8 { data.to_vec() } else { data.iter().flat_map(|b| [b & 15, b >> 4]).collect() };
     // Mode 2 = blocs de 128 octets
-    Ok((Cells { cells, mapping: 2, sizes }, Tiles { bpp8, linear: false, pixels, width: None, height: None }))
+    Ok((Cells { cells, mapping: 2, sizes }, Tiles { bpp8, linear: false, pixels, width: None, height: None, attrs: Vec::new() }))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -582,11 +593,19 @@ pub fn raw_palette(file: &[u8]) -> Palette {
     Palette { colors: file.chunks_exact(2).map(|c| bgr555(u16::from_le_bytes([c[0], c[1]]))).collect() }
 }
 
+/// Sans palette, on juge sur les pixels : deux voisins de même couleur font deux octets égaux en 8 bits, et deux moitiés
+/// d'octet égales en 4 bits.
+fn looks_8bpp(file: &[u8]) -> bool {
+    let same_bytes = file.windows(2).filter(|w| w[0] == w[1]).count();
+    let same_halves = file.iter().filter(|b| *b & 15 == *b >> 4).count();
+    file.len() % 64 == 0 && same_bytes > same_halves
+}
+
 /// Plus de 16 couleurs dans la palette : 8 bits par pixel ; sinon 4.
 pub fn raw_tiles(file: &[u8], palette: Option<&Palette>) -> Tiles {
-    let bpp8 = palette.is_some_and(|p| p.colors.len() > 16);
+    let bpp8 = palette.map_or_else(|| looks_8bpp(file), |p| p.colors.len() > 16);
     let pixels = if bpp8 { file.to_vec() } else { file.iter().flat_map(|b| [b & 15, b >> 4]).collect() };
-    Tiles { bpp8, linear: false, pixels, width: None, height: None }
+    Tiles { bpp8, linear: false, pixels, width: None, height: None, attrs: Vec::new() }
 }
 
 /// Le fichier ne dit pas sa taille : 32x24 tuiles (l'écran DS) ou le plus proche d'un carré de 32 de large.
@@ -645,6 +664,8 @@ pub struct Texel<'a> {
     pub width: u32,
     pub height: u32,
     data: &'a [u8],
+    /// La couleur 0 est une vraie couleur et non du transparent.
+    pub opaque: bool,
 }
 
 pub fn read_texel(file: &[u8]) -> Result<Texel<'_>> {
@@ -657,7 +678,7 @@ pub fn read_texel(file: &[u8]) -> Result<Texel<'_>> {
     if width == 0 || height == 0 || width > 1024 || height > 1024 {
         bail!("texture de {}x{}", width, height);
     }
-    Ok(Texel { format, width, height, data })
+    Ok(Texel { format, width, height, data, opaque: false })
 }
 
 /// La texture en RGBA. Couleur 0 transparente. Formats de la DS : 1 A3I5, 2 4 couleurs, 3 16 couleurs,
@@ -670,7 +691,7 @@ pub fn render_texel(texel: &Texel, palette: &Palette) -> Result<Rgba> {
     // Le magenta (0x7C1F) est la couleur transparente de ces moteurs
     const COLOR_KEY: [u8; 4] = [255, 0, 255, 255];
     let pal = |index: u8| {
-        let color = palette.color(0, index, true);
+        let color = if index == 0 && texel.opaque { palette.colors.first().copied().unwrap_or([0; 4]) } else { palette.color(0, index, true) };
         if color == COLOR_KEY { [0; 4] } else { color }
     };
     let mut set = |i: usize, c: [u8; 4]| out.data[i * 4..i * 4 + 4].copy_from_slice(&c);
@@ -738,7 +759,7 @@ pub fn render_engine_bitmap(file: &[u8], palette: &Palette) -> Result<Rgba> {
 
 impl<'a> Texel<'a> {
     pub fn new(format: u32, width: u32, height: u32, data: &'a [u8]) -> Self {
-        Texel { format, width, height, data }
+        Texel { format, width, height, data, opaque: false }
     }
 }
 
@@ -808,13 +829,15 @@ pub fn read_bmp(file: &[u8]) -> Result<Rgba> {
 /// tuiles de 32 octets (Heroes of Mana). `None` si la taille ne tombe pas juste ou si le début n'a rien d'une palette.
 pub fn read_palette_tiles(file: &[u8]) -> Option<(Palette, Tiles)> {
     const MIN_TILES: usize = 4;
+    // Des pixels 8 bits pris pour une palette : la plupart de leurs « couleurs » ont deux octets égaux
+    let is_pixels = |bytes: &[u8]| bytes.chunks_exact(2).filter(|c| c[0] == c[1] && c[0] != 0).count() * 4 > bytes.len();
     let colors_in = |bytes: &[u8]| {
         let mut seen: Vec<u16> = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
         seen.sort_unstable();
         seen.dedup();
         seen.len()
     };
-    let (size, bpp8) = if file.len() >= 512 + MIN_TILES * 64 && (file.len() - 512) % 64 == 0 && colors_in(&file[..512]) >= 8 {
+    let (size, bpp8) = if file.len() >= 512 + MIN_TILES * 64 && (file.len() - 512) % 64 == 0 && colors_in(&file[..512]) >= 8 && !is_pixels(&file[..512]) {
         (512, true)
     } else if file.len() >= 32 + MIN_TILES * 32 && (file.len() - 32) % 32 == 0 && colors_in(&file[..32]) >= 4 {
         (32, false)
@@ -823,43 +846,62 @@ pub fn read_palette_tiles(file: &[u8]) -> Option<(Palette, Tiles)> {
     };
     let data = &file[size..];
     let pixels = if bpp8 { data.to_vec() } else { data.iter().flat_map(|p| [p & 15, p >> 4]).collect() };
-    Some((raw_palette(&file[..size]), Tiles { bpp8, linear: false, pixels, width: None, height: None }))
+    Some((raw_palette(&file[..size]), Tiles { bpp8, linear: false, pixels, width: None, height: None, attrs: Vec::new() }))
+}
+
+/// Une image de `.z` : voir `read_z_image`.
+fn read_z_sprite(file: &[u8]) -> Option<Rgba> {
+    let (width, height) = (u16_at(file, 4).ok()? as u32, u16_at(file, 6).ok()? as u32);
+    let size = u32_at(file, 12).ok()? as usize;
+    let data = file.get(16..16 + size)?;
+    if width == 0 || height == 0 || width > 1024 || height > 1024 || width % 8 != 0 {
+        return None;
+    }
+    let palette = raw_palette(file.get(16 + size + 4..)?);
+    let bpp8 = size as u32 * 8 / (width * height) >= 8;
+    let pixels = if bpp8 { data.to_vec() } else { data.iter().flat_map(|p| [p & 15, p >> 4]).collect() };
+    let tiles = Tiles { bpp8, linear: false, pixels, width: None, height: None, attrs: Vec::new() };
+    Some(render_tiles(&tiles, &palette, 0, width / 8))
+}
+
+/// Le fond d'un `.z` : voir `read_z_image`.
+fn read_z_screen(file: &[u8]) -> Option<Rgba> {
+    const SIZE_AT: usize = 4 + 512;
+    const MAP_AT: usize = SIZE_AT + 4;
+    // Un fond de 256x256 ne montre que l'écran de la DS, 192 lignes
+    let (width, height, shown) = match u32_at(file, SIZE_AT).ok()? {
+        0 => (32, 32, 192),
+        1 => (64, 32, 256),
+        2 => (32, 64, 512),
+        3 => (64, 64, 512),
+        _ => return None,
+    };
+    let tiles_at = MAP_AT + width * height * 2 + 4;
+    if (u32_at(file, tiles_at - 4).ok()? as usize) * 64 != file.len().checked_sub(tiles_at)? {
+        return None;
+    }
+    let palette = raw_palette(file.get(4..4 + 512)?);
+    let entries = file.get(MAP_AT..tiles_at - 4)?.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+    let tiles = Tiles { bpp8: true, linear: false, pixels: file[tiles_at..].to_vec(), width: None, height: None, attrs: Vec::new() };
+    Some(render_screen(&Screen { width: width as u32 * 8, height: shown, entries }, &tiles, &palette))
 }
 
 /// Le contenu décompressé d'un `.z` de Tom and Jerry. Trois formes :
-/// - image : 0, largeur et hauteur (u16), attributs, taille, pixels en tuiles, puis un u32 et sa palette ;
-/// - écran plein format : 1, 256 couleurs, 8 octets, 1024 entrées d'écran, tuiles de 64 octets ;
-/// - texture : format de texture de la DS (u16), tailles (u8 : 8 << n), pixels, puis 1 (u16), taille de la palette
-///   (u16), 0 (u32), palette.
+/// - image : 0 ou 1, largeur et hauteur (u16), attributs, taille, pixels en tuiles, puis un u32 et sa palette ;
+/// - écran : 1, 256 couleurs, taille du fond (u32, comme le registre de la DS : 0 = 256x256, 1 = 512x256, 2 = 256x512,
+///   3 = 512x512), entrées d'écran, nombre de tuiles (u32), tuiles de 64 octets ;
+/// - texture : format de texture de la DS (u8), 1 si la couleur 0 est transparente (u8), tailles (u8 : 8 << n), pixels,
+///   puis 1 (u16), taille de la palette (u16), 0 (u32), palette.
 /// `None` pour le reste (polices, maillages, palettes seules...).
 pub fn read_z_image(file: &[u8]) -> Option<Rgba> {
     let first = u32_at(file, 0).ok()?;
     match first {
-        0 => {
-            let (width, height) = (u16_at(file, 4).ok()? as u32, u16_at(file, 6).ok()? as u32);
-            let size = u32_at(file, 12).ok()? as usize;
-            let data = file.get(16..16 + size)?;
-            if width == 0 || height == 0 || width > 1024 || height > 1024 || width % 8 != 0 {
-                return None;
-            }
-            let palette = raw_palette(file.get(16 + size + 4..)?);
-            let bpp8 = size as u32 * 8 / (width * height) >= 8;
-            let pixels = if bpp8 { data.to_vec() } else { data.iter().flat_map(|p| [p & 15, p >> 4]).collect() };
-            let tiles = Tiles { bpp8, linear: false, pixels, width: None, height: None };
-            Some(render_tiles(&tiles, &palette, 0, width / 8))
-        }
-        1 => {
-            const MAP_AT: usize = 4 + 512 + 8;
-            const MAP_SIZE: usize = 2048;
-            let palette = raw_palette(file.get(4..4 + 512)?);
-            let entries = file.get(MAP_AT..MAP_AT + MAP_SIZE)?.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
-            let tiles = Tiles { bpp8: true, linear: false, pixels: file.get(MAP_AT + MAP_SIZE..)?.to_vec(), width: None, height: None };
-            Some(render_screen(&Screen { width: 256, height: 192, entries }, &tiles, &palette))
-        }
+        0 => read_z_sprite(file),
+        1 => read_z_screen(file).or_else(|| read_z_sprite(file)),
         _ => {
-            let format = u16_at(file, 0).ok()? as u32;
-            let (Some(&sw), Some(&sh)) = (file.get(2), file.get(3)) else { return None };
-            if !matches!(format, 1 | 2 | 3 | 4 | 6 | 7) || sw > 7 || sh > 7 {
+            let (&format, &key, &sw, &sh) = (file.first()?, file.get(1)?, file.get(2)?, file.get(3)?);
+            let format = format as u32;
+            if !matches!(format, 1 | 2 | 3 | 4 | 6 | 7) || key > 1 || sw > 7 || sh > 7 {
                 return None;
             }
             let (width, height) = (8u32 << sw, 8u32 << sh);
@@ -872,7 +914,7 @@ pub fn read_z_image(file: &[u8]) -> Option<Rgba> {
                 let palette_size = u16_at(file, 4 + size + 2).ok()? as usize;
                 raw_palette(file.get(4 + size + 8..4 + size + 8 + palette_size)?)
             };
-            render_texel(&Texel::new(format, width, height, data), &palette).ok()
+            render_texel(&Texel { opaque: key == 0, ..Texel::new(format, width, height, data) }, &palette).ok()
         }
     }
 }
@@ -890,8 +932,60 @@ mod tests {
     }
 
     #[test]
+    fn tells_8_bit_pixels_from_4_bit_ones() {
+        assert!(looks_8bpp(&[0x2C; 64]));
+        assert!(!looks_8bpp(&[0x22; 64]));
+        assert!(!looks_8bpp(&[0x2C; 60]));
+    }
+
+    #[test]
+    fn each_tile_can_have_its_own_colors() {
+        let mut colors = vec![[0, 0, 0, 255]; 32];
+        colors[1] = [1, 1, 1, 255];
+        colors[17] = [2, 2, 2, 255];
+        let tiles = Tiles { bpp8: false, linear: false, pixels: vec![1; 128], width: Some(2), height: Some(1), attrs: vec![0, 1] };
+        let image = render_tiles(&tiles, &Palette { colors }, 0, 2);
+        assert_eq!(&image.data[..4], &[1, 1, 1, 255]);
+        assert_eq!(&image.data[8 * 4..8 * 4 + 4], &[2, 2, 2, 255]);
+    }
+
+    #[test]
+    fn z_screens_say_their_size_and_tile_count() {
+        // Fond 512x256 de 2 tuiles : l'entrée 1 montre la tuile 1 à partir de la 2e colonne
+        let mut file = vec![0u8; 4 + 512 + 4 + 4096 + 4 + 128];
+        file[0] = 1;
+        file[4 + 2] = 0x1F;
+        file[516] = 1;
+        file[520 + 2] = 1;
+        file[520 + 4096] = 2;
+        file[520 + 4096 + 4 + 64] = 1;
+        let image = read_z_image(&file).unwrap();
+        assert_eq!((image.width, image.height), (512, 256));
+        assert_eq!(&image.data[8 * 4..8 * 4 + 4], &[255, 0, 0, 255]);
+        file.pop();
+        assert!(read_z_screen(&file).is_none());
+    }
+
+    #[test]
+    fn z_textures_say_if_color_0_is_transparent() {
+        // 8x8 à 4 couleurs : tous les pixels ont la couleur 0, gris
+        let file = |key: u8| [&[2, key, 0, 0], [0u8; 16].as_slice(), &[1, 0, 4, 0, 0, 0, 0, 0], &[0x9C, 0x73, 0x1F, 0x7C]].concat();
+        assert_eq!(read_z_image(&file(0)).unwrap().data[3], 255);
+        assert_eq!(read_z_image(&file(1)).unwrap().data[3], 0);
+    }
+
+    #[test]
+    fn pixels_are_not_a_palette() {
+        let mut file = vec![1u8; 512 + 4 * 64];
+        for (i, b) in file.iter_mut().take(64).enumerate() {
+            *b = i as u8;
+        }
+        assert!(read_palette_tiles(&file).is_none_or(|(_, tiles)| !tiles.bpp8));
+    }
+
+    #[test]
     fn small_tile_sets_are_square() {
-        let tiles = Tiles { bpp8: false, linear: false, pixels: vec![0; 16 * 64], width: None, height: None };
+        let tiles = Tiles { bpp8: false, linear: false, pixels: vec![0; 16 * 64], width: None, height: None, attrs: Vec::new() };
         assert_eq!(tiles.default_width(), 4);
     }
 

@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use crate::i18n::{t, tr};
 
 /// À changer quand le calcul change : l'index gardé est alors refait.
-const INDEX_VERSION: u32 = 9;
+const INDEX_VERSION: u32 = 10;
 const BIG_FILE: usize = 4 << 20;
 
 /// Une rom du dossier `rom` du launcher.
@@ -120,7 +120,7 @@ pub fn scan(rom_path: &Path) -> Vec<Entry> {
         let path = file.path;
         let size = data.len();
         let small = size < BIG_FILE;
-        let kind = guess_house_format(by_extension(kind_of(&data[..size.min(4)], || small.then(|| data.to_vec())), &path), &path, data);
+        let kind = guess_file_format(guess_house_format(by_extension(kind_of(&data[..size.min(4)], || small.then(|| data.to_vec())), &path), &path, data, false), &path, data);
         let dir = path.rsplit_once('/').map_or(String::new(), |(d, _)| d.to_string());
         let stem = stem_of(&path);
         entries.push(Entry { path: path.clone(), member_name: None, rom: rom_path.to_path_buf(), span, member: None, kind, size, dir, stem, rom_index: None });
@@ -155,7 +155,7 @@ pub fn scan(rom_path: &Path) -> Vec<Entry> {
                 // Une table de positions au début : chaque morceau est un fichier, souvent compressé
                 for (n, (start, end)) in table_members(&bytes).into_iter().enumerate() {
                     let member = &bytes[start..end];
-                    let kind = guess_house_format(sniff_inner(member), &path, member);
+                    let kind = guess_house_format(sniff_inner(member), &path, member, true);
                     let ext = if kind == Kind::Other { "bin" } else { "dat" };
                     entries.push(Entry { path: format!("{path}#{n}"), member_name: Some(format!("{n:03}.{ext}")), rom: rom_path.to_path_buf(), span, member: Some((start, end)), kind, size: end - start, dir: path.clone(), stem: String::new(), rom_index: None });
                 }
@@ -192,13 +192,36 @@ fn sniff_inner(member: &[u8]) -> Kind {
     }
 }
 
-/// Un `.dat` ou `.bin` sans signature : une planche de tuiles se reconnaît à sa taille et à sa palette.
-fn guess_house_format(kind: Kind, path: &str, data: &[u8]) -> Kind {
-    if kind != Kind::Other || !has_house_extension(path) {
+/// Un morceau de `.dat` ou de `.bin`, ou un `.dat` entier, sans signature : une planche de tuiles se reconnaît à sa taille
+/// et à sa palette. Un `.bin` entier n'en est presque jamais une : sa taille tombe juste une fois sur 32.
+fn guess_house_format(kind: Kind, path: &str, data: &[u8], member: bool) -> Kind {
+    if kind != Kind::Other || !has_house_extension(path) || (!member && path.to_lowercase().ends_with(".bin")) {
         return kind;
     }
     let inner = decompress_any(data);
+    // Un `.dat` entier et non compressé est plutôt du texte ou une table (`spanish.dat` de SimCity)
+    if !member && inner.is_none() {
+        return kind;
+    }
     if g2d::read_palette_tiles(inner.as_deref().unwrap_or(data)).is_some() { Kind::PaletteTiles } else { kind }
+}
+
+/// Un `.bin` qui dit ce qu'il est par son nom (`JungleTiles.bin`, `LevelPalette.bin`) ou par son dossier (`file/bg/` d'Eyeshield 21).
+fn guess_file_format(kind: Kind, path: &str, data: &[u8]) -> Kind {
+    if kind != Kind::Other || !path.to_lowercase().ends_with(".bin") {
+        return kind;
+    }
+    let (lower, stem) = (path.to_lowercase(), stem_of(path));
+    let size = decompress_any(data).map_or(data.len(), |inner| inner.len());
+    if size == 0 {
+        kind
+    } else if stem.ends_with("palette") && size % 2 == 0 {
+        Kind::RawPalette
+    } else if (stem.ends_with("tiles") || lower.contains("/bg/")) && size % 32 == 0 {
+        Kind::RawTiles
+    } else {
+        kind
+    }
 }
 
 /// Les morceaux d'un fichier qui commence par une table de positions : la première donne la taille de la table, elles
@@ -223,7 +246,7 @@ fn by_extension(kind: Kind, name: &str) -> Kind {
         return kind;
     }
     match name.rsplit_once('.').map(|(_, ext)| ext.to_lowercase()).as_deref() {
-        Some("nbfc" | "char" | "ncg") => Kind::RawTiles,
+        Some("nbfc" | "char" | "ncg" | "chr") => Kind::RawTiles,
         Some("nbfp" | "ntfp" | "plt" | "ncl" | "pal" | "plb") => Kind::RawPalette,
         Some("ntft") => Kind::RawTexture,
         Some("bstga") => Kind::BsTexture,
@@ -541,12 +564,68 @@ pub struct Choices {
 
 /// Les fichiers d'une sorte qui vont le mieux avec `sel` : même dossier d'abord, puis le nom
 /// le plus proche ; tout le jeu s'il n'y en a aucun dans le dossier.
+/// Le numéro d'un morceau d'archive sans nom (`x.narc#12`).
+fn member_number(entry: &Entry) -> Option<usize> {
+    if !entry.stem.is_empty() {
+        return None;
+    }
+    entry.path.rsplit_once('#')?.1.parse().ok()
+}
+
+/// Les écrans qui assemblent une planche de tuiles : dans une archive sans noms, ceux qui la suivent et se servent de
+/// presque toute la planche (Pokémon Perle : `batt_bg.narc#15` n'a que faire de l'écran qui le suit) ; sinon ceux qui
+/// ont son nom ou qui la nomment.
+fn screens_for(entries: &[Entry], sel: usize) -> Vec<usize> {
+    const MAX_READ: usize = 40;
+    let me = &entries[sel];
+    if member_number(me).is_some() {
+        let Some(count) = read_entry(me).ok().and_then(|b| g2d::read_tiles(&b).ok()).map(|t| t.count()) else { return Vec::new() };
+        let uses_the_sheet = |e: &Entry| read_entry(e).ok().and_then(|b| g2d::read_screen(&b).ok()).is_some_and(|s| s.entries.iter().map(|e| (e & 0x3FF) as usize + 1).max().unwrap_or(0) * 2 >= count);
+        return entries.iter().enumerate().skip(sel + 1).take_while(|(_, e)| e.dir == me.dir && e.kind == Kind::Screen).filter(|(_, e)| uses_the_sheet(e)).map(|(i, _)| i).collect();
+    }
+    let file_name = me.path.rsplit('/').next().unwrap_or(&me.path).to_lowercase();
+    let names_me = |e: &Entry| read_entry(e).ok().and_then(|b| g2d::link_name(&b)).is_some_and(|name| name.eq_ignore_ascii_case(&file_name));
+    companions(entries, sel, &[Kind::Screen]).into_iter().filter(|&i| entries[i].dir == me.dir).take(MAX_READ).filter(|&i| entries[i].stem == me.stem || names_me(&entries[i])).collect()
+}
+
+/// Dans une archive sans noms, la palette de tuiles 8 bits : celle qui donne une couleur au plus de pixels différents, la
+/// plus proche à égalité. La plus proche tout court tombe souvent sur des couleurs vides (Pokémon Perle). Une archive
+/// trop grosse coûterait trop cher à relire pour chaque palette.
+fn best_palette(entries: &[Entry], sel: usize, palettes: &[usize]) -> usize {
+    const MAX_ARCHIVE: usize = 8 << 20;
+    const MAX_TRIED: usize = 128;
+    let me = &entries[sel];
+    if member_number(me).is_none() || me.span.1 - me.span.0 > MAX_ARCHIVE {
+        return 0;
+    }
+    let Some(tiles) = read_entry(me).ok().and_then(|b| g2d::read_tiles(&b).ok()).filter(|t| t.bpp8) else { return 0 };
+    let mut used = [false; 256];
+    tiles.pixels.iter().for_each(|p| used[*p as usize] = true);
+    let colored = |&i: &usize| {
+        let Some(palette) = read_entry(&entries[i]).ok().and_then(|b| g2d::read_palette(&b).ok()) else { return 0 };
+        palette.colors.iter().enumerate().filter(|(index, color)| used.get(*index) == Some(&true) && color[..3] != [0, 0, 0]).count()
+    };
+    let mut best = (0, 0);
+    for (n, count) in palettes.iter().take(MAX_TRIED).map(colored).enumerate() {
+        if count > best.1 {
+            best = (n, count);
+        }
+    }
+    best.0
+}
+
 fn companions(entries: &[Entry], sel: usize, kinds: &[Kind]) -> Vec<usize> {
     let me = &entries[sel];
     let closeness = |e: &Entry| {
         // rom.bin : les fichiers qui vont ensemble ont des numéros proches
         if let (Some(a), Some(b)) = (me.rom_index, e.rom_index) {
             return (false, std::cmp::Reverse(usize::MAX - a.abs_diff(b) as usize));
+        }
+        // Archive sans noms : le plus proche, d'abord parmi ceux qui suivent (Pokémon : les tuiles, puis leurs palettes)
+        if let (Some(a), Some(b)) = (member_number(me), member_number(e)) {
+            const BEFORE: usize = 1 << 24;
+            let gap = if b > a { b - a } else { a - b + BEFORE };
+            return (false, std::cmp::Reverse(usize::MAX - gap));
         }
         let common = me.stem.chars().zip(e.stem.chars()).take_while(|(a, b)| a == b).count();
         (e.stem != me.stem, std::cmp::Reverse(common))
@@ -602,8 +681,11 @@ pub fn choices_for(entries: &[Entry], sel: usize) -> Choices {
     match kind {
         Kind::Tiles | Kind::Screen | Kind::Cells => {
             c.palettes = companions(entries, sel, &[Kind::Palette]);
-            if kind != Kind::Tiles {
-                c.tiles = companions(entries, sel, &[Kind::Tiles]);
+            if kind == Kind::Tiles {
+                c.linked = screens_for(entries, sel);
+                c.palette = best_palette(entries, sel, &c.palettes);
+            } else {
+                c.tiles = companions(entries, sel, &[Kind::Tiles, Kind::RawTiles]);
             }
         }
         Kind::CellAnim => {
@@ -623,7 +705,15 @@ pub fn choices_for(entries: &[Entry], sel: usize) -> Choices {
             c.linked = target.into_iter().collect();
             c.palettes = texture_palettes(entries, Some(sel), sel);
         }
-        Kind::RawTiles | Kind::RawTexture => c.palettes = companions(entries, sel, &[Kind::RawPalette]),
+        Kind::RawTiles | Kind::RawTexture => {
+            c.palettes = companions(entries, sel, &[Kind::RawPalette]);
+            // Une palette au nom sans rapport colore n'importe comment : mieux vaut du gris, et la choisir à la main
+            const NAME_MATCH: usize = 4;
+            let named = |&i: &usize| entries[i].stem.chars().zip(entries[sel].stem.chars()).take_while(|(a, b)| a == b).count() >= NAME_MATCH;
+            if kind == Kind::RawTiles && !c.palettes.iter().any(named) {
+                c.palette = c.palettes.len();
+            }
+        }
         Kind::RawScreen => {
             c.tiles = companions(entries, sel, &[Kind::RawTiles]);
             c.palettes = companions(entries, sel, &[Kind::RawPalette]);
@@ -778,6 +868,33 @@ fn audio(sound: sadl::Sound, extra: String) -> Decoded {
 }
 
 /// Sans palette : niveaux de gris.
+/// Certains `.z` sont compressés plusieurs fois (Huffman puis LZ).
+fn fully_unpacked(mut bytes: Vec<u8>) -> Vec<u8> {
+    const MAX_LAYERS: usize = 3;
+    for _ in 0..MAX_LAYERS {
+        match decompress_any(&bytes) {
+            Some(inner) => bytes = inner,
+            None => break,
+        }
+    }
+    bytes
+}
+
+/// Les matériaux d'un maillage de Tom and Jerry, un par morceau : `world/x.xof` les liste pour `world/mesh/x.z`.
+fn z_mesh_materials(entries: &[Entry], sel: usize) -> Vec<String> {
+    let path = entries[sel].path.replace("/mesh/", "/");
+    let Some(xof) = path.strip_suffix(".z").and_then(|p| entry_at(entries, &format!("{p}.xof"))) else { return Vec::new() };
+    let Ok(text) = read_entry(&entries[xof]) else { return Vec::new() };
+    String::from_utf8_lossy(&text).lines().filter(|line| line.starts_with("STRUCTOR")).filter_map(|line| line.split_whitespace().nth(2).map(str::to_string)).collect()
+}
+
+/// La texture d'un matériau : `01_bucket` est dessiné avec `world/tex/01_bucket.z`, `BR_glass_e` avec `world/tex/BR_glass.z`.
+fn z_texture(entries: &[Entry], material: &str) -> Option<Rgba> {
+    let short = material.rsplit_once('_').map_or(material, |(name, _)| name);
+    let at = entry_at(entries, &format!("world/tex/{material}.z")).or_else(|| entry_at(entries, &format!("world/tex/{short}.z")))?;
+    g2d::read_z_image(&fully_unpacked(read_entry(&entries[at]).ok()?))
+}
+
 fn grey_palette(tiles: &g2d::Tiles) -> g2d::Palette {
     g2d::Palette { colors: (0..256).map(|i| if tiles.bpp8 { [i as u8, i as u8, i as u8, 255] } else { let v = (i % 16 * 17) as u8; [v, v, v, 255] }).collect() }
 }
@@ -793,16 +910,22 @@ fn decode_inner(entries: &[Entry], sel: usize, c: &mut Choices) -> Result<Decode
         }
         Kind::Tiles | Kind::Screen | Kind::Cells => {
             let tiles_bytes = if kind == Kind::Tiles { Some(bytes.clone()) } else { load(&c.tiles, c.tile)? };
-            let tiles = g2d::read_tiles(tiles_bytes.as_deref().ok_or(tr("no tile file (.ncgr) found", "aucun fichier de tuiles (.ncgr) trouve"))?).map_err(|e| e.to_string())?;
-            let palette = match load(&c.palettes, c.palette)? {
-                Some(p) => g2d::read_palette(&p).map_err(|e| e.to_string())?,
-                None => grey_palette(&tiles),
-            };
-            c.banks = if tiles.bpp8 { 1 } else { palette.banks() };
+            let tiles_bytes = tiles_bytes.ok_or(tr("no tile file (.ncgr) found", "aucun fichier de tuiles (.ncgr) trouve"))?;
+            let own_palette = load(&c.palettes, c.palette)?.map(|p| g2d::read_palette(&p).map_err(|e| e.to_string())).transpose()?;
+            // Les tuiles d'un écran peuvent être brutes (`.chr` de Pokémon Dash)
+            let chosen_raw = c.tiles.get(c.tile).is_some_and(|&i| entries[i].kind == Kind::RawTiles);
+            let tiles = if kind != Kind::Tiles && chosen_raw { g2d::raw_tiles(&tiles_bytes, own_palette.as_ref()) } else { g2d::read_tiles(&tiles_bytes).map_err(|e| e.to_string())? };
+            let palette = own_palette.unwrap_or_else(|| grey_palette(&tiles));
+            c.banks = if tiles.bpp8 || !tiles.attrs.is_empty() { 1 } else { palette.banks() };
             c.bank = c.bank.min(c.banks.saturating_sub(1));
             let what = t!("{} tiles {} bpp{}", "{} tuiles {} bpp{}", tiles.count(), if tiles.bpp8 { 8 } else { 4 }, if tiles.linear { " (bitmap)" } else { "" });
             match kind {
                 Kind::Tiles => {
+                    // Une planche est rangée sans égard pour l'image : son écran la remet dans l'ordre
+                    if let Some(screen) = load(&c.linked, c.link)?.and_then(|s| g2d::read_screen(&s).ok()) {
+                        c.width = 0;
+                        return Ok(Decoded::Image { rgba: g2d::render_screen(&screen, &tiles, &palette), info: t!("screen {}x{}, {what}", "ecran {}x{}, {what}", screen.width, screen.height) });
+                    }
                     if c.width == 0 {
                         c.width = tiles.default_width();
                     }
@@ -980,7 +1103,19 @@ fn decode_inner(entries: &[Entry], sel: usize, c: &mut Choices) -> Result<Decode
         }
         Kind::AnmFile => Ok(Decoded::Text { lines: anm_lines(&bytes), info: t!("Animation not played: its content", "Animation pas jouee : son contenu") }),
         Kind::ZImage => {
-            let inner = decompress_any(&bytes).unwrap_or_else(|| bytes.clone());
+            let inner = fully_unpacked(bytes.clone());
+            let name = entries[sel].stem.clone();
+            let materials = z_mesh_materials(entries, sel);
+            let textured = std::cell::Cell::new(0);
+            let texture_of = |part: usize| {
+                let image = materials.get(part).and_then(|material| z_texture(entries, material));
+                textured.set(textured.get() + usize::from(image.is_some()));
+                image
+            };
+            let is_mesh = entries[sel].path.contains("/mesh/");
+            if let Some(model) = is_mesh.then(|| gx_mesh::read_world_mesh(&inner, &name, texture_of)).flatten() {
+                return Ok(Decoded::Model { model, own_textures: textured.get() });
+            }
             match g2d::read_z_image(&inner) {
                 Some(rgba) => {
                     let info = format!("{}x{}", rgba.width, rgba.height);
@@ -1019,13 +1154,14 @@ fn decode_inner(entries: &[Entry], sel: usize, c: &mut Choices) -> Result<Decode
             Ok(Decoded::Text { lines, info })
         }
         Kind::RawPalette => {
-            let p = g2d::raw_palette(&bytes);
+            let p = g2d::raw_palette(&decompress_any(&bytes).unwrap_or_else(|| bytes.clone()));
             Ok(Decoded::Image { rgba: p.swatches(), info: t!("{} colors", "{} couleurs", p.colors.len()) })
         }
         Kind::RawTiles | Kind::RawScreen => {
-            let palette = load(&c.palettes, c.palette)?.map(|p| g2d::raw_palette(&p));
+            let unpacked = |b: Vec<u8>| decompress_any(&b).unwrap_or(b);
+            let palette = load(&c.palettes, c.palette)?.map(|p| g2d::raw_palette(&unpacked(p)));
             let tiles_bytes = if kind == Kind::RawTiles { Some(bytes.clone()) } else { load(&c.tiles, c.tile)? };
-            let tiles = g2d::raw_tiles(&tiles_bytes.ok_or(tr("no tile file (.nbfc) found", "aucun fichier de tuiles (.nbfc) trouve"))?, palette.as_ref());
+            let tiles = g2d::raw_tiles(&unpacked(tiles_bytes.ok_or(tr("no tile file (.nbfc) found", "aucun fichier de tuiles (.nbfc) trouve"))?), palette.as_ref());
             let palette = palette.unwrap_or_else(|| grey_palette(&tiles));
             if kind == Kind::RawScreen {
                 let screen = g2d::raw_screen(&bytes);
