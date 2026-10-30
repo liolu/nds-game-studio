@@ -26,8 +26,7 @@ La fenêtre du studio s'ouvre sur le launcher, la bibliothèque des jeux de l'ut
   - **Jouer** : lance le module natif du jeu, reconnu par le `game_code` de son `game.toml`. Il n'y a
     pas d'émulation : un jeu devient jouable avec sa décompilation et le runtime (étape 6 de la
     feuille de route de DS Decomp Studio, pas encore écrite). Sans module, le bouton le dit ;
-  - **Moding** : la fenêtre Assets (F6) sur le projet de décompilation de ce jeu, trouvé par son code,
-    et la fenêtre Code (F5) ;
+  - **Moding** : la fenêtre Assets (F6) sur la rom de ce jeu et la fenêtre Code (F5) ;
   - **Description** : ce que dit la rom ;
   - **Parametres** : le fichier de la rom, le dossier des roms, retirer le jeu (deux clics, efface le fichier).
 - **Options**, toujours en bas à droite : la fenêtre Options (F1), avec une page Launcher (vue, dossier
@@ -93,14 +92,13 @@ Ajouter une manette : un fichier `crates/engine/controllers/<id>.toml` (format d
   Code et le jeu continue avec l'ancien code.
 - Marche avec le dépôt sur le PC (compilation locale), pas dans une version installée.
 
-## Assets des jeux décompilés (F6)
+## Assets des jeux (F6)
 
-**F6** (ou Options > Développement) ouvre la fenêtre « Assets » : les fichiers des jeux DS
-décompilés, pour voir leurs modèles 3D et leurs images et nommer les objets du jeu.
+**F6** (ou Options > Développement, ou l'onglet Moding d'un jeu) ouvre la fenêtre « Assets » : les
+fichiers des jeux, pour voir leurs modèles 3D et leurs images et nommer les objets du jeu.
 
-- Les jeux sont les dossiers `<projets>/<jeu>/extract/<version>/files` (NitroFS extrait par dsd).
-  `<projets>` = `--projects=<dossier>`, ou la variable `NDS_DECOMP_PROJECTS`, ou
-  `D:\... logiciel\decomp\decomp ds\projets`.
+- Les jeux sont les roms du launcher (dossier `rom`) : tout est lu **dans la rom**, sans extraction et
+  sans dossier de travail.
 - La liste donne le **chemin de chaque fichier dans NitroFS** (celui que le code du jeu charge ;
   `archive.narc#n` = n-ième fichier d'une archive NARC). Les fichiers sont reconnus par leur
   signature (aussi compressés en LZ77). Taper du texte filtre, Retour arrière / Échap efface, la
@@ -111,24 +109,24 @@ décompilés, pour voir leurs modèles 3D et leurs images et nommer les objets d
   textures `.nsbtx`, palettes `.nclr`, tuiles `.ncgr` / `.ncbr`, écrans `.nscr`, cellules `.ncer`.
   La palette et les tuiles qui vont avec sont devinées (même dossier, nom le plus proche) et se
   changent avec les flèches `<` `>`. Les formats maison (Traveller's Tales, EA...) ne sont pas lus.
-- **rom.bin** (Lego Star Wars II, Les Sims 2...) : les fichiers de l'archive numérotée, une fois
-  sortis dans `<jeu>/build/romarc` par `python ../../studio/gametools/romarc.py extract` (lancé dans
-  le dossier du jeu), sont listés `rom.bin#n` (filtre « rom.bin »). « Copier le chemin » copie
-  alors le numéro n seul, la clé de DS Decomp Studio (onglet Data, « Archive (rom.bin) »). Un
-  modèle sans textures prend le `.nsbtx` au numéro le plus proche qui les a (flèches pour en
-  changer, ou « celles du modele » = sans texture).
+- **rom.bin** (Lego Star Wars II, Les Sims 2...) : les fichiers de l'archive numérotée, lus et
+  dépaquetés depuis la rom, sont listés `rom.bin#n` (filtre « rom.bin »). « Copier le chemin » copie
+  alors le numéro n seul, la clé de DS Decomp Studio (onglet Data, « Archive (rom.bin) »). Un modèle
+  sans textures prend le `.nsbtx` au numéro le plus proche qui les a (flèches pour en changer, ou
+  « celles du modele » = sans texture). Le codeur propre à ces jeux (sorte 6) est réécrit en Rust
+  (`crates/nitro/src/romarc.rs`), rien à exécuter.
 - **Menu des jeux** : de haut en bas, avec une recherche (taper du texte, Entree = premier resultat,
   Echap = fermer) et deux pourcentages. *Extrait* = part des octets de donnees lisibles fichier par
-  fichier : ne comptent pas comme extraits un `rom.bin` pas (tout) sorti, un `.narc` illisible, et tout
+  fichier : ne comptent pas comme extraits un `rom.bin` qui n'est pas une table de fichiers, un `.narc` illisible, et tout
   gros fichier (4 Mo et plus) de signature inconnue, comme `Glob.bin` ; le son et les videos ne
   comptent pas. *Regardable* = part des fichiers (ceux des archives compris) que l'app sait montrer.
 - **Menu des formats** : toutes les extensions des jeux, avec une coche : `[x]` regardable, `[~]` en
   partie, `[!]` l'essai a echoue, `[ ]` pas dans l'app. Un fichier de chaque format de chaque jeu est
   vraiment decode pour le dire. Clic = ne lister que ce format dans le jeu ouvert.
-- Ces chiffres sont calcules en arriere-plan (17 min pour 62 jeux, une seule fois) et gardes dans
-  `assets_index.json` ; un jeu est refait quand son dossier change. Essai sans fenetre :
-  `cargo run --release -p nds-engine --example asset_audit -- <projets> <sortie.tsv> [--fresh]`.
-- Lancer directement : `nds-game-studio --assets=<jeu> --asset=<chemin>`.
+- Ces chiffres sont calcules en arriere-plan (une seule fois par rom) et gardes dans
+  `assets_index.json` ; un jeu est refait quand sa rom change. Essai sans fenetre :
+  `cargo run --release -p nds-engine --example asset_audit -- <dossier des roms> <sortie.tsv> [--fresh]`.
+- Lancer directement : `nds-game-studio --assets=<rom ou titre> --asset=<chemin>`.
 - Lecture des formats : crate `crates/nitro` (la 3D reprend le code
   d'[apicula](https://github.com/scurest/apicula), licence 0BSD).
 

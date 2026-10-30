@@ -1,9 +1,7 @@
-//! Fenêtre Assets (F6) : les fichiers d'un jeu décompilé, modèles 3D et images aux formats
+//! Fenêtre Assets (F6) : les fichiers d'un jeu, lus dans sa rom, modèles 3D et images aux formats
 //! Nintendo standard, pour reconnaître et nommer les objets du jeu.
 //!
-//! - les jeux sont les dossiers `<projets>/<jeu>/extract/<version>/files` (NitroFS extrait par
-//!   dsd) ; `<projets>` = `--projects=<dossier>`, la variable `NDS_DECOMP_PROJECTS`, ou
-//!   `D:\... logiciel\decomp\decomp ds\projets` ;
+//! - les jeux sont les roms du dossier `rom` du launcher (`library`) ;
 //! - la liste montre chaque fichier avec son chemin dans NitroFS (celui que le code du jeu
 //!   charge ; `archive.narc#n` pour le n-ième fichier d'une archive), reconnu par sa signature ;
 //!   taper du texte filtre la liste, la molette la fait défiler ;
@@ -17,14 +15,12 @@
 //! - « Copier le chemin » met le chemin NitroFS dans le presse-papiers (pour le relier aux
 //!   fonctions du jeu dans DS Decomp Studio) ;
 //! - section « rom.bin » : les fichiers de l'archive numérotée rom.bin (Lego Star Wars II, Les
-//!   Sims 2...) sortis par `studio/gametools/romarc.py extract` dans `<jeu>/build/romarc`, montrés
-//!   `rom.bin#n` ; « Copier le chemin » y copie le n° n seul (clé de DS Decomp Studio) et les
+//!   Sims 2...), lus et dépaquetés depuis la rom (`romarc`), montrés `rom.bin#n` ; « Copier le chemin » y copie le n° n seul (clé de DS Decomp Studio) et les
 //!   textures d'un modèle sont cherchées dans les `.nsbtx` aux numéros les plus proches.
 //!
 //! Lecture des formats : crate `nds-nitro` (code d'apicula pour la 3D).
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use bevy::asset::RenderAssetUsages;
@@ -47,6 +43,7 @@ use bevy::window::{WindowRef, WindowResolution};
 use nds_nitro::{model3d, Kind, Rgba};
 
 use crate::i18n::{t, tr, Language, Tr};
+use crate::library;
 use crate::asset_scan::{all_formats, choices_for, decode, find_games, run_index, scan, kind_text, size_text, Choices, Decoded, Entry, FormatStat, GameDir, IndexState};
 
 /// La fenêtre des assets (la fermer ne quitte pas le studio).
@@ -57,7 +54,6 @@ pub struct AssetsWindow;
 #[derive(Message)]
 pub struct ToggleAssets;
 
-const DEFAULT_PROJECTS: &str = r"D:\... logiciel\decomp\decomp ds\projets";
 /// Calque des modèles 3D montrés (ni les jeux ni les écrans ne l'utilisent).
 const LAYER: usize = 24;
 const ROWS: usize = 36;
@@ -112,7 +108,6 @@ pub(crate) struct AssetBrowser {
     camera3d: Option<Entity>,
     light: Option<Entity>,
     view3d: Handle<Image>,
-    root: PathBuf,
     games: Vec<GameDir>,
     game: Option<usize>,
     menu: Menu,
@@ -163,7 +158,6 @@ impl Default for AssetBrowser {
             camera3d: None,
             light: None,
             view3d: Handle::default(),
-            root: PathBuf::new(),
             games: Vec::new(),
             game: None,
             menu: Menu::None,
@@ -257,12 +251,9 @@ pub struct AssetBrowserPlugin;
 impl Plugin for AssetBrowserPlugin {
     fn build(&self, app: &mut App) {
         let mut browser = AssetBrowser::default();
-        let mut projects = std::env::var_os("NDS_DECOMP_PROJECTS").map(PathBuf::from);
         let (mut game, mut file, mut open) = (None, None, false);
         for arg in std::env::args().skip(1) {
-            if let Some(v) = arg.strip_prefix("--projects=") {
-                projects = Some(PathBuf::from(v));
-            } else if arg == "--assets" {
+            if arg == "--assets" {
                 open = true;
             } else if let Some(v) = arg.strip_prefix("--assets=") {
                 (open, game) = (true, Some(v.to_string()));
@@ -274,7 +265,6 @@ impl Plugin for AssetBrowserPlugin {
                 browser.start_menu = Some((if menu == "formats" { Menu::Formats } else { Menu::Games }, query.to_string()));
             }
         }
-        browser.root = projects.unwrap_or_else(|| PathBuf::from(DEFAULT_PROJECTS));
         if open {
             browser.start = Some((game.unwrap_or_default(), file));
         }
@@ -307,19 +297,43 @@ fn matches_words(text: &str, words: &[String]) -> bool {
 // --------------------------------------------------------------------------------------------
 
 impl AssetBrowser {
-    /// Dossier des projets de décompilation.
-    pub(crate) fn projects_root(&self) -> PathBuf {
-        self.root.clone()
+    /// Ouvre la fenêtre (si besoin) sur cette rom (nom de fichier).
+    pub(crate) fn show_game(&mut self, file: &str) {
+        self.start = Some((file.to_string(), None));
     }
 
-    /// Ouvre la fenêtre (si besoin) sur ce projet.
-    pub(crate) fn show_game(&mut self, project: &str) {
-        self.start = Some((project.to_string(), None));
-    }
-
+    /// Une rom par son nom de fichier ou son libellé (« Titre (CODE) », ou son début).
     fn find_game(&self, game: &str) -> Option<usize> {
         let wanted = game.to_lowercase();
-        self.games.iter().position(|g| g.label.to_lowercase() == wanted).or_else(|| self.games.iter().position(|g| !wanted.is_empty() && g.label.to_lowercase().starts_with(&wanted)))
+        let file_is = |g: &GameDir| g.rom.file_name().is_some_and(|n| n.to_string_lossy().to_lowercase() == wanted);
+        self.games.iter().position(file_is).or_else(|| self.games.iter().position(|g| g.label.to_lowercase() == wanted)).or_else(|| self.games.iter().position(|g| !wanted.is_empty() && g.label.to_lowercase().starts_with(&wanted)))
+    }
+
+    /// Relit le dossier des roms (une rom a pu être ajoutée dans le launcher). Si la liste a changé,
+    /// l'index est complété dès que le calcul en cours est fini.
+    fn refresh_games(&mut self) {
+        let current = self.game.map(|g| self.games[g].rom.clone());
+        let found = find_games(&library::rom_dir());
+        let same = found.len() == self.games.len() && found.iter().zip(&self.games).all(|(a, b)| a.rom == b.rom);
+        self.games = found;
+        self.game = current.as_ref().and_then(|rom| self.games.iter().position(|g| g.rom == *rom));
+        if current.is_some() && self.game.is_none() {
+            self.entries.clear();
+            self.selected = None;
+            self.image = None;
+            self.is3d = false;
+            self.info.clear();
+            self.list_dirty = true;
+            self.controls_dirty = true;
+            self.preview_dirty = true;
+        }
+        if !same {
+            let index = self.index.lock().unwrap();
+            if index.done >= index.total {
+                self.index_started = false;
+            }
+            drop(index);
+        }
     }
 
     fn open_menu(&mut self, menu: Menu) {
@@ -365,9 +379,9 @@ impl AssetBrowser {
         self.entries.clear();
         self.format_filter = None;
         let result = Arc::new(Mutex::new(None));
-        let (files, out) = (self.games[index].files.clone(), result.clone());
+        let (rom, out) = (self.games[index].rom.clone(), result.clone());
         std::thread::spawn(move || {
-            let entries = scan(&files);
+            let entries = scan(&rom);
             *out.lock().unwrap() = Some(entries);
         });
         self.scanning = Some(result);
@@ -389,12 +403,9 @@ impl AssetBrowser {
         self.list_dirty = true;
         let viewable = self.entries.iter().filter(|e| e.kind.viewable()).count();
         self.status = t!("{} files, {} viewable (standard Nintendo formats)", "{} fichiers, {} montrables (formats Nintendo standard)", self.entries.len(), viewable);
-        let files = self.game.map(|g| self.games[g].files.clone()).unwrap_or_default();
         let romarc = self.entries.iter().filter(|e| e.rom_index.is_some()).count();
         if romarc > 0 {
-            self.status += &t!(" ; rom.bin: {romarc} files (build/romarc, filter 'rom.bin')", " ; rom.bin : {romarc} fichiers (build/romarc, filtre 'rom.bin')");
-        } else if files.join("rom.bin").is_file() {
-            self.status += tr(" ; rom.bin not extracted yet: in the game folder, python ../../studio/gametools/romarc.py extract", " ; rom.bin pas encore extrait : dans le dossier du jeu, python ../../studio/gametools/romarc.py extract");
+            self.status += &t!(" ; rom.bin: {romarc} files (filter 'rom.bin')", " ; rom.bin : {romarc} fichiers (filtre 'rom.bin')");
         }
         if let Some(i) = self.want_file.take().and_then(|f| self.entries.iter().position(|e| e.path.eq_ignore_ascii_case(&f))) {
             self.filter_entries();
@@ -465,6 +476,7 @@ fn toggle_window(
     }
     // Déjà ouverte et un jeu demandé (launcher) : elle reste ouverte et montre ce jeu
     if let (Some(_), Some((game, _))) = (browser.window, &start) {
+        browser.refresh_games();
         if let Some(i) = browser.find_game(game) {
             browser.menu = Menu::None;
             browser.menu_dirty = true;
@@ -615,13 +627,12 @@ fn toggle_window(
     browser.list_dirty = true;
     browser.controls_dirty = true;
     browser.preview_dirty = true;
-    if browser.games.is_empty() {
-        browser.games = find_games(&browser.root);
-        let root_dir = browser.root.display().to_string();
+    browser.refresh_games();
+    if browser.game.is_none() {
         browser.status = if browser.games.is_empty() {
-            t!("No games in {root_dir} (--projects=<folder> or NDS_DECOMP_PROJECTS)", "Aucun jeu dans {root_dir} (--projects=<dossier> ou NDS_DECOMP_PROJECTS)")
+            tr("No games: drag a rom into the launcher", "Aucun jeu : glissez une rom dans le launcher").to_string()
         } else {
-            t!("{} games in {root_dir}: choose a game", "{} jeux dans {root_dir} : choisissez un jeu", browser.games.len())
+            t!("{} games: choose a game", "{} jeux : choisissez un jeu", browser.games.len())
         };
     }
     browser.menu = if browser.game.is_none() && !browser.games.is_empty() { Menu::Games } else { Menu::None };
@@ -631,8 +642,8 @@ fn toggle_window(
     // Pourcentages et formats de tous les jeux, calculés une fois puis gardés
     if !browser.index_started {
         browser.index_started = true;
-        let (root_dir, state) = (browser.root.clone(), browser.index.clone());
-        std::thread::spawn(move || run_index(&root_dir, &state, false));
+        let state = browser.index.clone();
+        std::thread::spawn(move || run_index(&library::rom_dir(), &state, false));
     }
     if let Some((game, file)) = start {
         if let Some(i) = browser.find_game(&game) {
