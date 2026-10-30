@@ -74,6 +74,8 @@ pub struct WindowOptions {
 
 /// Position que Windows donne à une fenêtre réduite (-32000) : jamais une vraie place.
 const MINIMIZED_POS: i32 = -30000;
+/// Largeur en dessous de laquelle la page d'un jeu du launcher ne tient plus.
+const MIN_LAUNCHER_W: f32 = 960.0;
 
 /// Tout ce qui est gardé dans options.toml.
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
@@ -214,8 +216,11 @@ impl Plugin for SettingsPlugin {
             if let (None, Some([x, y]), false) = (cli.at, player.window.position, minimized) {
                 window.position = WindowPosition::At(IVec2::new(x, y));
             }
-            if let (None, Some([w, h]), false) = (cli.size, player.window.size, minimized) {
-                window.resolution = WindowResolution::new(w.max(128.0) as u32, h.max(128.0) as u32);
+            // Une fenêtre étroite (taille d'un jeu, anciennes versions) : la taille du launcher
+            if let (None, Some([w, h]), false) = (cli.size, player.window.size, minimized)
+                && w >= MIN_LAUNCHER_W
+            {
+                window.resolution = WindowResolution::new(w as u32, h.max(128.0) as u32);
             }
             if player.display.fullscreen {
                 window.mode = WindowMode::BorderlessFullscreen(MonitorSelection::Current);
@@ -248,7 +253,7 @@ fn maximize_at_start(mut commands: Commands, screens: Option<Res<DsScreens>>, mu
     commands.remove_resource::<MaximizeAtStart>();
 }
 
-/// Retour au menu : la spécification du studio a remis le rendu HD (et le jeu a pu changer le
+/// Retour au launcher : la spécification du studio a remis le rendu HD (et le jeu a pu changer le
 /// format), on remet les choix du joueur.
 fn restore_on_menu(
     state: Option<Res<State<StudioState>>>,

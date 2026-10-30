@@ -18,6 +18,7 @@ use bevy::window::{CursorIcon, SystemCursorIcon};
 use bevy::winit::WINIT_WINDOWS;
 
 use crate::screens::{DisplayCamera, ScreenLayout};
+use crate::studio::StudioState;
 
 /// Hauteur de la barre de titre (pixels logiques), comme celle de Windows 11.
 pub const TITLE_H: f32 = 32.0;
@@ -184,6 +185,8 @@ fn despawn_orphans(mut commands: Commands, bars: Query<(Entity, &TitleBar)>, win
 }
 
 fn refresh_title_bars(
+    state: Res<State<StudioState>>,
+    mut title_buttons: Query<(&TitleButton, &mut Node), Without<FusionIcon>>,
     layout: Res<ScreenLayout>,
     windows: Query<&Window>,
     mut texts: Query<(&TitleText, &mut Text)>,
@@ -194,6 +197,13 @@ fn refresh_title_bars(
             && text.0 != window.title
         {
             text.0 = window.title.clone();
+        }
+    }
+    // Le launcher n'a pas d'écrans à fusionner
+    let fusion = if *state.get() == StudioState::Playing { Display::Flex } else { Display::None };
+    for (button, mut node) in &mut title_buttons {
+        if button.action == Action::Fusion && node.display != fusion {
+            node.display = fusion;
         }
     }
     // Fusionnés : les deux écrans collés ; séparés : écartés
