@@ -63,6 +63,20 @@ impl Entry {
             _ => "(sans extension)".into(),
         }
     }
+
+    /// Le dossier du fichier dans la liste : une archive en est un, avec les sous-dossiers que donnent les noms de ses fichiers.
+    pub fn folder(&self) -> String {
+        match self.member_name.as_deref().and_then(|name| name.rsplit_once('/')) {
+            Some((parent, _)) if self.member.is_some() && !parent.trim_matches('/').is_empty() => format!("{}/{}", self.dir, parent.trim_matches('/')),
+            _ => self.dir.clone(),
+        }
+    }
+
+    /// Le nom du fichier, sans ses dossiers.
+    pub fn short_name(&self) -> &str {
+        let name = self.member_name.as_deref().unwrap_or(&self.path);
+        name.rsplit('/').next().unwrap_or(name)
+    }
 }
 
 /// Les roms du dossier : « Titre (CODE) ».

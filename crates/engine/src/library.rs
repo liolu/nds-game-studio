@@ -1,6 +1,9 @@
 //! La bibliothèque du launcher, sans interface : les roms du dossier `rom` (à côté du launcher),
 //! ce qu'on lit dans leur en-tête (nom, éditeur, icône), l'ajout d'une rom et les préférences.
 //!
+//! Les dossiers de jeux sont de vrais sous-dossiers de `rom` : une rom y est désignée par son chemin relatif
+//! (`Nintendo/jeu.nds`, avec des `/` partout), et les favoris d'une rom à la racine restent valables.
+//!
 //! Les roms ne sont jamais émulées : elles identifient le jeu (code `AQIE`...) pour trouver son module
 //! natif, et donnent ses fichiers à la fenêtre Assets (F6) et au runtime.
 
@@ -22,6 +25,7 @@ const TITLE_LANGUAGES: [usize; 6] = [2, 1, 3, 5, 4, 0];
 
 #[derive(Clone, Debug)]
 pub struct RomInfo {
+    /// Chemin relatif au dossier des roms (voir plus haut).
     pub file: String,
     pub path: PathBuf,
     pub title: String,
@@ -161,23 +165,110 @@ fn has_rom_extension(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("nds") || e.eq_ignore_ascii_case("dsi"))
 }
 
-/// Ce qui change quand le dossier change : noms et tailles triés.
+fn walk(dir: &Path, prefix: &str, stamp: &mut Vec<(String, u64)>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let relative = format!("{prefix}{name}");
+        // Un lien symbolique n'est pas suivi : pas de boucle possible
+        if entry.file_type().is_ok_and(|t| t.is_dir()) {
+            if !name.starts_with('.') {
+                let folder = format!("{relative}/");
+                walk(&entry.path(), &folder, stamp);
+                stamp.push((folder, 0));
+            }
+        } else if has_rom_extension(&entry.path()) {
+            stamp.push((relative, entry.metadata().map_or(0, |m| m.len())));
+        }
+    }
+}
+
+/// Ce qui change quand le dossier change : les roms (chemin relatif, taille) et les sous-dossiers (`nom/`, 0), triés.
 pub fn folder_stamp(dir: &Path) -> Vec<(String, u64)> {
-    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
-    let mut stamp: Vec<(String, u64)> = entries
-        .flatten()
-        .filter(|e| has_rom_extension(&e.path()))
-        .map(|e| (e.file_name().to_string_lossy().into_owned(), e.metadata().map_or(0, |m| m.len())))
-        .collect();
+    let mut stamp = Vec::new();
+    walk(dir, "", &mut stamp);
     stamp.sort();
     stamp
 }
 
-/// Les roms du dossier, triées par titre (les fichiers illisibles sont ignorés).
+/// Les sous-dossiers, chemins relatifs sans `/` à la fin.
+pub fn folders_in(stamp: &[(String, u64)]) -> Vec<String> {
+    stamp.iter().filter_map(|(name, _)| name.strip_suffix('/').map(str::to_string)).collect()
+}
+
+/// Les roms du dossier et de ses sous-dossiers, triées par titre (les fichiers illisibles sont ignorés).
 pub fn scan_roms(dir: &Path) -> Vec<RomInfo> {
-    let mut roms: Vec<RomInfo> = folder_stamp(dir).iter().filter_map(|(name, _)| read_rom(&dir.join(name)).ok()).collect();
+    let mut roms: Vec<RomInfo> = folder_stamp(dir)
+        .iter()
+        .filter(|(name, _)| !name.ends_with('/'))
+        .filter_map(|(name, _)| {
+            let mut info = read_rom(&dir.join(name)).ok()?;
+            info.file = name.clone();
+            Some(info)
+        })
+        .collect();
     roms.sort_by_key(|r| r.title.to_lowercase());
     roms
+}
+
+/// Le dossier d'une rom ou d'un dossier (chemin relatif) ; vide à la racine.
+pub fn parent_of(relative: &str) -> &str {
+    relative.rsplit_once('/').map_or("", |(parent, _)| parent)
+}
+
+/// Le dernier élément d'un chemin relatif.
+pub fn last_name(relative: &str) -> &str {
+    relative.rsplit('/').next().unwrap_or(relative)
+}
+
+fn join_relative(folder: &str, name: &str) -> String {
+    if folder.is_empty() { name.to_string() } else { format!("{folder}/{name}") }
+}
+
+/// Le chemin d'un sous-dossier (vide = le dossier des roms).
+pub fn folder_path(dir: &Path, folder: &str) -> PathBuf {
+    if folder.is_empty() { dir.to_path_buf() } else { dir.join(folder) }
+}
+
+/// Un nom qui reste un seul dossier sur tous les systèmes (les caractères interdits sous Windows sont refusés partout :
+/// le dossier des roms peut changer de machine).
+fn valid_folder_name(name: &str) -> bool {
+    const MAX_NAME: usize = 64;
+    !name.is_empty() && name.chars().count() <= MAX_NAME && !name.starts_with('.') && !name.ends_with('.') && !name.chars().any(|c| c.is_control() || "/\\:*?\"<>|".contains(c))
+}
+
+/// Crée un dossier de jeux dans `parent` ; rend son chemin relatif.
+pub fn create_folder(dir: &Path, parent: &str, name: &str) -> Result<String, String> {
+    let name = name.trim();
+    if !valid_folder_name(name) {
+        return Err(t!("Invalid folder name: {name}", "Nom de dossier invalide : {name}"));
+    }
+    let relative = join_relative(parent, name);
+    let path = dir.join(&relative);
+    if path.exists() {
+        return Err(t!("{name} already exists", "{name} existe deja"));
+    }
+    std::fs::create_dir_all(&path).map_err(|e| format!("{name} : {e}"))?;
+    Ok(relative)
+}
+
+/// Retire un dossier de jeux vide (jamais une rom).
+pub fn remove_folder(dir: &Path, folder: &str) -> Result<(), String> {
+    std::fs::remove_dir(dir.join(folder)).map_err(|e| format!("{folder} : {e}"))
+}
+
+/// Range une rom dans un dossier, sans jamais écraser un fichier ; rend son nouveau chemin relatif.
+pub fn move_rom(dir: &Path, file: &str, folder: &str) -> Result<String, String> {
+    let relative = join_relative(folder, last_name(file));
+    if relative == file {
+        return Ok(relative);
+    }
+    let target = dir.join(&relative);
+    if target.exists() {
+        return Err(t!("{relative} already exists", "{relative} existe deja"));
+    }
+    std::fs::rename(dir.join(file), &target).map_err(|e| format!("{file} : {e}"))?;
+    Ok(relative)
 }
 
 /// Résultat de l'ajout d'une rom : son titre, et si elle était déjà dans le dossier.
@@ -342,6 +433,41 @@ mod tests {
         let names: Vec<String> = folder_stamp(&dir).into_iter().map(|(n, _)| n).collect();
         assert_eq!(names, ["jeu.nds", "jeu_2.nds"]);
         assert_eq!(scan_roms(&dir)[0].title, "Autre");
+    }
+
+    #[test]
+    fn roms_in_subfolders() {
+        let dir = temp_dir("folders");
+        std::fs::write(dir.join("a.nds"), fake_rom("A\nEditeur")).unwrap();
+        assert_eq!(create_folder(&dir, "", "  Nintendo ").unwrap(), "Nintendo");
+        assert_eq!(create_folder(&dir, "Nintendo", "Mario").unwrap(), "Nintendo/Mario");
+        assert!(create_folder(&dir, "", "Nintendo").is_err(), "existe deja");
+        for name in ["", "  ", "..", ".cache", "a/b", "a\\b", "a:b", "fin."] {
+            assert!(create_folder(&dir, "", name).is_err(), "{name}");
+        }
+        std::fs::write(dir.join("Nintendo/Mario/b.nds"), fake_rom("B\nEditeur")).unwrap();
+        std::fs::write(dir.join("Nintendo/photo.txt"), "pas une rom").unwrap();
+
+        let stamp = folder_stamp(&dir);
+        assert_eq!(folders_in(&stamp), ["Nintendo", "Nintendo/Mario"]);
+        let files: Vec<String> = scan_roms(&dir).into_iter().map(|r| r.file).collect();
+        assert_eq!(files, ["a.nds", "Nintendo/Mario/b.nds"]);
+        assert_eq!(parent_of("Nintendo/Mario/b.nds"), "Nintendo/Mario");
+        assert_eq!(parent_of("a.nds"), "");
+        assert_eq!(last_name("Nintendo/Mario"), "Mario");
+
+        assert_eq!(move_rom(&dir, "a.nds", "Nintendo").unwrap(), "Nintendo/a.nds");
+        assert!(dir.join("Nintendo/a.nds").exists() && !dir.join("a.nds").exists());
+        assert_eq!(move_rom(&dir, "Nintendo/a.nds", "Nintendo").unwrap(), "Nintendo/a.nds", "deja rangee");
+        // Même nom ailleurs : refusé, rien n'est écrasé
+        std::fs::write(dir.join("a.nds"), fake_rom("Autre\nEditeur")).unwrap();
+        assert!(move_rom(&dir, "a.nds", "Nintendo").is_err());
+        assert_eq!(read_rom(&dir.join("Nintendo/a.nds")).unwrap().title, "A");
+        assert_eq!(move_rom(&dir, "Nintendo/Mario/b.nds", "").unwrap(), "b.nds");
+
+        assert!(remove_folder(&dir, "Nintendo").is_err(), "pas vide");
+        remove_folder(&dir, "Nintendo/Mario").unwrap();
+        assert!(!dir.join("Nintendo/Mario").exists());
     }
 
     #[test]

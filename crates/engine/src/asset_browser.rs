@@ -4,7 +4,9 @@
 //! - les jeux sont les roms du dossier `rom` du launcher (`library`) ;
 //! - la liste montre chaque fichier avec son chemin dans NitroFS (celui que le code du jeu
 //!   charge ; `archive.narc#n` pour le n-ième fichier d'une archive), reconnu par sa signature ;
-//!   taper du texte filtre la liste, la molette la fait défiler ;
+//!   taper du texte filtre la liste (dans tout le jeu), la molette la fait défiler ;
+//! - la liste se parcourt par dossiers, et une archive s'ouvre comme un dossier (clic pour entrer, `..` ou
+//!   Retour arrière pour remonter) ; le bouton « A plat » montre tous les fichiers d'un coup ;
 //! - clic = aperçu : `.nsbmd` en 3D (glisser = tourner, clic droit / milieu = déplacer, molette =
 //!   zoom), textures `.nsbtx`, palettes `.nclr`, tuiles `.ncgr`/`.ncbr`, écrans `.nscr`, cellules
 //!   `.ncer` ; la palette, les tuiles ou les textures qui vont avec sont devinées (même dossier,
@@ -22,6 +24,7 @@
 
 pub mod review;
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -142,6 +145,12 @@ pub(crate) struct AssetBrowser {
     index_seen: u64,
     entries: Arc<Vec<Entry>>,
     shown: Vec<usize>,
+    /// Vue par dossiers : le dossier ouvert (vide = la racine), les lignes de dossiers avant ses fichiers, et où
+    /// chaque dossier en était quand on l'a quitté.
+    folder_mode: bool,
+    folder: String,
+    folders: Vec<FolderLine>,
+    folder_scroll: HashMap<String, usize>,
     filter: String,
     /// Format choisi dans le menu des formats : seuls ses fichiers sont listés.
     format_filter: Option<String>,
@@ -186,6 +195,14 @@ pub(crate) struct AssetBrowser {
     preview_serial: u64,
 }
 
+/// Une ligne de dossier : où elle mène, ce qu'elle affiche, ses fichiers (`None` pour `..`).
+#[derive(Clone)]
+struct FolderLine {
+    path: String,
+    name: String,
+    files: Option<usize>,
+}
+
 /// Les vignettes à dessiner (plusieurs fils) et celles qui sont prêtes.
 #[derive(Default)]
 struct ThumbJobs {
@@ -200,6 +217,13 @@ struct GridThumb(usize);
 
 #[derive(Component)]
 struct GridToggle;
+
+#[derive(Component)]
+struct FolderToggle;
+
+/// Une ligne ou une tuile qui ouvre ce dossier.
+#[derive(Component)]
+struct FolderRow(String);
 
 struct ModelAnim {
     meshes: Vec<Handle<Mesh>>,
@@ -233,6 +257,10 @@ impl Default for AssetBrowser {
             index_seen: 0,
             entries: Arc::new(Vec::new()),
             shown: Vec::new(),
+            folder_mode: true,
+            folder: String::new(),
+            folders: Vec::new(),
+            folder_scroll: HashMap::new(),
             filter: String::new(),
             format_filter: None,
             all_files: false,
@@ -379,6 +407,40 @@ impl AssetBrowser {
         if self.grid { GRID_COLUMNS * GRID_LINES } else { ROWS }
     }
 
+    /// Les lignes de la liste : les dossiers, puis les fichiers.
+    fn row_count(&self) -> usize {
+        self.folders.len() + self.shown.len()
+    }
+
+    /// Les dossiers de la page montrée.
+    fn page_folders(&self) -> Vec<FolderLine> {
+        self.folders.iter().skip(self.scroll).take(self.page_size()).cloned().collect()
+    }
+
+    /// Les fichiers de la page montrée, sous ses dossiers.
+    fn page_files(&self) -> Vec<usize> {
+        let folders = self.folders.len().saturating_sub(self.scroll).min(self.page_size());
+        self.shown.iter().skip(self.scroll.saturating_sub(self.folders.len())).take(self.page_size() - folders).copied().collect()
+    }
+
+    /// Une recherche ou un format cherchent dans tout le jeu : les dossiers s'effacent.
+    fn folder_view(&self) -> bool {
+        self.folder_mode && self.filter.is_empty() && self.format_filter.is_none()
+    }
+
+    fn open_folder(&mut self, path: String) {
+        let scroll = self.scroll;
+        self.folder_scroll.insert(std::mem::take(&mut self.folder), scroll);
+        self.scroll = self.folder_scroll.get(&path).copied().unwrap_or(0);
+        self.folder = path;
+        self.list_dirty = true;
+    }
+
+    fn folder_up(&mut self) {
+        let parent = self.folder.rsplit_once('/').map_or(String::new(), |(parent, _)| parent.to_string());
+        self.open_folder(parent);
+    }
+
     /// Les fils en cours finissent sur l'ancienne file : leurs résultats ne servent plus.
     fn reset_thumbs(&mut self) {
         self.jobs.queue.lock().unwrap().clear();
@@ -388,7 +450,7 @@ impl AssetBrowser {
 
     /// Demande les vignettes de la page montrée (celles des autres pages attendront).
     fn request_thumbs(&mut self) {
-        let wanted: VecDeque<usize> = self.shown.iter().skip(self.scroll).take(self.page_size()).copied().filter(|i| !self.thumbs.contains_key(i)).collect();
+        let wanted: VecDeque<usize> = self.page_files().into_iter().filter(|i| !self.thumbs.contains_key(i)).collect();
         let count = wanted.len();
         *self.jobs.queue.lock().unwrap() = wanted;
         for _ in 0..count.min(GRID_THREADS) {
@@ -417,7 +479,8 @@ impl AssetBrowser {
     /// Une rom par son nom de fichier ou son libellé (« Titre (CODE) », ou son début).
     fn find_game(&self, game: &str) -> Option<usize> {
         let wanted = game.to_lowercase();
-        let file_is = |g: &GameDir| g.rom.file_name().is_some_and(|n| n.to_string_lossy().to_lowercase() == wanted);
+        let ending = format!("/{}", wanted.replace('\\', "/"));
+        let file_is = |g: &GameDir| g.rom.to_string_lossy().replace('\\', "/").to_lowercase().ends_with(&ending);
         self.games.iter().position(file_is).or_else(|| self.games.iter().position(|g| g.label.to_lowercase() == wanted)).or_else(|| self.games.iter().position(|g| !wanted.is_empty() && g.label.to_lowercase().starts_with(&wanted)))
     }
 
@@ -432,6 +495,8 @@ impl AssetBrowser {
         if current.is_some() && self.game.is_none() {
             self.entries = Arc::new(Vec::new());
             self.reset_thumbs();
+            self.folder.clear();
+            self.folder_scroll.clear();
             self.selected = None;
             self.image = None;
             self.is3d = false;
@@ -492,6 +557,8 @@ impl AssetBrowser {
         self.entries = Arc::new(Vec::new());
         self.reset_thumbs();
         self.format_filter = None;
+        self.folder.clear();
+        self.folder_scroll.clear();
         let result = Arc::new(Mutex::new(None));
         let (rom, out) = (self.games[index].rom.clone(), result.clone());
         std::thread::spawn(move || {
@@ -527,8 +594,9 @@ impl AssetBrowser {
             self.status += &t!(" ; rom.bin: {romarc} files (filter 'rom.bin')", " ; rom.bin : {romarc} fichiers (filtre 'rom.bin')");
         }
         if let Some(i) = self.want_file.take().and_then(|f| self.entries.iter().position(|e| e.path.eq_ignore_ascii_case(&f))) {
+            self.folder = self.entries[i].folder();
             self.filter_entries();
-            self.scroll = self.shown.iter().position(|&s| s == i).unwrap_or(0).saturating_sub(self.page_size() / 2);
+            self.scroll = (self.folders.len() + self.shown.iter().position(|&s| s == i).unwrap_or(0)).saturating_sub(self.page_size() / 2);
             self.select(i);
         }
     }
@@ -548,7 +616,39 @@ impl AssetBrowser {
                 words.iter().all(|w| hay.contains(w.as_str()))
             })
             .collect();
-        self.scroll = self.scroll.min(self.shown.len().saturating_sub(self.page_size()));
+        self.split_into_folders();
+        self.scroll = self.scroll.min(self.row_count().saturating_sub(self.page_size()));
+    }
+
+    /// Vue par dossiers : ne garde que les fichiers du dossier ouvert, les autres comptent pour ses sous-dossiers.
+    fn split_into_folders(&mut self) {
+        self.folders.clear();
+        if !self.folder_view() {
+            return;
+        }
+        let prefix = if self.folder.is_empty() { String::new() } else { format!("{}/", self.folder) };
+        let mut children: BTreeMap<String, usize> = BTreeMap::new();
+        let mut here = Vec::new();
+        for &i in &self.shown {
+            let folder = self.entries[i].folder();
+            if folder == self.folder {
+                here.push(i);
+            } else if let Some(rest) = folder.strip_prefix(&prefix) {
+                let child = rest.split('/').next().unwrap_or(rest);
+                *children.entry(format!("{prefix}{child}")).or_default() += 1;
+            }
+        }
+        // Une archive ouverte est son dossier : pas besoin de sa ligne de fichier en plus
+        here.retain(|&i| !children.contains_key(&self.entries[i].path));
+        self.shown = here;
+        if !self.folder.is_empty() {
+            let parent = self.folder.rsplit_once('/').map_or(String::new(), |(parent, _)| parent.to_string());
+            self.folders.push(FolderLine { path: parent, name: "..".to_string(), files: None });
+        }
+        for (path, files) in children {
+            let name = path.rsplit('/').next().unwrap_or(&path).to_string();
+            self.folders.push(FolderLine { path, name, files: Some(files) });
+        }
     }
 
     fn select(&mut self, index: usize) {
@@ -652,6 +752,13 @@ fn toggle_window(
                                 b.list_dirty = true;
                             })
                             .with_child((label("", 14.0, TEXT), GridToggle));
+                        row.spawn((Button, Hovered::default(), item_node(), BackgroundColor(ITEM)))
+                            .observe(|_: On<Activate>, mut b: ResMut<AssetBrowser>| {
+                                b.folder_mode = !b.folder_mode;
+                                b.scroll = 0;
+                                b.list_dirty = true;
+                            })
+                            .with_child((label("", 14.0, TEXT), FolderToggle));
                         row.spawn((Button, Hovered::default(), item_node(), BackgroundColor(ITEM), FilterButton))
                             .observe(|_: On<Activate>, mut b: ResMut<AssetBrowser>| {
                                 b.all_files = !b.all_files;
@@ -676,7 +783,7 @@ fn toggle_window(
                             };
                             // En grille, une ligne de vignettes à la fois
                             let lines = if b.grid { lines.signum() * GRID_COLUMNS as f32 } else { lines };
-                            let max = b.shown.len().saturating_sub(b.page_size()) as i64;
+                            let max = b.row_count().saturating_sub(b.page_size()) as i64;
                             let wanted = (b.scroll as i64 - lines.round() as i64).clamp(0, max.max(0)) as usize;
                             if wanted != b.scroll {
                                 b.scroll = wanted;
@@ -804,7 +911,7 @@ fn poll_scan(mut b: ResMut<AssetBrowser>) {
 fn page(activate: On<Activate>, pages: Query<&PageButton>, mut b: ResMut<AssetBrowser>) {
     let Ok(PageButton(dir)) = pages.get(activate.entity) else { return };
     let (size, overlap) = if b.grid { (b.page_size(), GRID_COLUMNS) } else { (ROWS, 2) };
-    let max = b.shown.len().saturating_sub(size) as i64;
+    let max = b.row_count().saturating_sub(size) as i64;
     b.scroll = (b.scroll as i64 + *dir as i64 * (size - overlap) as i64).clamp(0, max.max(0)) as usize;
     b.list_dirty = true;
 }
@@ -826,7 +933,13 @@ fn type_filter(mut b: ResMut<AssetBrowser>, mut typed: MessageReader<KeyboardInp
         let b = &mut *b;
         let query = if in_menu { &mut b.menu_query } else { &mut b.filter };
         match &key.logical_key {
-            Key::Backspace => changed |= query.pop().is_some(),
+            Key::Backspace => {
+                if query.pop().is_some() {
+                    changed = true;
+                } else if !in_menu && b.folder_view() && !b.folder.is_empty() {
+                    b.folder_up();
+                }
+            }
             Key::Escape => {
                 if in_menu && query.is_empty() {
                     b.close_menu();
@@ -1010,13 +1123,18 @@ fn rebuild_list(mut commands: Commands, mut b: ResMut<AssetBrowser>, children: Q
     }
     if b.grid {
         b.request_thumbs();
-        let tiles: Vec<(usize, String)> = b.shown.iter().skip(b.scroll).take(b.page_size()).map(|&i| {
-            let e = &b.entries[i];
-            let name = e.member_name.as_deref().unwrap_or(&e.path);
-            let short: String = name.rsplit('/').next().unwrap_or(name).chars().take(19).collect();
-            (i, short)
-        }).collect();
+        let folders = b.page_folders();
+        let tiles: Vec<(usize, String)> = b.page_files().into_iter().map(|i| (i, b.entries[i].short_name().chars().take(19).collect())).collect();
         commands.entity(list).with_children(|list| {
+            for folder in folders {
+                let name: String = folder.name.chars().take(19).collect();
+                list.spawn((Button, Hovered::default(), Node { width: px(134), height: px(124), margin: UiRect::all(px(2)), flex_direction: FlexDirection::Column, align_items: AlignItems::Center, justify_content: JustifyContent::Center, row_gap: px(3), padding: UiRect::all(px(3)), border_radius: BorderRadius::all(px(4)), overflow: Overflow::clip(), ..default() }, BackgroundColor(ROW), FolderRow(folder.path)))
+                    .observe(click_folder)
+                    .with_children(|tile| {
+                        tile.spawn((label(if folder.files.is_some() { "[+]" } else { ".." }, 34.0, DIM), Pickable::IGNORE));
+                        tile.spawn((label(name, 11.0, TEXT), Pickable::IGNORE));
+                    });
+            }
             for (i, name) in tiles {
                 list.spawn((Button, Hovered::default(), Node { width: px(134), height: px(124), margin: UiRect::all(px(2)), flex_direction: FlexDirection::Column, align_items: AlignItems::Center, row_gap: px(3), padding: UiRect::all(px(3)), border_radius: BorderRadius::all(px(4)), overflow: Overflow::clip(), ..default() }, BackgroundColor(ROW), ListRow(i)))
                     .observe(|activate: On<Activate>, rows: Query<&ListRow>, mut b: ResMut<AssetBrowser>| {
@@ -1032,15 +1150,30 @@ fn rebuild_list(mut commands: Commands, mut b: ResMut<AssetBrowser>, children: Q
         });
         return;
     }
-    let rows: Vec<(usize, String, String)> = b.shown.iter().skip(b.scroll).take(ROWS).map(|&i| {
+    let in_folders = b.folder_view();
+    let folders = b.page_folders();
+    let rows: Vec<(usize, String, String)> = b.page_files().into_iter().map(|i| {
         let e = &b.entries[i];
         let name = match &e.member_name {
+            _ if in_folders => e.short_name().to_string(),
             Some(n) => format!("{}  ({n})", e.path),
             None => e.path.clone(),
         };
         (i, name, format!("{}  {}", kind_text(e.kind), size_text(e.size)))
     }).collect();
     commands.entity(list).with_children(|list| {
+        for folder in folders {
+            let (name, detail) = match folder.files {
+                Some(files) => (format!("[+] {}", folder.name), t!("{files} files", "{files} fichiers")),
+                None => (folder.name.clone(), tr("parent folder", "dossier parent").to_string()),
+            };
+            list.spawn((Button, Hovered::default(), Node { height: px(ROW_H), flex_shrink: 0.0, padding: UiRect::horizontal(px(6)), justify_content: JustifyContent::SpaceBetween, align_items: AlignItems::Center, border_radius: BorderRadius::all(px(4)), ..default() }, BackgroundColor(ROW), FolderRow(folder.path)))
+                .observe(click_folder)
+                .with_children(|row| {
+                    row.spawn((label(name, 13.0, TEXT), Pickable::IGNORE));
+                    row.spawn((label(detail, 12.0, DIM), Pickable::IGNORE));
+                });
+        }
         for (i, name, kind) in rows {
             list.spawn((Button, Hovered::default(), Node { height: px(ROW_H), flex_shrink: 0.0, padding: UiRect::horizontal(px(6)), justify_content: JustifyContent::SpaceBetween, align_items: AlignItems::Center, border_radius: BorderRadius::all(px(4)), ..default() }, BackgroundColor(ROW), ListRow(i)))
                 .observe(|activate: On<Activate>, rows: Query<&ListRow>, mut b: ResMut<AssetBrowser>| {
@@ -1054,6 +1187,12 @@ fn rebuild_list(mut commands: Commands, mut b: ResMut<AssetBrowser>, children: Q
                 });
         }
     });
+}
+
+fn click_folder(activate: On<Activate>, rows: Query<&FolderRow>, mut b: ResMut<AssetBrowser>) {
+    if let Ok(row) = rows.get(activate.entity) {
+        b.open_folder(row.0.clone());
+    }
 }
 
 fn refresh_texts(
@@ -1071,10 +1210,12 @@ fn refresh_texts(
         } else if filter.is_some() {
             if b.all_files { tr("All files", "Tous les fichiers").into() } else { tr("Viewable files", "Fichiers montrables").into() }
         } else if title.is_some() {
-            let range = if b.shown.is_empty() { "0".to_string() } else { format!("{}-{}", b.scroll + 1, (b.scroll + b.page_size()).min(b.shown.len())) };
+            let total = b.row_count();
+            let range = if total == 0 { "0".to_string() } else { format!("{}-{}", b.scroll + 1, (b.scroll + b.page_size()).min(total)) };
             let filter = if b.filter.is_empty() { tr("type to filter", "tapez pour filtrer").to_string() } else { t!("filter: {}_", "filtre : {}_", b.filter) };
             let format = b.format_filter.as_ref().map_or(String::new(), |f| t!("   format: {f} (Esc = all)", "   format : {f} (Echap = tous)"));
-            format!("{range} / {}   ({filter}){format}", b.shown.len())
+            let folder = if b.folder_view() { format!("/{}   ", b.folder) } else { String::new() };
+            format!("{folder}{range} / {total}   ({filter}){format}")
         } else if info.is_some() {
             if b.info.is_empty() { b.status.clone() } else { format!("{}\n{}", b.info, b.status) }
         } else if path.is_some() {
@@ -1093,14 +1234,15 @@ fn refresh_texts(
 
 fn looks(
     b: Res<AssetBrowser>,
-    mut items: Query<(&Hovered, Has<Pressed>, &mut BackgroundColor, Option<&ListRow>, Option<&GameChoice>, Option<&FilterButton>, Has<FormatChoice>), Or<(With<ListRow>, With<GameChoice>, With<FormatChoice>, With<GameButton>, With<FormatButton>, With<FilterButton>, With<CopyButton>, With<PageButton>, With<StepButton>)>>,
+    mut items: Query<(Entity, &Hovered, Has<Pressed>, &mut BackgroundColor, Option<&ListRow>, Option<&GameChoice>, Option<&FilterButton>, Has<FormatChoice>), Or<(With<ListRow>, With<FolderRow>, With<GameChoice>, With<FormatChoice>, With<GameButton>, With<FormatButton>, With<FilterButton>, With<CopyButton>, With<PageButton>, With<StepButton>)>>,
+    folder_rows: Query<(), With<FolderRow>>,
 ) {
     if b.window.is_none() {
         return;
     }
-    for (hovered, pressed, mut color, row, game, filter, format) in &mut items {
+    for (entity, hovered, pressed, mut color, row, game, filter, format) in &mut items {
         let selected = row.is_some_and(|r| Some(r.0) == b.selected) || game.is_some_and(|g| Some(g.0) == b.game) || (filter.is_some() && b.all_files);
-        let idle = if row.is_some() || game.is_some() || format { ROW } else { ITEM };
+        let idle = if row.is_some() || game.is_some() || format || folder_rows.contains(entity) { ROW } else { ITEM };
         let wanted = if selected || pressed { ITEM_ON } else if hovered.get() { ITEM_HOVER } else { idle };
         if color.0 != wanted {
             color.0 = wanted;
@@ -1276,11 +1418,17 @@ fn update_grid(
     mut b: ResMut<AssetBrowser>,
     mut images: ResMut<Assets<Image>>,
     mut thumbs: Query<(&GridThumb, &mut ImageNode, &mut Visibility)>,
-    mut toggles: Query<&mut Text, With<GridToggle>>,
+    mut toggles: Query<(&mut Text, Has<FolderToggle>), Or<(With<GridToggle>, With<FolderToggle>)>>,
     mut clock: Local<f32>,
 ) {
-    for mut text in &mut toggles {
-        let wanted = if b.grid { tr("List", "Liste") } else { tr("Grid", "Grille") };
+    for (mut text, is_folder) in &mut toggles {
+        // Le bouton dit ce qu'il fera
+        let wanted = match (is_folder, b.folder_mode, b.grid) {
+            (true, true, _) => tr("Flat", "A plat"),
+            (true, false, _) => tr("Folders", "Dossiers"),
+            (false, _, true) => tr("List", "Liste"),
+            (false, _, false) => tr("Grid", "Grille"),
+        };
         if text.0 != wanted {
             text.0 = wanted.to_string();
         }
@@ -1296,7 +1444,7 @@ fn update_grid(
     }
     // Trop de vignettes en mémoire : on ne garde que la page montrée
     if b.thumbs.len() > GRID_KEPT {
-        let visible: Vec<usize> = b.shown.iter().skip(b.scroll).take(b.page_size()).copied().collect();
+        let visible = b.page_files();
         b.thumbs.retain(|i, _| visible.contains(i));
     }
     *clock += time.delta_secs();
