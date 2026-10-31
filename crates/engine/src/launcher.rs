@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 use bevy::asset::RenderAssetUsages;
 use bevy::image::ImageSampler;
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
-use bevy::picking::hover::Hovered;
+use bevy::picking::hover::{HoverMap, Hovered};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::ui::{Pressed, ScrollPosition};
@@ -153,7 +153,7 @@ impl Plugin for LauncherPlugin {
         app.init_resource::<Launcher>()
             .add_systems(Startup, setup)
             .add_systems(OnEnter(StudioState::Menu), spawn_launcher.before(crate::studio::auto_start))
-            .add_systems(Update, (take_drops, poll_copies, poll_disk, back_key, expire_confirm, rebuild, show_status).chain().run_if(in_state(StudioState::Menu)))
+            .add_systems(Update, (take_drops, poll_copies, poll_disk, back_key, expire_confirm, log_clicks, rebuild, show_status).chain().run_if(in_state(StudioState::Menu)))
             .add_systems(Update, (wheel, looks, view_choice_looks, lang_choice_looks, version_text, redo_on_language));
     }
 }
@@ -273,11 +273,13 @@ fn spawn_launcher(mut commands: Commands, mut lau: ResMut<Launcher>, mut images:
         });
     lau.content = content;
     lau.dirty = true;
+    info!("launcher ouvert : {} {}, {} roms dans {}", std::env::consts::OS, std::env::consts::ARCH, lau.roms.len(), library::rom_dir().display());
 }
 
 fn reload_roms(lau: &mut Launcher, images: &mut Assets<Image>) {
     let dir = library::rom_dir();
     lau.stamp = library::folder_stamp(&dir);
+    info!("roms relues : {:?}", lau.stamp);
     lau.roms = library::scan_roms(&dir)
         .into_iter()
         .map(|info| {
@@ -291,6 +293,7 @@ fn reload_roms(lau: &mut Launcher, images: &mut Assets<Image>) {
 
 fn say(lau: &mut Launcher, time: &Time<Real>, message: impl Into<String>) {
     lau.status = message.into();
+    info!("message : {}", lau.status);
     lau.status_at = time.elapsed_secs_f64();
 }
 
@@ -359,6 +362,25 @@ fn back_key(keys: Res<ButtonInput<KeyCode>>, mut lau: ResMut<Launcher>, screens:
         lau.open = None;
         lau.dirty = true;
     }
+}
+
+/// Chaque clic dans le journal : où il tombe et ce qu'il y a dessous. Sert à comprendre un clic sans
+/// effet sur une machine qu'on n'a pas (Mac).
+fn log_clicks(buttons: Res<ButtonInput<MouseButton>>, screens: Res<DsScreens>, windows: Query<&Window>, hovers: Res<HoverMap>, clickable: Query<Has<Button>>) {
+    let pressed = buttons.just_pressed(MouseButton::Left);
+    if !pressed && !buttons.just_released(MouseButton::Left) {
+        return;
+    }
+    let Ok(window) = windows.get(screens.main_window()) else { return };
+    let under: Vec<(Entity, bool)> = hovers.values().flat_map(|hits| hits.keys()).map(|e| (*e, clickable.get(*e).unwrap_or(false))).collect();
+    info!(
+        "clic {} : curseur {:?}, fenetre {}x{} echelle {}, sous le curseur (entite, bouton) {under:?}",
+        if pressed { "enfonce" } else { "relache" },
+        window.cursor_position(),
+        window.width(),
+        window.height(),
+        window.scale_factor(),
+    );
 }
 
 fn expire_confirm(mut lau: ResMut<Launcher>, time: Res<Time<Real>>) {
@@ -433,6 +455,7 @@ fn rebuild(mut commands: Commands, mut lau: ResMut<Launcher>, registry: Res<Game
         return;
     }
     lau.dirty = false;
+    info!("zone du launcher refaite");
     let Some(content) = lau.content else { return };
     if let Ok(position) = grids.single() {
         lau.grid_scroll = position.0.y;
@@ -513,6 +536,7 @@ fn show_library(_: On<Activate>, mut lau: ResMut<Launcher>) {
 
 fn open_game(file: String) -> impl FnMut(On<Activate>, ResMut<Launcher>) {
     move |_, mut lau| {
+        info!("jeu ouvert : {file}");
         lau.open = Some(file.clone());
         lau.tab = Tab::Play;
         lau.confirm_remove = None;

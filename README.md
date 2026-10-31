@@ -20,6 +20,8 @@ La fenêtre du studio s'ouvre sur le launcher, la bibliothèque des jeux de l'ut
 - **Ajouter un jeu** : glisser une rom DS (`.nds`, `.dsi`) dans la fenêtre. Elle est copiée dans le dossier
   `rom`, à côté du launcher (le déposer soi-même dans ce dossier marche aussi). Le nom, l'éditeur et
   l'icône viennent de la rom. Sans rom, aucun jeu n'est montré : seulement un message qui explique ça.
+- **Journal** : `log/launcher.log`, à côté du launcher (le lancement précédent dans `launcher.old.log`) ;
+  à joindre quand quelque chose ne marche pas.
 - **A gauche** : le logo, le bouton à 4 carrés (la vue de tous les jeux) et les jeux favoris.
 - **Vue des jeux** : en grille ou en liste avec les infos (éditeur, code, région, taille).
 - **Page d'un jeu** : son image, son nom, l'étoile des favoris et quatre boutons pour la zone du bas :
