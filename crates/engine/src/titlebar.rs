@@ -11,7 +11,8 @@
 //! macOS : winit refuse `drag_resize_window`, le moteur suit donc lui-même la souris (`Resizing`).
 
 use bevy::ecs::system::NonSendMarker;
-use bevy::input::mouse::AccumulatedMouseMotion;
+use bevy::input::mouse::{AccumulatedMouseMotion, MouseButtonInput};
+use bevy::input::ButtonState;
 use bevy::math::CompassOctant;
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
@@ -29,8 +30,8 @@ const BUTTON_W: f32 = 46.0;
 /// Largeur de la zone des bords qui redimensionne.
 const EDGE: f32 = 6.0;
 const DOUBLE_CLICK: f64 = 0.4;
-/// Le système ne sait pas redimensionner ces fenêtres : voir `Resizing`.
-const MANUAL_RESIZE: bool = cfg!(target_os = "macos");
+/// Ce que macOS fait autrement : voir `Resizing`, `is_maximized` et `release_for_system_drag`.
+const MACOS: bool = cfg!(target_os = "macos");
 /// Plus petite fenêtre redimensionnée à la main (pixels logiques).
 const MIN_SIZE: Vec2 = Vec2::new(320.0, 240.0);
 
@@ -171,12 +172,31 @@ fn click(
     }
 }
 
-fn is_maximized(window: Entity) -> bool {
+/// La réponse exacte, à garder pour un geste du joueur : sur macOS, winit remplace le style de la
+/// fenêtre le temps de répondre, ce qui peut perdre le relâchement du clic en cours.
+fn exactly_maximized(window: Entity) -> bool {
     WINIT_WINDOWS.with_borrow(|w| w.get_window(window).is_some_and(|w| w.is_maximized()))
 }
 
+/// Sûr à chaque image. macOS : voir `exactly_maximized` ; une fenêtre agrandie y prend toute la
+/// largeur de l'écran (si le Dock est sur le côté, elle passe pour une fenêtre normale).
+pub(crate) fn is_maximized(window: Entity) -> bool {
+    if !MACOS {
+        return exactly_maximized(window);
+    }
+    WINIT_WINDOWS.with_borrow(|w| w.get_window(window).is_some_and(|w| w.current_monitor().is_some_and(|monitor| w.outer_size().width >= monitor.size().width)))
+}
+
+/// macOS : le système garde le relâchement pendant qu'il déplace la fenêtre, et sans lui le clic
+/// suivant ne compte plus. On le donne au moteur nous-mêmes.
+pub(crate) fn release_for_system_drag(released: &mut MessageWriter<MouseButtonInput>, button: MouseButton, window: Entity) {
+    if MACOS {
+        released.write(MouseButtonInput { button, state: ButtonState::Released, window });
+    }
+}
+
 fn toggle_maximized(window: Entity, windows: &mut Query<&mut Window>) {
-    let maximized = is_maximized(window);
+    let maximized = exactly_maximized(window);
     if let Ok(mut w) = windows.get_mut(window) {
         w.set_maximized(!maximized);
     }
@@ -321,6 +341,7 @@ fn window_chrome(
     buttons: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     motion: Res<AccumulatedMouseMotion>,
+    mut released: MessageWriter<MouseButtonInput>,
     bars: Query<&TitleBar>,
     title_buttons: Query<(&TitleButton, &Hovered)>,
     mut windows: Query<(Entity, &mut Window, Option<&CursorIcon>)>,
@@ -360,7 +381,7 @@ fn window_chrome(
         }
         debug!("barre de titre : clic a {cursor} (bord {edge:?}, bouton {over_button})");
         if let Some(octant) = edge {
-            if MANUAL_RESIZE {
+            if MACOS {
                 *resizing = Resizing::start(entity, octant);
             } else {
                 window.start_drag_resize(octant);
@@ -373,14 +394,16 @@ fn window_chrome(
             } else {
                 *last_click = Some((entity, now));
                 window.start_drag_move();
+                release_for_system_drag(&mut released, MouseButton::Left, entity);
             }
         }
     }
     if let Some(entity) = toggle {
-        let maximized = is_maximized(entity);
+        let maximized = exactly_maximized(entity);
         if let Ok((_, mut window, _)) = windows.get_mut(entity) {
             window.set_maximized(!maximized);
         }
+        release_for_system_drag(&mut released, MouseButton::Left, entity);
     }
 }
 

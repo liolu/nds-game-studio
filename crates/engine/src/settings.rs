@@ -343,7 +343,7 @@ fn snapshot(player: &Settings, layout: &ScreenLayout, style: RenderStyle, dev: &
         return now;
     }
     let (maximized, minimized, at) = WINIT_WINDOWS
-        .with_borrow(|w| w.get_window(main).map(|w| (w.is_maximized(), w.is_minimized().unwrap_or(false), w.outer_position().ok().map(|p| [p.x, p.y]))))
+        .with_borrow(|w| w.get_window(main).map(|w| (crate::titlebar::is_maximized(main), w.is_minimized().unwrap_or(false), w.outer_position().ok().map(|p| [p.x, p.y]))))
         .unwrap_or((false, false, None));
     // Réduite dans la barre des tâches, Windows la met en (-32000, -32000) en 160x28 : on garde
     // la place d'avant (sinon le studio se rouvrirait réduit)

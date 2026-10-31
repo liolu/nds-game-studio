@@ -15,12 +15,13 @@
 //! Fermer une des fenêtres quitte l'application.
 
 use bevy::ecs::system::NonSendMarker;
+use bevy::input::mouse::MouseButtonInput;
 use bevy::prelude::*;
 use bevy::sprite::Anchor;
 use bevy::window::{WindowCloseRequested, WindowMoved, WindowResolution};
 use bevy::winit::WINIT_WINDOWS;
 
-use crate::titlebar::TITLE_H;
+use crate::titlebar::{is_maximized, release_for_system_drag, TITLE_H};
 use crate::screens::{display_camera, DisplayCamera, DsScreens, Screen, ScreenLayout, ScreenPlaces, SCREEN_H};
 use crate::studio::StudioState;
 
@@ -103,10 +104,6 @@ fn main_window_logical_h(entity: Entity) -> f32 {
     WINIT_WINDOWS.with_borrow(|w| w.get_window(entity).map_or(0.0, |w| w.inner_size().height as f32 / w.scale_factor() as f32))
 }
 
-fn is_maximized(entity: Entity) -> bool {
-    WINIT_WINDOWS.with_borrow(|windows| windows.get_window(entity).is_some_and(|w| w.is_maximized()))
-}
-
 #[cfg(windows)]
 fn global_cursor() -> Option<IVec2> {
     use windows_sys::Win32::Foundation::POINT;
@@ -167,6 +164,7 @@ fn gestures(
     mut layout: ResMut<ScreenLayout>,
     mut drag: ResMut<Drag>,
     mut windows: Query<&mut Window>,
+    mut released: MessageWriter<MouseButtonInput>,
 ) {
     // Le launcher n'a pas d'écrans à détacher
     if *state.get() != StudioState::Playing {
@@ -195,6 +193,7 @@ fn gestures(
             *drag = Drag { window: Some(place.window), grab: (cursor * window.scale_factor()).as_ivec2(), button: Some(button) };
         } else {
             window.start_drag_move();
+            release_for_system_drag(&mut released, button, place.window);
         }
         return;
     }
