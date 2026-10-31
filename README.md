@@ -85,7 +85,7 @@ Ajouter une manette : un fichier `crates/engine/controllers/<id>.toml` (format d
 ## Voir et changer le code en direct
 
 - **F5** ouvre la fenêtre « Code » : un éditeur des fichiers du jeu en cours (un onglet par
-  fichier, molette pour défiler, clic pour placer le curseur, copier-coller). **Ctrl+S** enregistre.
+  fichier, molette pour défiler, clic pour placer le curseur, copier-coller). **Ctrl+S** (Cmd+S sur Mac) enregistre.
   Pendant qu'on tape, les touches du jeu ne réagissent pas. Un fichier changé par un autre éditeur
   est relu s'il n'y a pas de modification en cours.
 - **Enregistrer un fichier** du jeu ou du moteur (dans la fenêtre Code ou un autre éditeur) : le studio
@@ -208,6 +208,31 @@ run.cmd
 ```
 
 `run.cmd <id>` lance directement un jeu enregistré. Sous Linux/macOS : `./run.sh`.
+
+## Installer sur macOS
+
+Le studio n'est pas notarisé par Apple : macOS bloque la première ouverture.
+
+1. Télécharger `nds-game-studio-installer-macos.zip` dans la
+   [dernière release](https://github.com/liolu/nds-game-studio/releases/latest), puis l'ouvrir.
+2. macOS refuse d'ouvrir l'installeur. Aller dans Réglages Système > Confidentialité et sécurité, puis
+   « Ouvrir quand même ». Avant macOS 15 : clic droit sur l'application, puis Ouvrir.
+3. L'installeur met le studio dans `~/Games/Nds Game Studio` et crée `Nds Game Studio` dans
+   `~/Applications`. Les roms vont dans le dossier `rom` de ce dossier.
+
+Avec le zip `...-macos.zip` à la place de l'installeur, garder `NdsGameStudio.app` dans son dossier et
+retirer d'abord la quarantaine, sinon macOS isole l'application loin de ses fichiers :
+
+```bash
+xattr -dr com.apple.quarantine "<dossier du zip>"
+```
+
+Sur Mac :
+
+- les jeux natifs ne tournent pas encore : ce sont des programmes Windows ;
+- F1, F5, F6, F8 et F9 demandent la touche `fn`, sauf si « Utiliser F1, F2... comme touches de fonction
+  standard » est activé dans les réglages du clavier ;
+- en cas de problème, le journal est `log/launcher.log` dans le dossier du studio.
 
 ## Versions et mises à jour
 

@@ -1,0 +1,7 @@
+[package]
+name = "nds-game-studio-app"
+version.workspace = true
+edition.workspace = true
+description = "Programme du bundle NdsGameStudio.app (macOS) : ouvre le launcher pose a cote du bundle"
+
+[dependencies]

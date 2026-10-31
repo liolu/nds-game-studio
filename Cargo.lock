@@ -4506,6 +4506,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "nds-game-studio-app"
+version = "0.2.0"
+
+[[package]]
 name = "nds-game-studio-installer"
 version = "0.1.0"
 dependencies = [
