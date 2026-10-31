@@ -584,7 +584,9 @@ static void load_arm9(void) {
     u32 *list = (u32 *)info[0], *end = (u32 *)info[1];
     for (unsigned i = 0; i < nds_fixup_count; i++) {
         u32 at = nds_fixups[i].at, src = info[2];
-        for (u32 *e = list; e < end; e += 3) {
+        /* SDK des jeux DSi : entrees de 16 octets au lieu de 12 */
+        u32 step = ((u32)end - (u32)list) % 12 == 0 ? 3 : 4;
+        for (u32 *e = list; e < end; e += step) {
             if (at >= e[0] && at < e[0] + e[1]) { at = src + (at - e[0]); break; }
             src += e[1];
         }

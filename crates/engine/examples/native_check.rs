@@ -1,6 +1,7 @@
 //! Essai sans prendre le clavier : lance un jeu natif, sans focus et muet, simule des commandes, enregistre une
 //! capture et ferme.
 //! `cargo run --release -p nds-engine --example native_check -- <code> <rom> <capture.png> <secondes> [enter@s] [touch@s]`
+//! `click=texte@s` active le bouton qui porte ce texte (le dernier s'il y en a plusieurs) ; une capture par fenetre.
 //! (avec `NDSGS_NATIVE_MUTE=1` et `NDSGS_NATIVE_DIR`)
 
 use bevy::prelude::*;
@@ -14,11 +15,39 @@ struct Check {
     done: bool,
     enter_at: Option<f32>,
     touch_at: Option<f32>,
+    clicks: Vec<(String, f32, bool)>,
+}
+
+fn clicks(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut check: ResMut<Check>,
+    texts: Query<(Entity, &Text)>,
+    parents: Query<&ChildOf>,
+    buttons: Query<(), With<bevy::ui_widgets::Button>>,
+) {
+    let now = time.elapsed_secs();
+    for (wanted, at, done) in &mut check.clicks {
+        if *done || now < *at {
+            continue;
+        }
+        *done = true;
+        let found = texts.iter().filter(|(_, t)| t.0.contains(wanted.as_str())).filter_map(|(e, _)| {
+            std::iter::once(e).chain(parents.iter_ancestors(e)).find(|a| buttons.contains(*a))
+        });
+        match found.last() {
+            Some(entity) => commands.trigger(bevy::ui_widgets::Activate { entity }),
+            None => println!("pas de bouton : {wanted}"),
+        }
+    }
 }
 
 fn no_focus(mut windows: Query<&mut Window, Added<Window>>) {
     for mut window in &mut windows {
         window.focused = false;
+        // Hors de l'ecran : l'essai ne gene pas le joueur
+        window.position = WindowPosition::At(IVec2::new(-4000, 100));
+        window.resolution.set(1280.0, 800.0);
     }
 }
 
@@ -48,10 +77,13 @@ fn simulate(
     }
 }
 
-fn capture(mut commands: Commands, time: Res<Time>, mut check: ResMut<Check>, mut exit: MessageWriter<AppExit>) {
+fn capture(mut commands: Commands, time: Res<Time>, mut check: ResMut<Check>, mut exit: MessageWriter<AppExit>, windows: Query<Entity, With<Window>>) {
     if !check.done && time.elapsed_secs() > check.at {
         check.done = true;
-        commands.spawn(Screenshot::primary_window()).observe(save_to_disk(check.capture.clone()));
+        for (i, window) in windows.iter().enumerate() {
+            let path = if i == 0 { check.capture.clone() } else { check.capture.replace(".png", &format!("-{i}.png")) };
+            commands.spawn(Screenshot::window(window)).observe(save_to_disk(path));
+        }
     }
     if check.done && time.elapsed_secs() > check.at + 2.0 {
         exit.write(AppExit::Success);
@@ -79,8 +111,9 @@ fn main() {
             done: false,
             enter_at: time_of("enter@"),
             touch_at: time_of("touch@"),
+            clicks: args.iter().filter_map(|a| a.strip_prefix("click=")).filter_map(|a| a.rsplit_once('@')).filter_map(|(t, s)| Some((t.to_string(), s.parse().ok()?, false))).collect(),
         })
         .add_systems(PreUpdate, simulate.after(bevy::input::InputSystems))
-        .add_systems(Update, (no_focus, capture))
+        .add_systems(Update, (no_focus, capture, clicks))
         .run();
 }

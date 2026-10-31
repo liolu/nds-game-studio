@@ -1,191 +1,423 @@
 {
  "games": {
   "ABCE": {
+   "c": 10.02,
+   "code": 10.38,
+   "data": 0.0,
+   "play": "stuck",
    "status": "experimental"
   },
   "ABHE": {
+   "c": 22.72,
+   "code": 23.33,
+   "data": 99.79,
+   "play": "stuck",
    "status": "experimental"
   },
   "ACCE": {
+   "c": 14.61,
+   "code": 15.34,
+   "data": 0.0,
+   "play": "stuck",
    "status": "experimental"
   },
   "AD2J": {
+   "c": 4.62,
+   "code": 7.38,
+   "data": 0.0,
+   "play": "stuck",
    "status": "experimental"
   },
   "AD3J": {
+   "c": 0.65,
+   "code": 0.34,
+   "data": 2.01,
+   "play": "stuck",
    "status": "experimental"
   },
   "ADGE": {
+   "c": 63.5,
+   "code": 40.83,
+   "data": 0.0,
+   "play": "stuck",
    "status": "experimental"
   },
   "ADGJ": {
+   "c": 5.83,
+   "code": 9.52,
+   "data": 1.24,
+   "play": "stuck",
    "status": "experimental"
   },
   "AE4J": {
+   "c": 2.94,
+   "code": 2.9,
+   "data": 0.0,
+   "play": "crash",
    "status": "experimental"
   },
   "AHEP": {
+   "c": 478.44,
+   "code": 45.44,
+   "data": 95.22,
+   "play": "stuck",
    "status": "experimental"
   },
   "AJTP": {
+   "c": 51.01,
+   "code": 92.1,
+   "data": 100.0,
+   "play": "playable",
    "status": "ok"
   },
   "AL5E": {
+   "c": 10.6,
+   "code": 11.01,
+   "data": 0.0,
+   "play": "stuck",
    "status": "experimental"
   },
   "AL7E": {
+   "c": 55.16,
+   "code": 55.69,
+   "data": 93.1,
+   "play": "playable",
    "status": "ok"
   },
   "AMGP": {
+   "c": 21.29,
+   "code": 22.01,
+   "data": 0.0,
+   "play": "stuck",
    "status": "experimental"
   },
   "APDE": {
+   "c": 16.02,
+   "code": 16.66,
+   "data": 97.22,
+   "play": "stuck",
    "status": "experimental"
   },
   "AQIE": {
+   "c": 11.75,
+   "code": 11.97,
+   "data": 0.0,
+   "play": "stuck",
    "status": "experimental"
   },
   "AR5E": {
+   "c": 21.28,
+   "code": 48.79,
+   "data": 99.72,
+   "play": "playable",
    "status": "ok"
   },
   "ARGE": {
+   "c": 4.1,
+   "code": 4.21,
+   "data": 0.0,
+   "play": "stuck",
    "status": "experimental"
   },
   "AS2E": {
+   "c": 15.04,
+   "code": 32.97,
+   "data": 99.85,
+   "play": "stuck",
    "status": "experimental"
   },
   "AS2P": {
+   "c": 0.05,
+   "code": 0.05,
+   "data": 0.61,
+   "play": "stuck",
    "status": "experimental"
   },
   "ASEE": {
+   "c": 1.09,
+   "code": 0.39,
+   "data": 3.53,
+   "play": "stuck",
    "status": "experimental"
   },
   "ASJP": {
+   "c": 14.59,
+   "code": 14.11,
+   "data": 97.66,
+   "play": "stuck",
    "status": "experimental"
   },
   "ASSE": {
+   "c": 13.1,
+   "code": 13.62,
+   "data": 0.0,
+   "play": "stuck",
    "status": "experimental"
   },
   "ASTP": {
+   "c": 2.18,
+   "code": 2.35,
+   "data": 0.0,
+   "play": "stuck",
    "status": "experimental"
   },
   "ATDE": {
+   "c": 1.82,
+   "code": 1.79,
+   "data": 79.05,
+   "play": "crash",
    "status": "experimental"
   },
   "AUSF": {
+   "c": 16.92,
+   "code": 32.9,
+   "data": 2.07,
+   "play": "stuck",
    "status": "experimental"
   },
   "AWUP": {
+   "c": 4.17,
+   "code": 4.58,
+   "data": 0.0,
+   "play": "stuck",
    "status": "experimental"
   },
   "B2IE": {
+   "c": 0.0,
+   "play": "crash",
    "status": "experimental"
   },
   "B3PP": {
+   "c": 0.0,
+   "play": "crash",
    "status": "experimental"
   },
   "B7HE": {
+   "c": 0.0,
+   "play": "crash",
    "status": "experimental"
   },
   "BFZE": {
+   "c": 24.75,
+   "code": 26.12,
+   "data": 1.89,
+   "play": "stuck",
    "status": "experimental"
   },
   "BH6J": {
+   "c": 2.46,
+   "code": 2.53,
+   "data": 99.81,
+   "play": "stuck",
    "status": "experimental"
   },
   "BHDP": {
+   "c": 0.0,
+   "play": "crash",
    "status": "experimental"
   },
   "BLFP": {
+   "c": 1.88,
+   "code": 2.37,
+   "data": 0.0,
+   "play": "stuck",
    "status": "experimental"
   },
   "BLIJ": {
+   "c": 5.84,
+   "code": 5.75,
+   "data": 0.0,
+   "play": "stuck",
    "status": "experimental"
   },
   "BQ8E": {
+   "c": 4.97,
+   "code": 3.67,
+   "data": 0.0,
+   "play": "stuck",
    "status": "experimental"
   },
   "BRPP": {
+   "c": 0.0,
+   "code": 0.0,
+   "data": 95.73,
+   "play": "stuck",
    "status": "experimental"
   },
   "BW7E": {
+   "c": 0.0,
+   "code": 0.0,
+   "data": 2.36,
+   "play": "crash",
    "status": "experimental"
   },
   "BW9E": {
+   "c": 0.44,
+   "code": 0.66,
+   "data": 0.0,
+   "play": "crash",
    "status": "experimental"
   },
   "BWBE": {
+   "c": 0.0,
+   "code": 0.0,
+   "data": 99.97,
+   "play": "stuck",
    "status": "experimental"
   },
   "BWBX": {
+   "c": 0.0,
+   "play": "crash",
    "status": "experimental"
   },
   "BWBY": {
+   "c": 0.0,
+   "play": "crash",
    "status": "experimental"
   },
   "BZ3J": {
+   "c": 0.28,
+   "code": 0.91,
+   "data": 0.0,
+   "play": "crash",
    "status": "experimental"
   },
   "CD5E": {
+   "c": 2.5,
+   "code": 3.18,
+   "data": 7.01,
+   "play": "crash",
    "status": "experimental"
   },
   "CDZP": {
+   "c": 20.5,
+   "code": 20.93,
+   "data": 99.86,
+   "play": "stuck",
    "status": "experimental"
   },
   "CIEE": {
+   "c": 0.0,
+   "play": "crash",
    "status": "experimental"
   },
   "CM3P": {
+   "c": 7.81,
+   "code": 8.54,
+   "data": 99.24,
+   "play": "stuck",
    "status": "experimental"
   },
   "CP3E": {
+   "c": 0.82,
+   "code": 1.24,
+   "data": 6.48,
+   "play": "crash",
    "status": "experimental"
   },
   "CS5X": {
+   "c": 9.12,
+   "code": 9.57,
+   "data": 0.0,
+   "play": "crash",
    "status": "experimental"
   },
   "TFTJ": {
+   "c": 2.25,
+   "code": 2.01,
+   "data": 100.0,
+   "play": "stuck",
    "status": "experimental"
   },
   "VPEV": {
+   "c": 0.01,
+   "code": 0.01,
+   "data": 2.3,
+   "play": "crash",
    "status": "experimental"
   },
   "VSKV": {
+   "c": 0.01,
+   "code": 0.01,
+   "data": 4.0,
+   "play": "crash",
    "status": "experimental"
   },
   "VT3V": {
+   "c": 0.0,
+   "code": 0.0,
+   "data": 0.0,
+   "play": "crash",
    "status": "experimental"
   },
   "YBUD": {
+   "c": 16.01,
+   "code": 15.77,
+   "data": 6.57,
+   "play": "crash",
    "status": "experimental"
   },
   "YC2P": {
+   "c": 21.69,
+   "code": 22.11,
+   "data": 99.9,
+   "play": "crash",
    "status": "experimental"
   },
   "YL2P": {
+   "c": 18.08,
+   "code": 18.71,
+   "data": 0.0,
+   "play": "crash",
    "status": "experimental"
   },
   "YMYE": {
+   "c": 0.0,
+   "play": "stuck",
    "status": "experimental"
   },
   "YPPJ": {
+   "c": 24.38,
+   "code": 26.0,
+   "data": 99.87,
+   "play": "stuck",
    "status": "experimental"
   },
   "YRRE": {
+   "c": 0.0,
+   "code": 0.0,
+   "data": 99.84,
+   "play": "crash",
    "status": "experimental"
   },
   "YSPE": {
+   "c": 11.16,
+   "code": 10.83,
+   "data": 19.69,
+   "play": "crash",
    "status": "experimental"
   },
   "YSZE": {
+   "c": 8.7,
+   "code": 9.19,
+   "data": 99.21,
+   "play": "crash",
    "status": "experimental"
   },
   "YTVE": {
+   "c": 11.82,
+   "code": 11.64,
+   "data": 0.0,
+   "play": "stuck",
    "status": "experimental"
   },
   "YYBP": {
+   "c": 2.66,
+   "code": 2.13,
+   "data": 1.1,
+   "play": "stuck",
    "status": "experimental"
   }
  },
- "toolchain": 1
+ "toolchain": 2
 }

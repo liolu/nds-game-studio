@@ -88,6 +88,9 @@ jobs:
           Copy-Item target/release/nds-game-studio.exe $dir/
           Copy-Item target/release/nds-game-studio-updater.exe $dir/
           Copy-Item target/release/nds-game-studio-launcher.exe $dir/
+          # Outils des jeux natifs : rien a telecharger ni a attendre chez le joueur
+          ./native/tools/ci_toolchain.ps1 -Out toolchain.zip
+          Expand-Archive toolchain.zip -DestinationPath $dir/native-toolchain
           Compress-Archive -Path $dir -DestinationPath "$dir.zip"
           New-Item -ItemType Directory -Path dist
           Move-Item "$dir.zip" dist/

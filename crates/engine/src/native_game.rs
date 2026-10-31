@@ -1,8 +1,9 @@
 //! Jeux DS natifs : décompilation + runtime nitro-pc, sans émulateur.
 //!
-//! Chaque jeu est un programme généré sur le PC du joueur, depuis sa rom, au premier lancement : il contient le code
-//! du jeu et n'est donc jamais publié (voir `native/README.md`). La boîte à outils qui le génère (traducteur,
-//! compilateur, runtime, recettes) est téléchargée une seule fois. Un `native/<code>.exe` à côté du studio passe avant.
+//! Chaque jeu est un programme généré sur le PC du joueur, depuis sa rom : il contient le code du jeu et n'est donc
+//! jamais publié (voir `native/README.md`). Le launcher le prépare en tâche de fond, un jeu à la fois, et Jouer n'est
+//! proposé qu'une fois le module prêt. Les outils (traducteur, compilateur, runtime, recettes) sont livrés à côté du
+//! studio, dans `native-toolchain` ; sinon ils sont téléchargés. Un `native/<code>.exe` à côté du studio passe avant.
 //!
 //! Le jeu tourne dans son propre processus 32 bits, car son code suppose des pointeurs 32 bits, et reçoit
 //! la rom de l'utilisateur en argument. Il envoie ses deux écrans par sa sortie standard et lit les commandes
@@ -51,6 +52,24 @@ struct Index {
 #[derive(serde::Deserialize)]
 struct IndexGame {
     status: String,
+    #[serde(default)]
+    play: String,
+    code: Option<f32>,
+    c: Option<f32>,
+    data: Option<f32>,
+}
+
+/// État d'un jeu : montré sur sa page. Pourcentages du code identique à l'original, du code écrit en C
+/// sans assembleur, et des données ; `play` vient de l'essai du jeu (`native/GAMES.md`).
+pub struct GameState {
+    pub code: Option<f32>,
+    pub c: Option<f32>,
+    pub data: Option<f32>,
+    pub play: String,
+}
+
+pub fn game_state(code: &str) -> Option<GameState> {
+    index().games.remove(code).map(|g| GameState { code: g.code, c: g.c, data: g.data, play: g.play })
 }
 
 fn index() -> Index {
@@ -73,11 +92,92 @@ fn module_path(code: &str) -> Option<PathBuf> {
 
 /// Où en est la génération d'un module : lu à chaque image.
 #[derive(Default)]
-struct Generation {
+pub struct Generation {
     message: String,
     result: Option<Result<PathBuf, String>>,
 }
 
+/// Les générations de cette session, par code de jeu.
+static JOBS: Mutex<Option<std::collections::HashMap<String, Arc<Mutex<Generation>>>>> = Mutex::new(None);
+
+/// Ce que le launcher montre pour un jeu.
+pub enum Preparation {
+    Ready,
+    Running(String),
+    Failed(String),
+    NotStarted,
+}
+
+pub fn preparation(code: &str) -> Preparation {
+    if module_path(code).is_some() {
+        return Preparation::Ready;
+    }
+    let jobs = JOBS.lock().unwrap();
+    let Some(job) = jobs.as_ref().and_then(|j| j.get(code)) else { return Preparation::NotStarted };
+    let state = job.lock().unwrap();
+    match &state.result {
+        Some(Err(e)) => Preparation::Failed(e.clone()),
+        Some(Ok(_)) => Preparation::Ready,
+        None => Preparation::Running(state.message.clone()),
+    }
+}
+
+/// Lance la génération de ce jeu, ou renvoie celle en cours. Une génération ratée est relancée.
+fn start_job(code: &str, rom: &Path) -> Arc<Mutex<Generation>> {
+    let mut jobs = JOBS.lock().unwrap();
+    let map = jobs.get_or_insert_with(Default::default);
+    if let Some(job) = map.get(code) {
+        if !matches!(job.lock().unwrap().result, Some(Err(_))) {
+            return job.clone();
+        }
+    }
+    let state = Arc::new(Mutex::new(Generation::default()));
+    map.insert(code.to_string(), state.clone());
+    let (thread_state, code, rom) = (state.clone(), code.to_string(), rom.to_path_buf());
+    std::thread::spawn(move || {
+        let result = generate(&code, &rom, &thread_state);
+        if let Err(e) = &result {
+            error!("{code} : le module natif n'a pas pu etre genere : {e}");
+        }
+        thread_state.lock().unwrap().result = Some(result);
+    });
+    state
+}
+
+/// Le joueur demande ce jeu.
+pub fn prepare(code: &str, rom: &Path) {
+    start_job(code, rom);
+}
+
+/// Oublie le module de ce jeu : il sera refait. Sans effet tant que sa génération tourne.
+pub fn forget(code: &str) {
+    let mut jobs = JOBS.lock().unwrap();
+    if let Some(map) = jobs.as_mut() {
+        if map.get(code).is_some_and(|job| job.lock().unwrap().result.is_none()) {
+            return;
+        }
+        map.remove(code);
+    }
+    let _ = std::fs::remove_file(generated_path(code));
+}
+
+/// Prépare le prochain jeu sans module : un seul à la fois, pour laisser le PC tranquille. Sans `all`, seulement ceux
+/// qui marchent ; les expérimentaux attendent qu'on les demande.
+pub fn prepare_next<'a>(roms: impl Iterator<Item = (&'a str, &'a Path)>, all: bool) {
+    let running = JOBS.lock().unwrap().as_ref().is_some_and(|j| j.values().any(|job| job.lock().unwrap().result.is_none()));
+    if running {
+        return;
+    }
+    let games = index().games;
+    for (code, rom) in roms {
+        if games.get(code).is_some_and(|g| all || g.status == "ok") && matches!(preparation(code), Preparation::NotStarted) {
+            start_job(code, rom);
+            return;
+        }
+    }
+}
+
+/// Jeu lancé sans module (ligne de commande) : son écran attend la génération.
 #[derive(Resource)]
 struct Generating {
     code: String,
@@ -92,6 +192,11 @@ fn say(state: &Mutex<Generation>, message: String) {
 
 /// Télécharge et décompresse la boîte à outils si elle n'est pas là ; renvoie son dossier.
 fn ensure_toolchain(state: &Mutex<Generation>) -> Result<PathBuf, String> {
+    let exe = std::env::current_exe().unwrap_or_default();
+    let bundled = exe.parent().unwrap_or(Path::new(".")).join("native-toolchain");
+    if bundled.join("python").join("python.exe").exists() {
+        return Ok(bundled);
+    }
     let version = index().toolchain;
     let dir = crate::save::data_dir().join("native-toolchain").join(version.to_string());
     let ready = dir.join("installed");
@@ -220,21 +325,15 @@ fn start_module(mut commands: Commands, mut images: ResMut<Assets<Image>>, rom: 
         launch(&mut commands, &mut images, &code, &rom.0, &module);
         return;
     }
-    // Pas encore de module : on le génère dans un fil à part, l'écran reste vivant
-    let state = Arc::new(Mutex::new(Generation::default()));
-    let (thread_state, thread_code, thread_rom) = (state.clone(), code.clone(), rom.0.clone());
-    std::thread::spawn(move || {
-        let result = generate(&thread_code, &thread_rom, &thread_state);
-        thread_state.lock().unwrap().result = Some(result);
-    });
+    let state = start_job(&code, &rom.0);
     let label = commands.spawn((Text2d::new(""), TextFont::from_font_size(10.0), TextLayout::new(Justify::Center, LineBreak::WordBoundary), bevy::text::TextBounds::new_horizontal(230.0), Engine::Main.layers(), in_game())).id();
     commands.insert_resource(Generating { code, rom: rom.0.clone(), state, label });
 }
 
 fn poll_generation(mut commands: Commands, generating: Res<Generating>, mut images: ResMut<Assets<Image>>, mut texts: Query<&mut Text2d>, mut toasts: MessageWriter<ShowToast>) {
     let (message, result) = {
-        let mut state = generating.state.lock().unwrap();
-        (state.message.clone(), state.result.take())
+        let state = generating.state.lock().unwrap();
+        (state.message.clone(), state.result.clone())
     };
     if let Ok(mut text) = texts.get_mut(generating.label) {
         if text.0 != message {
@@ -247,7 +346,6 @@ fn poll_generation(mut commands: Commands, generating: Res<Generating>, mut imag
     match result {
         Ok(module) => launch(&mut commands, &mut images, &generating.code, &generating.rom, &module),
         Err(e) => {
-            error!("{} : le module natif n'a pas pu etre genere : {e}", generating.code);
             toasts.write(ShowToast(t!("This game could not be prepared: {e}", "Ce jeu n'a pas pu etre prepare : {e}")));
             commands.set_state(StudioState::Menu);
         }
@@ -368,4 +466,19 @@ fn send_input(mut running: ResMut<Running>, input: Res<DsInput>, stylus: Res<Sty
 fn stop_module(mut commands: Commands) {
     commands.remove_resource::<Running>();
     commands.remove_resource::<Generating>();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn l_index_est_lisible_et_donne_l_etat_des_jeux() {
+        let index = index();
+        assert!(index.games.len() > 50);
+        let tom = game_state("AJTP").expect("Tom et Jerry");
+        assert_eq!(tom.play, "playable");
+        assert!(tom.code.unwrap() > 50.0 && tom.data.unwrap() > 50.0 && tom.c.unwrap() > 0.0);
+        assert!(is_experimental("BW7E") && !is_experimental("AL7E"));
+    }
 }

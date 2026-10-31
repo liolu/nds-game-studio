@@ -182,6 +182,14 @@ impl VersionInfo {
     }
 }
 
+/// Version stable choisie à la main dans le launcher de mise à jour : on ne propose rien d'autre.
+pub fn is_pinned() -> bool {
+    std::fs::read_to_string(exe_dir().join("launcher.json")).is_ok_and(|text| {
+        let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+        compact.contains("\"pinned\":\"")
+    })
+}
+
 pub fn needs_update(remote_code: u32) -> bool {
     remote_code > VERSION_CODE
 }

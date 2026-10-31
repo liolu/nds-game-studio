@@ -101,6 +101,8 @@ struct Launcher {
     cover_job: Option<Arc<Mutex<crate::covers::Progress>>>,
     /// Codes déjà demandés depuis le démarrage : un jeu absent de GameTDB n'est pas redemandé à chaque image.
     cover_asked: std::collections::HashSet<String>,
+    /// Options > Launcher : préparer aussi les jeux expérimentaux.
+    prepare_all: bool,
     prefs: LibraryPrefs,
     /// Jeu ouvert (nom de fichier de la rom) ; sans, la vue des jeux.
     open: Option<String>,
@@ -161,6 +163,26 @@ struct VersionText;
 struct CoverChoice(bool);
 
 #[derive(Component)]
+struct UpdateBanner;
+
+/// Une mise à jour trouvée par l'application : version et notes.
+#[derive(Clone)]
+pub struct UpdateInfo {
+    pub version: String,
+    pub notes: String,
+}
+
+/// Rempli par l'application (qui connaît son canal) quand une version plus récente existe.
+#[derive(Resource, Clone, Default)]
+pub struct UpdateOffer(pub Arc<Mutex<Option<UpdateInfo>>>);
+
+const UPDATE_LATER_SECS: u64 = 3 * 24 * 3600;
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+#[derive(Component)]
 struct CoverStatus;
 
 #[derive(Component)]
@@ -175,7 +197,8 @@ impl Plugin for LauncherPlugin {
             .add_systems(OnEnter(StudioState::Menu), spawn_launcher.before(crate::studio::auto_start))
             .add_systems(Update, (take_drops, poll_copies, poll_disk, back_key, type_folder_name, expire_confirm, log_clicks, rebuild, show_status).chain().run_if(in_state(StudioState::Menu)))
             .add_systems(Update, (wheel, looks, view_choice_looks, lang_choice_looks, version_text, redo_on_language))
-            .add_systems(Update, (poll_covers, cover_choice_looks));
+            .init_resource::<UpdateOffer>()
+            .add_systems(Update, (poll_covers, cover_choice_looks, prepare_games, update_banner.run_if(in_state(StudioState::Menu))));
     }
 }
 
@@ -312,6 +335,89 @@ fn reload_roms(lau: &mut Launcher, images: &mut Assets<Image>) {
         })
         .collect();
     lau.dirty = true;
+}
+
+/// Prépare les jeux en tâche de fond, et rafraîchit la page du jeu ouvert quand son état change.
+fn prepare_games(mut lau: ResMut<Launcher>, state: Res<State<StudioState>>, time: Res<Time>, mut next: Local<f32>, mut shown: Local<String>) {
+    if time.elapsed_secs() < *next {
+        return;
+    }
+    *next = time.elapsed_secs() + 1.0;
+    // Pas de compilation pendant qu'on joue
+    if *state.get() == StudioState::Menu {
+        crate::native_game::prepare_next(lau.roms.iter().map(|r| (r.info.code.as_str(), r.info.path.as_path())), lau.prepare_all);
+    }
+    let Some(open) = lau.open.clone() else { return };
+    let Some(rom) = lau.roms.iter().find(|r| r.info.file == open) else { return };
+    let now = match crate::native_game::preparation(&rom.info.code) {
+        crate::native_game::Preparation::Ready => "pret".to_string(),
+        crate::native_game::Preparation::Running(m) => m,
+        crate::native_game::Preparation::Failed(e) => e,
+        crate::native_game::Preparation::NotStarted => String::new(),
+    };
+    if *shown != now {
+        *shown = now;
+        lau.dirty = true;
+    }
+}
+
+/// La mise à jour proposée : « Plus tard » l'écarte trois jours (idée reprise du launcher d'OpenRAC).
+fn update_banner(
+    mut commands: Commands,
+    offer: Res<UpdateOffer>,
+    mut lau: ResMut<Launcher>,
+    screens: Res<DsScreens>,
+    cameras: Query<(Entity, &DisplayCamera)>,
+    existing: Query<(), With<UpdateBanner>>,
+) {
+    let _ = &mut lau;
+    if !existing.is_empty() {
+        return;
+    }
+    let Some(info) = offer.0.lock().unwrap().clone() else { return };
+    if lau.prefs.update_later == info.version && now_secs() < lau.prefs.update_later_until {
+        return;
+    }
+    let Some((camera, _)) = cameras.iter().find(|(_, d)| d.0 == screens.main_window()) else { return };
+    let font = lau.font.clone();
+    let version = info.version.clone();
+    commands
+        .spawn((
+            UpdateBanner,
+            Node { position_type: PositionType::Absolute, left: px(190), bottom: px(16), max_width: px(620), padding: UiRect::all(px(12)), column_gap: px(10), align_items: AlignItems::Center, border_radius: BorderRadius::all(px(8)), ..default() },
+            BackgroundColor(ITEM_ON),
+            GlobalZIndex(5),
+            UiTargetCamera(camera),
+            DespawnOnExit(StudioState::Menu),
+        ))
+        .with_children(|b| {
+            b.spawn((text(&font, t!("New version: {}. {}", "Nouvelle version : {}. {}", info.version, info.notes), 14.0, TEXT), Node { flex_shrink: 1.0, ..default() }));
+            button(b, Node { flex_shrink: 0.0, ..button_node() }, PLAY, PLAY_HOVER).observe(start_update).with_child(text(&font, tr("Update", "Mettre a jour"), 14.0, TEXT));
+            button(b, Node { flex_shrink: 0.0, ..button_node() }, ITEM, ITEM_HOVER)
+                .observe(move |_: On<Activate>, mut commands: Commands, mut lau: ResMut<Launcher>, banners: Query<Entity, With<UpdateBanner>>| {
+                    lau.prefs.update_later = version.clone();
+                    lau.prefs.update_later_until = now_secs() + UPDATE_LATER_SECS;
+                    lau.prefs.store();
+                    for banner in &banners {
+                        commands.entity(banner).despawn();
+                    }
+                })
+                .with_child(text(&font, tr("Later", "Plus tard"), 14.0, TEXT));
+        });
+}
+
+/// Le programme de mise à jour remplace le studio : il installe la version, puis relance le studio.
+fn start_update(_: On<Activate>, mut exit: MessageWriter<AppExit>, mut toasts: MessageWriter<crate::link::ShowToast>) {
+    let exe = std::env::current_exe().unwrap_or_default();
+    let updater = exe.with_file_name(format!("nds-game-studio-launcher{}", std::env::consts::EXE_SUFFIX));
+    match std::process::Command::new(&updater).spawn() {
+        Ok(_) => {
+            exit.write(AppExit::Success);
+        }
+        Err(e) => {
+            toasts.write(crate::link::ShowToast(format!("{} : {e}", updater.display())));
+        }
+    }
 }
 
 fn load_art(code: &str, images: &mut Assets<Image>) -> Option<(Handle<Image>, f32)> {
@@ -935,7 +1041,7 @@ fn spawn_game(main: &mut ChildSpawnerCommands, lau: &Launcher, rom: &Rom, regist
             Tab::Play => play_tab(rom, registry),
             Tab::Modding => modding_tab(rom),
             Tab::Description => description_tab(rom),
-            Tab::Settings => settings_tab(lau, rom),
+            Tab::Settings => settings_tab(lau, rom, registry),
         };
         zone.spawn(Node { flex_shrink: 0.0, min_height: px(MAIN_PAD + COVER - HEADER_H + 14.0), flex_direction: FlexDirection::Column, row_gap: px(10), padding: UiRect::new(px(beside - 2.0), px(20), px(16), px(10)), ..default() }).with_children(|t| top(t, font));
         zone.spawn((
@@ -961,23 +1067,61 @@ fn native_game(registry: &GameRegistry, code: &str) -> Option<String> {
 fn play_tab(rom: &Rom, registry: &GameRegistry) -> (Top, Rest) {
     let native = native_game(registry, &rom.info.code);
     let experimental = native.is_some() && crate::native_game::is_experimental(&rom.info.code);
+    let code = rom.info.code.clone();
+    let code_for_state = code.clone();
+    let state = crate::native_game::preparation(&code);
     let path = rom.info.path.clone();
     let summary = format!("{}  -  {}  -  {}", rom.info.code, rom.info.region(), format_size(rom.info.size));
     (
         Box::new(move |t, font| {
-            let ready = native.is_some();
-            let (normal, hover) = if ready { (PLAY, PLAY_HOVER) } else { (ITEM, ITEM) };
+            use crate::native_game::Preparation;
+            let running = matches!(state, Preparation::Running(_));
+            let usable = native.is_some() && !running;
+            let (normal, hover) = if usable { (PLAY, PLAY_HOVER) } else { (ITEM, ITEM) };
             let mut play = button(t, Node { align_self: AlignSelf::FlexStart, padding: UiRect::axes(px(48), px(14)), ..button_node() }, normal, hover);
-            if let Some(id) = native {
-                play.observe(move |_: On<Activate>, mut commands: Commands| {
-                    commands.insert_resource(ActiveRom(path.clone()));
-                    commands.insert_resource(ActiveGame(Some(id.clone())));
-                    commands.set_state(StudioState::Playing);
+            if let (Some(id), false) = (native.clone(), running) {
+                let ready = matches!(state, Preparation::Ready);
+                play.observe(move |_: On<Activate>, mut commands: Commands, mut lau: ResMut<Launcher>| {
+                    if ready {
+                        commands.insert_resource(ActiveRom(path.clone()));
+                        commands.insert_resource(ActiveGame(Some(id.clone())));
+                        commands.set_state(StudioState::Playing);
+                    } else {
+                        // Pas d'attente devant un écran : la page reste là et le bouton s'active quand c'est prêt
+                        crate::native_game::prepare(&code, &path);
+                        lau.dirty = true;
+                    }
                 });
             }
-            play.with_child(text(font, tr("Play", "Jouer"), 22.0, if ready { TEXT } else { DIM }));
-            if !ready {
-                t.spawn(text(font, tr("Not playable yet: this game has no native module (decompilation + runtime).", "Pas encore jouable : ce jeu n'a pas de module natif (decompilation + runtime)."), 15.0, DIM));
+            let label = match (&state, native.is_some()) {
+                (Preparation::Running(_), _) => tr("Preparing...", "Preparation..."),
+                (Preparation::NotStarted | Preparation::Failed(_), true) => tr("Prepare", "Preparer"),
+                _ => tr("Play", "Jouer"),
+            };
+            play.with_child(text(font, label, 22.0, if usable { TEXT } else { DIM }));
+            match &state {
+                Preparation::Running(message) if !message.is_empty() => {
+                    t.spawn(text(font, t!("{message} You can keep using the launcher.", "{message} Vous pouvez continuer a utiliser le launcher."), 15.0, DIM));
+                }
+                Preparation::Failed(e) => {
+                    t.spawn(text(font, t!("This game could not be prepared: {e}", "Ce jeu n'a pas pu etre prepare : {e}"), 15.0, DIM));
+                }
+                _ => {}
+            }
+            if native.is_none() {
+                t.spawn(text(font, tr("Not playable yet: this game has no native module.", "Pas encore jouable : ce jeu n'a pas de module natif."), 15.0, DIM));
+            }
+            if let Some(game) = crate::native_game::game_state(&code_for_state) {
+                let percent = |v: Option<f32>| v.map_or_else(|| "?".to_string(), |v| format!("{v:.1} %"));
+                let play = match game.play.as_str() {
+                    "playable" => tr("playable (tested until in-game)", "jouable (essaye jusqu'en jeu)"),
+                    "starts" => tr("starts", "demarre"),
+                    "crash" => tr("crashes at start", "plante au demarrage"),
+                    "stuck" => tr("stuck at start", "bloque au demarrage"),
+                    _ => tr("not tested", "pas essaye"),
+                };
+                t.spawn(text(font, t!("Code matched: {}   C: {}   Data: {}", "Code decompile : {}   C : {}   Donnees : {}", percent(game.code), percent(game.c), percent(game.data)), 15.0, TEXT));
+                t.spawn(text(font, t!("Playability: {play}", "Jouabilite : {play}"), 15.0, TEXT));
             }
             if experimental {
                 t.spawn(text(font, tr("Experimental: this game may crash or show nothing yet.", "Experimental : ce jeu peut planter ou ne rien afficher pour l'instant."), 15.0, DIM));
@@ -1038,14 +1182,33 @@ fn description_tab(rom: &Rom) -> (Top, Rest) {
     )
 }
 
-fn settings_tab(lau: &Launcher, rom: &Rom) -> (Top, Rest) {
+fn settings_tab(lau: &Launcher, rom: &Rom, registry: &GameRegistry) -> (Top, Rest) {
     let confirming = lau.confirm_remove.is_some();
     let (file, path) = (rom.info.file.clone(), rom.info.path.clone());
     let shown = path.display().to_string();
     let (folders, moved) = (lau.folders.clone(), file.clone());
     let current = library::parent_of(&file).to_string();
+    let native_code = native_game(registry, &rom.info.code).map(|_| rom.info.code.clone());
+    let path_for_native = rom.info.path.clone();
     (
         Box::new(move |t, font| {
+            if let Some(code) = native_code.clone() {
+                use crate::native_game::Preparation;
+                t.spawn(text(font, tr("Native game", "Jeu natif"), 15.0, DIM));
+                let path = path_for_native.clone();
+                let label = match crate::native_game::preparation(&code) {
+                    Preparation::Ready => tr("Prepare again", "Preparer a nouveau"),
+                    Preparation::Running(_) => tr("Preparing...", "Preparation..."),
+                    _ => tr("Prepare", "Preparer"),
+                };
+                button(t, Node { align_self: AlignSelf::FlexStart, ..button_node() }, ITEM, ITEM_HOVER)
+                    .observe(move |_: On<Activate>, mut lau: ResMut<Launcher>| {
+                        crate::native_game::forget(&code);
+                        crate::native_game::prepare(&code, &path);
+                        lau.dirty = true;
+                    })
+                    .with_child(text(font, label, 15.0, TEXT));
+            }
             t.spawn(text(font, "Rom", 15.0, DIM));
             t.spawn(text(font, shown, 14.0, TEXT));
             button(t, Node { align_self: AlignSelf::FlexStart, ..button_node() }, ITEM, ITEM_HOVER).observe(|_: On<Activate>| open_rom_folder()).with_child(text(font, tr("Open the roms folder", "Ouvrir le dossier des roms"), 15.0, TEXT));
@@ -1171,6 +1334,13 @@ pub fn spawn_options_page(c: &mut ChildSpawnerCommands) {
         button(row, Node { flex_shrink: 0.0, ..button_node() }, ITEM, ITEM_HOVER).observe(|_: On<Activate>| open_rom_folder()).with_child(page_label(tr("Open the folder", "Ouvrir le dossier"), 15.0, TEXT));
         row.spawn(page_label(library::rom_dir().display().to_string(), 13.0, DIM));
     });
+    c.spawn(page_label(tr("Native games", "Jeux natifs"), 15.0, DIM));
+    button(c, Node { align_self: AlignSelf::FlexStart, ..button_node() }, ITEM, ITEM_HOVER)
+        .observe(|_: On<Activate>, mut lau: ResMut<Launcher>| lau.prepare_all = true)
+        .with_child(page_label(tr("Prepare all games, experimental ones too", "Preparer tous les jeux, meme experimentaux"), 14.0, TEXT));
+    c.spawn(page_label(tr("One game at a time, about a minute each. Games that work are always prepared.", "Un jeu a la fois, environ une minute chacun. Les jeux qui marchent sont toujours prepares."), 13.0, DIM));
+    c.spawn(page_label(tr("Updates", "Mises a jour"), 15.0, DIM));
+    button(c, Node { align_self: AlignSelf::FlexStart, ..button_node() }, ITEM, ITEM_HOVER).observe(start_update).with_child(page_label(tr("Check and install updates", "Chercher et installer les mises a jour"), 14.0, TEXT));
     c.spawn(page_label("Versions", 15.0, DIM));
     c.spawn((page_label("", 14.0, TEXT), VersionText));
     button(c, Node { align_self: AlignSelf::FlexStart, ..button_node() }, ITEM, ITEM_HOVER).observe(open_versions).with_child(page_label(tr("Choose a version and update (closes the studio)", "Choisir une version et mettre a jour (ferme le studio)"), 15.0, TEXT));

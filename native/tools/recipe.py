@@ -59,7 +59,9 @@ def rom_images(rom_path, build_info_offset):
         arm9 = blz_uncompress(arm9, ram, info[5])
     images = {"arm9": (ram, arm9)}
     src = info[2]
-    for at in range(info[0], info[1], 12):
+    # SDK des jeux DSi : entrees de 16 octets au lieu de 12
+    step = 12 if (info[1] - info[0]) % 12 == 0 else 16
+    for at in range(info[0], info[1], step):
         dest, length, _bss = struct.unpack_from("<III", arm9, at - ram)
         images["auto_%08x" % dest] = (dest, arm9[src - ram : src - ram + length])
         src += length
@@ -80,8 +82,9 @@ def export(game, code, sha1, path):
     loads = sorted([frm, to & ~1] for frm, (kind, to) in game.relocs.items() if kind == "load" and (to & ~1) in known)
     data = {n: a for n, a in game.data.items() if not re.match(r"(data|lbl|func|sub|unk)_", n)}
     recipe = {"code": code, "sha1": sha1, "build_info": game.build_info, "functions": functions, "loads": loads, "data": data}
-    with gzip.open(path, "wt", encoding="utf8", compresslevel=9) as f:
-        json.dump(recipe, f, separators=(",", ":"))
+    # sans date dans le fichier : une recette identique ne change pas dans git
+    with open(path, "wb") as raw, gzip.GzipFile(filename="", fileobj=raw, mode="wb", compresslevel=9, mtime=0) as z:
+        z.write(json.dumps(recipe, separators=(",", ":")).encode("utf8"))
 
 
 class RecipeGame:

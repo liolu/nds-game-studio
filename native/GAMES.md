@@ -66,3 +66,4 @@ Les modules restent sur le PC (`target/release/native`), jamais dans git.
 | toy-story-3-eu | VT3V | 1 | ok | plante : acces memoire invalide 42000a8 (ecriture) eip=10002e9a esp=eff50 arm=0, rien a l'ecran |
 | ultimate-spider-man | AUSF | 105 | ok | tourne, image 0, rien a l'ecran |
 | viva-pinata-pocket-paradise | CP3E | 12 | ok | plante : instruction non traduite func_0208b104 @208b114, rien a l'ecran |
+| wheel-of-fortune | BW7E | 0 | ok | plante : instruction non traduite func_020ade24 @20ade34, rien a l'ecran |

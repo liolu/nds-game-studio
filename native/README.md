@@ -11,11 +11,12 @@ nitro-pc/ (registres, BIOS, threads, 2D, 3D, son, sauvegarde) ──────
 
 ## Chez le joueur : le launcher génère le module
 
-Au premier clic sur Jouer, le launcher :
+Les outils sont livrés avec le studio (`native-toolchain` à côté de l'exécutable, 100 Mo). Dès qu'il voit une rom, le
+launcher prépare son module en tâche de fond, un jeu à la fois et jamais pendant une partie : il vérifie le SHA-1 de la
+rom, traduit, compile (de 30 s à 1 min 30 selon le jeu) et garde le résultat dans `native/<code>-<n>.exe` du dossier des
+données. Le bouton Jouer s'active quand c'est prêt. Les jeux expérimentaux ne se préparent que sur demande (bouton Préparer).
 
-1. télécharge une seule fois la boîte à outils (39 Mo, release `native-toolchain` du dépôt, `native-toolchain-<n>.zip`) ;
-2. vérifie le SHA-1 de la rom, traduit et compile (de 30 s à 1 min 30 selon le jeu) ;
-3. garde le module dans `native/<code>-<n>.exe` du dossier des données, puis lance le jeu.
+Sans ce dossier (compilation locale), la boîte est téléchargée une fois (release `native-toolchain`).
 
 **Rien de publié ne contient de code de jeu.** La boîte à outils contient le traducteur, le runtime, GCC, Python et les
 recettes `games/<code>.json.gz` (positions des fonctions, pointeurs et noms, pas d'instructions). Les modules, eux,

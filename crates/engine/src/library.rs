@@ -332,6 +332,9 @@ pub struct LibraryPrefs {
     pub view: LibraryView,
     /// Jaquettes des jeux installés : téléchargées depuis GameTDB et montrées à la place de l'icône.
     pub covers: bool,
+    /// Mise à jour remise à plus tard : sa version, et jusqu'à quand (secondes depuis 1970).
+    pub update_later: String,
+    pub update_later_until: u64,
 }
 
 fn prefs_path() -> PathBuf {
@@ -474,7 +477,7 @@ mod tests {
 
     #[test]
     fn prefs_round_trip_and_favorites() {
-        let mut prefs = LibraryPrefs { favorites: vec![], view: LibraryView::List, covers: true };
+        let mut prefs = LibraryPrefs { favorites: vec![], view: LibraryView::List, covers: true, ..Default::default() };
         prefs.toggle_favorite("a.nds");
         prefs.toggle_favorite("b.nds");
         prefs.toggle_favorite("a.nds");

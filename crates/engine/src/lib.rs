@@ -42,6 +42,7 @@ pub mod prelude {
     pub use crate::save::GameSaves;
     pub use crate::screens::{ds_to_world, world_to_ds, Aspect, DsScreens, Engine, EngineCamera3d, RenderStyle, Screen, ScreenLayout, SCREEN_H, SCREEN_W};
     pub use crate::spec::{GameSpec, ScreenMode};
+    pub use crate::launcher::UpdateOffer;
     pub use crate::studio::{in_game, playing, ActiveGame, ActiveRom, AppGameExt, AutoStart, StudioFooter, StudioState};
     pub use crate::NdsEnginePlugin;
 }
