@@ -15,6 +15,7 @@
 pub mod asset_browser;
 pub mod asset_scan;
 pub mod controllers;
+pub mod covers;
 pub mod devtools;
 pub mod i18n;
 pub mod input;
@@ -22,6 +23,7 @@ pub mod launcher;
 pub mod library;
 pub mod link;
 pub mod logfile;
+pub mod native_game;
 pub mod options;
 pub mod save;
 pub mod saves_page;
@@ -84,7 +86,7 @@ impl Plugin for NdsEnginePlugin {
                 .set(bevy::log::LogPlugin { custom_layer: logfile::file_layer, ..default() }),
         )
         .add_plugins((screens::ScreensPlugin, link::LinkPlugin, input::InputPlugin, studio::StudioPlugin, titlebar::TitleBarPlugin, devtools::DevToolsPlugin, options::OptionsPlugin))
-            .add_plugins((save::SavePlugin, settings::SettingsPlugin, saves_page::SavesPagePlugin, asset_browser::AssetBrowserPlugin, launcher::LauncherPlugin, i18n::I18nPlugin, video::VideoPlugin));
+            .add_plugins((save::SavePlugin, settings::SettingsPlugin, saves_page::SavesPagePlugin, asset_browser::AssetBrowserPlugin, launcher::LauncherPlugin, i18n::I18nPlugin, video::VideoPlugin, native_game::NativeGamesPlugin));
         options.apply_to_app(app);
     }
 }

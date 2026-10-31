@@ -3,3 +3,7 @@
 launcher.json
 *.old
 *.old-*
+
+# Modules natifs compiles
+native/build/
+__pycache__/

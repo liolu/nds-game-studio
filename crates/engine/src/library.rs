@@ -330,6 +330,8 @@ pub struct LibraryPrefs {
     /// Noms de fichier des roms, dans l'ordre où elles ont été ajoutées aux favoris.
     pub favorites: Vec<String>,
     pub view: LibraryView,
+    /// Jaquettes des jeux installés : téléchargées depuis GameTDB et montrées à la place de l'icône.
+    pub covers: bool,
 }
 
 fn prefs_path() -> PathBuf {
@@ -472,7 +474,7 @@ mod tests {
 
     #[test]
     fn prefs_round_trip_and_favorites() {
-        let mut prefs = LibraryPrefs { favorites: vec![], view: LibraryView::List };
+        let mut prefs = LibraryPrefs { favorites: vec![], view: LibraryView::List, covers: true };
         prefs.toggle_favorite("a.nds");
         prefs.toggle_favorite("b.nds");
         prefs.toggle_favorite("a.nds");

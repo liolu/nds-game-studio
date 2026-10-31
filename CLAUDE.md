@@ -23,6 +23,7 @@
 - `crates/video` (nds-video, LGPL 2.1+ : portage de FFmpeg et mobipeg, garde sa licence) : videos VX, MODS, Bink 1, image et son ; `engine/src/video.rs` (`VideoPlayer`) les joue dans une image Bevy ;
   essai sans fenetre : `cargo run -p nds-video --release --example vcheck -- <fichier> [dossier de sortie] [n images]`.
 - `app` (nds-game-studio) : le binaire. Plus de jeux de demo : les jeux sont les roms de l'utilisateur, joues par decompilation + runtime (pas d'emulation). Un module natif s'enregistre avec `add_ds_game` et le `game_code` de sa rom.
+- `native` : runtime nitro-pc (C 32 bits) et traduction ARM vers C, voir `native/README.md` ; `native_game` (moteur) lance `native/<code>.exe` et affiche ses ecrans. Les `.exe` contiennent le code du jeu : jamais commites ni publies.
 - `tools/` : common / installer / updater / launcher (repris de SpaceSpore).
 - Une entite de jeu doit avoir `Engine::Main.layers()` ou `Engine::Sub.layers()` (sinon invisible) et `in_game()`.
   Logique de jeu dans `FixedUpdate` avec `.run_if(playing("<id>"))`.

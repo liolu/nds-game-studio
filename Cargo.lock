@@ -3792,6 +3792,8 @@ dependencies = [
  "num-traits",
  "png",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -4482,11 +4484,13 @@ dependencies = [
  "bevy",
  "dirs",
  "encoding_rs",
+ "image",
  "nds-nitro",
  "nds-video",
  "serde",
  "serde_json",
  "toml 1.1.8+spec-1.1.0",
+ "ureq",
  "windows-sys 0.61.2",
  "winit",
 ]

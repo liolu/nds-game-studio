@@ -90,12 +90,17 @@ impl Tab {
 struct Rom {
     info: RomInfo,
     icon: Option<Handle<Image>>,
+    /// Jaquette et son rapport largeur / hauteur.
+    art: Option<(Handle<Image>, f32)>,
     tint: Color,
 }
 
 #[derive(Resource, Default)]
 struct Launcher {
     roms: Vec<Rom>,
+    cover_job: Option<Arc<Mutex<crate::covers::Progress>>>,
+    /// Codes déjà demandés depuis le démarrage : un jeu absent de GameTDB n'est pas redemandé à chaque image.
+    cover_asked: std::collections::HashSet<String>,
     prefs: LibraryPrefs,
     /// Jeu ouvert (nom de fichier de la rom) ; sans, la vue des jeux.
     open: Option<String>,
@@ -153,6 +158,12 @@ struct ViewChoice(LibraryView);
 struct VersionText;
 
 #[derive(Component)]
+struct CoverChoice(bool);
+
+#[derive(Component)]
+struct CoverStatus;
+
+#[derive(Component)]
 struct LangChoice(Lang);
 
 pub struct LauncherPlugin;
@@ -163,7 +174,8 @@ impl Plugin for LauncherPlugin {
             .add_systems(Startup, setup)
             .add_systems(OnEnter(StudioState::Menu), spawn_launcher.before(crate::studio::auto_start))
             .add_systems(Update, (take_drops, poll_copies, poll_disk, back_key, type_folder_name, expire_confirm, log_clicks, rebuild, show_status).chain().run_if(in_state(StudioState::Menu)))
-            .add_systems(Update, (wheel, looks, view_choice_looks, lang_choice_looks, version_text, redo_on_language));
+            .add_systems(Update, (wheel, looks, view_choice_looks, lang_choice_looks, version_text, redo_on_language))
+            .add_systems(Update, (poll_covers, cover_choice_looks));
     }
 }
 
@@ -295,10 +307,86 @@ fn reload_roms(lau: &mut Launcher, images: &mut Assets<Image>) {
         .map(|info| {
             let icon = (!info.icon.is_empty()).then(|| images.add(rgba_image(32, 32, info.icon.clone(), ImageSampler::nearest())));
             let [r, g, b] = info.average_color();
-            Rom { info, icon, tint: Color::srgb(r * 0.45, g * 0.45, b * 0.45) }
+            let art = if lau.prefs.covers { load_art(&info.code, images) } else { None };
+            Rom { info, icon, art, tint: Color::srgb(r * 0.45, g * 0.45, b * 0.45) }
         })
         .collect();
     lau.dirty = true;
+}
+
+fn load_art(code: &str, images: &mut Assets<Image>) -> Option<(Handle<Image>, f32)> {
+    let (width, height, pixels) = crate::covers::load(code)?;
+    Some((images.add(rgba_image(width, height, pixels, ImageSampler::linear())), width as f32 / height.max(1) as f32))
+}
+
+/// Demande les jaquettes qui manquent et montre celles qui arrivent.
+fn poll_covers(mut lau: ResMut<Launcher>, mut images: ResMut<Assets<Image>>, mut status: Query<&mut Text, With<CoverStatus>>) {
+    if lau.prefs.covers && lau.cover_job.is_none() {
+        let asked = &lau.cover_asked;
+        let mut missing: Vec<String> = lau.roms.iter().map(|r| r.info.code.clone()).filter(|c| !asked.contains(c) && !crate::covers::path(c).exists()).collect();
+        missing.sort();
+        missing.dedup();
+        if !missing.is_empty() {
+            lau.cover_asked.extend(missing.iter().cloned());
+            lau.cover_job = Some(crate::covers::start(missing));
+        }
+    }
+    let Some(job) = lau.cover_job.clone() else {
+        for mut text in &mut status {
+            let wanted = if lau.prefs.covers {
+                let shown = lau.roms.iter().filter(|r| r.art.is_some()).count();
+                t!("{shown} of {} games have a cover.", "{shown} jeux sur {} ont une jaquette.", lau.roms.len())
+            } else {
+                String::new()
+            };
+            if text.0 != wanted {
+                text.0 = wanted;
+            }
+        }
+        return;
+    };
+    let (arrived, done, total, found) = {
+        let mut p = job.lock().unwrap();
+        // Refaire la zone du launcher coûte cher : par paquets, et à la fin
+        let ready = p.arrived.len() >= 8 || p.done == p.total;
+        (if ready { std::mem::take(&mut p.arrived) } else { Vec::new() }, p.done, p.total, p.found)
+    };
+    for code in &arrived {
+        for rom in lau.roms.iter_mut().filter(|r| r.info.code == *code) {
+            rom.art = load_art(code, &mut images);
+        }
+    }
+    if !arrived.is_empty() {
+        lau.dirty = true;
+    }
+    for mut text in &mut status {
+        text.0 = t!("Downloading covers: {done} of {total}, {found} found.", "Telechargement des jaquettes : {done} sur {total}, {found} trouvees.");
+    }
+    if done == total {
+        info!("jaquettes : {found} trouvees sur {total}");
+        lau.cover_job = None;
+    }
+}
+
+fn set_covers(on: bool) -> impl FnMut(On<Activate>, ResMut<Launcher>, ResMut<Assets<Image>>) {
+    move |_, mut lau, mut images| {
+        lau.prefs.covers = on;
+        lau.prefs.store();
+        let lau = &mut *lau;
+        for rom in &mut lau.roms {
+            rom.art = if on { load_art(&rom.info.code, &mut images) } else { None };
+        }
+        lau.dirty = true;
+    }
+}
+
+fn cover_choice_looks(lau: Res<Launcher>, mut buttons: Query<(&CoverChoice, &Hovered, &mut BackgroundColor)>) {
+    for (choice, hovered, mut color) in &mut buttons {
+        let wanted = if lau.prefs.covers == choice.0 { ITEM_ON } else if hovered.get() { ITEM_HOVER } else { ITEM };
+        if color.0 != wanted {
+            color.0 = wanted;
+        }
+    }
 }
 
 fn say(lau: &mut Launcher, time: &Time<Real>, message: impl Into<String>) {
@@ -489,7 +577,10 @@ fn cover(c: &mut ChildSpawnerCommands, rom: &Rom, size: f32) {
         BackgroundColor(rom.tint),
     ))
     .with_children(|b| {
-        if let Some(icon) = &rom.icon {
+        if let Some((art, aspect)) = &rom.art {
+            let (width, height) = if *aspect > 1.0 { (size, size / aspect) } else { (size * aspect, size) };
+            b.spawn((ImageNode::new(art.clone()), Node { width: px(width), height: px(height), ..default() }));
+        } else if let Some(icon) = &rom.icon {
             let side = (size * 0.8 / 32.0).floor().max(1.0) * 32.0;
             b.spawn((ImageNode::new(icon.clone()), Node { width: px(side), height: px(side), ..default() }));
         }
@@ -1061,6 +1152,16 @@ pub fn spawn_options_page(c: &mut ChildSpawnerCommands) {
             view_button(row, &Fonts::default(), view, name);
         }
     });
+    c.spawn(page_label(tr("Game covers", "Jaquettes des jeux"), 15.0, DIM));
+    c.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(6), ..default() }).with_children(|row| {
+        for (on, name) in [(false, tr("No", "Non")), (true, tr("Yes", "Oui"))] {
+            row.spawn((Button, Hovered::default(), button_node(), BackgroundColor(ITEM), CoverChoice(on)))
+                .observe(set_covers(on))
+                .with_child(page_label(name, 14.0, TEXT));
+        }
+        row.spawn((page_label("", 13.0, DIM), CoverStatus));
+    });
+    c.spawn(page_label(tr("Downloaded from GameTDB for the games you installed.", "Telechargees depuis GameTDB pour les jeux installes."), 13.0, DIM));
     c.spawn(page_label(tr("Roms folder", "Dossier des roms"), 15.0, DIM));
     c.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(12), ..default() }).with_children(|row| {
         button(row, Node { flex_shrink: 0.0, ..button_node() }, ITEM, ITEM_HOVER).observe(|_: On<Activate>| open_rom_folder()).with_child(page_label(tr("Open the folder", "Ouvrir le dossier"), 15.0, TEXT));
