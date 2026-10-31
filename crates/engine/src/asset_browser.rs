@@ -965,6 +965,15 @@ fn toggle_window(
                             };
                         })
                         .with_child((label(tr("Copy the path", "Copier le chemin"), 14.0, TEXT), Tr("Copy the path", "Copier le chemin")));
+                    for (open_file, en, fr) in [(false, "Open its folder", "Ouvrir son dossier"), (true, "Open the file", "Ouvrir le fichier")] {
+                        row.spawn((Button, Hovered::default(), item_node(), BackgroundColor(ITEM), CopyButton))
+                            .observe(move |_: On<Activate>, mut b: ResMut<AssetBrowser>| {
+                                let Some(sel) = b.selected else { return };
+                                let (rom, path) = (b.entries[sel].rom.clone(), b.entries[sel].path.clone());
+                                b.status = crate::mods::reveal(&rom, &path, open_file);
+                            })
+                            .with_child((label(tr(en, fr), 14.0, TEXT), Tr(en, fr)));
+                    }
                     row.spawn((label("", 18.0, TEXT), PathText));
                 });
                 panel.spawn((label("", 13.0, DIM), InfoText));

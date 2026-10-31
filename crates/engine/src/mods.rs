@@ -77,9 +77,14 @@ pub fn set_on(code: &str, on: bool) {
     let _ = std::fs::write(dir.join(ON_FILE), if on { "1" } else { "0" });
 }
 
+/// La copie modifiée de la rom d'un jeu.
+pub fn modded_rom(code: &str) -> PathBuf {
+    mod_dir(code).join(MODDED_ROM)
+}
+
 /// La rom à donner au jeu : la copie modifiée si les mods sont actifs, sinon la rom de l'utilisateur.
 pub fn rom_to_play(code: &str, rom: &Path) -> PathBuf {
-    if is_on(code) { mod_dir(code).join(MODDED_ROM) } else { rom.to_path_buf() }
+    if is_on(code) { modded_rom(code) } else { rom.to_path_buf() }
 }
 
 /// Retire l'outil, jamais les mods.
@@ -107,7 +112,7 @@ pub fn running() -> bool {
     JOB.lock().unwrap().running
 }
 
-fn say(line: String) {
+pub(crate) fn say(line: String) {
     let mut job = JOB.lock().unwrap();
     job.lines.push(line);
     let extra = job.lines.len().saturating_sub(KEPT_LINES);
@@ -121,7 +126,7 @@ pub fn lines_for(code: &str) -> (Vec<String>, Option<String>) {
     if job.code.as_deref().is_none_or(|c| c == code) { (job.lines.clone(), job.error.clone()) } else { (Vec::new(), None) }
 }
 
-fn start(code: Option<String>, work: impl FnOnce() -> Result<(), String> + Send + 'static) {
+pub(crate) fn start(code: Option<String>, work: impl FnOnce() -> Result<(), String> + Send + 'static) {
     {
         let mut job = JOB.lock().unwrap();
         if job.running {
@@ -182,11 +187,11 @@ fn download_and_unpack() -> Result<(), String> {
     Ok(())
 }
 
-fn run_tool(action: &str, code: &str, rom: &Path) -> Result<(), String> {
+fn run_tool(action: &str, code: &str, rom: &Path, extra: &[&str]) -> Result<(), String> {
     let dir = mod_dir(code);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let mut command = Command::new(tool_path());
-    command.arg(action).arg("--rom").arg(rom).arg("--mod-dir").arg(&dir).arg("--lang").arg(if lang() == Lang::Fr { "fr" } else { "en" });
+    command.arg(action).arg("--rom").arg(rom).arg("--mod-dir").arg(&dir).arg("--lang").arg(if lang() == Lang::Fr { "fr" } else { "en" }).args(extra);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -225,25 +230,143 @@ fn run_tool(action: &str, code: &str, rom: &Path) -> Result<(), String> {
 pub fn export(code: &str, rom: &Path) {
     let (code, rom) = (code.to_string(), rom.to_path_buf());
     start(Some(code.clone()), move || {
-        run_tool("export", &code, &rom).inspect_err(|e| activity::record(What::ModFailed { game: code.clone(), error: e.clone() }))
+        run_tool("export", &code, &rom, &[]).inspect_err(|e| activity::record(What::ModFailed { game: code.clone(), error: e.clone() }))
     });
 }
 
 /// Réimporte ce qui a changé et refait la copie de la rom ; les mods deviennent actifs s'il y a une copie.
 pub fn apply(code: &str, rom: &Path) {
     let (code, rom) = (code.to_string(), rom.to_path_buf());
-    start(Some(code.clone()), move || {
-        let result = run_tool("import", &code, &rom);
-        match &result {
-            Ok(()) => {
-                set_on(&code, has_modded_rom(&code));
-                let (applied, errors) = report(&code).map_or((0, 0), |r| (r.applied.len(), r.errors.len()));
-                activity::record(What::ModApplied { game: code.clone(), applied, errors });
-            }
-            Err(e) => activity::record(What::ModFailed { game: code.clone(), error: e.clone() }),
+    start(Some(code.clone()), move || apply_now(&code, &rom));
+}
+
+/// Comme `apply`, dans le travail en cours.
+pub(crate) fn apply_now(code: &str, rom: &Path) -> Result<(), String> {
+    let result = run_tool("import", code, rom, &[]);
+    match &result {
+        Ok(()) => {
+            set_on(code, has_modded_rom(code));
+            let (applied, errors) = report(code).map_or((0, 0), |r| (r.applied.len(), r.errors.len()));
+            activity::record(What::ModApplied { game: code.to_string(), applied, errors });
         }
-        result
+        Err(e) => activity::record(What::ModFailed { game: code.to_string(), error: e.clone() }),
+    }
+    result
+}
+
+/// Le fichier exporté qui correspond à un fichier du jeu : pas un `.mtl`, qui ne sert qu'à accompagner un `.obj`.
+fn exported_file(code: &str, entry_path: &str) -> Option<PathBuf> {
+    #[derive(serde::Deserialize)]
+    struct Item {
+        file: String,
+        source: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct Manifest {
+        items: Vec<Item>,
+    }
+    let manifest: Manifest = serde_json::from_slice(&std::fs::read(mod_dir(code).join("manifest.json")).ok()?).ok()?;
+    let mine: Vec<&Item> = manifest.items.iter().filter(|item| item.source == entry_path).collect();
+    // Un modèle se montre par son .obj, et non par la première de ses textures
+    let item = mine.iter().find(|item| item.file.ends_with(".obj")).or_else(|| mine.iter().find(|item| !item.file.ends_with(".mtl"))).or(mine.first())?;
+    let path = files_dir(code).join(item.file.replace('/', std::path::MAIN_SEPARATOR_STR));
+    path.is_file().then_some(path)
+}
+
+/// Essais : le chemin va dans ce fichier, sans ouvrir de fenêtre devant l'utilisateur.
+fn test_log(action: &str, path: &Path) -> bool {
+    let Some(log) = std::env::var_os("NDSGS_REVEAL_LOG") else { return false };
+    let _ = std::fs::write(log, format!("{action} {}", path.display()));
+    true
+}
+
+/// Montre un fichier dans l'explorateur du système, sélectionné.
+fn show_in_folder(path: &Path) {
+    if test_log("dossier", path) {
+        return;
+    }
+    let mut command;
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command = Command::new("explorer");
+        command.raw_arg(format!("/select,\"{}\"", path.display()));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        command = Command::new("open");
+        command.arg("-R").arg(path);
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        command = Command::new("xdg-open");
+        command.arg(path.parent().unwrap_or(path));
+    }
+    let _ = command.spawn();
+}
+
+/// Ouvre un fichier avec le logiciel que le système lui associe.
+fn open_with_system(path: &Path) {
+    if test_log("fichier", path) {
+        return;
+    }
+    let mut command;
+    #[cfg(windows)]
+    {
+        command = Command::new("explorer");
+        command.arg(path);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        command = Command::new("open");
+        command.arg(path);
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        command = Command::new("xdg-open");
+        command.arg(path);
+    }
+    let _ = command.spawn();
+}
+
+/// Les fichiers d'un jeu sont dans sa rom : on montre leur export, fait à la demande pour ce fichier. Rend ce que dit la fenêtre.
+pub fn reveal(rom: &Path, entry_path: &str, open_file: bool) -> String {
+    let code = match crate::library::read_rom(rom) {
+        Ok(info) => info.code,
+        Err(e) => return e,
+    };
+    let act = move |path: &Path| if open_file { open_with_system(path) } else { show_in_folder(path) };
+    if let Some(path) = exported_file(&code, entry_path) {
+        act(&path);
+        return t!("Opened: {}", "Ouvert : {}", path.display());
+    }
+    if !installed() {
+        return tr("This file is inside the rom. Download the mod tools (Modding tab) to get it as a file.", "Ce fichier est dans la rom. Telechargez les outils de mod (onglet Moding) pour l'avoir en fichier.").to_string();
+    }
+    if running() {
+        return tr("The mod tools are busy: try again in a moment.", "Les outils de mod travaillent : reessayez dans un instant.").to_string();
+    }
+    let (rom, entry, game) = (rom.to_path_buf(), entry_path.to_string(), code.clone());
+    start(Some(code), move || {
+        run_tool("export", &game, &rom, &["--only", &entry])?;
+        match exported_file(&game, &entry) {
+            Some(path) => {
+                act(&path);
+                Ok(())
+            }
+            // Une archive s'exporte par ses fichiers : son dossier
+            None => {
+                let folder = files_dir(&game).join(entry.split('#').next().unwrap_or(&entry).replace('/', std::path::MAIN_SEPARATOR_STR));
+                if folder.is_dir() {
+                    act(&folder);
+                    return Ok(());
+                }
+                act(&mod_dir(&game));
+                Ok(())
+            }
+        }
     });
+    tr("Exporting this file from the rom...", "Export de ce fichier depuis la rom...").to_string()
 }
 
 /// Le compte rendu du dernier import.

@@ -19,6 +19,10 @@ ureq = { version = "3", features = ["native-tls"], default-features = false }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 # Boite a outils des jeux natifs
 zip = { version = "2", default-features = false, features = ["deflate"] }
+# Controler l'archive d'un mod telecharge (SHA256SUMS)
+sha2 = "0.10"
+# Choisir le fichier ou le dossier d'un mod
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 # Meme version que bevy_winit : positionner la fenetre du bas directement
 winit = { version = "0.30", default-features = false }
 
