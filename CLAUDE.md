@@ -11,7 +11,7 @@
 
 - `crates/engine` (nds-engine) : le moteur Bevy. `screens` (moteurs Main/Sub -> canvas 256x192 -> fenetres),
   `link` (fusionnes = 1 fenetre, separes = 2 fenetres, F9/F8, glisser Alt+clic), `input` (boutons DS + stylet, lus dans FixedPreUpdate), `spec` (game.toml),
-  `studio` (registre des jeux, application de la spec), `launcher` (ecran d'accueil : grille/liste, page d'un jeu, favoris, depot d'une rom), `library` (roms du dossier rom, banniere, preferences launcher.toml), `titlebar` (barre de titre dessinee, bouton fusion),
+  `studio` (registre des jeux, application de la spec), `launcher` (ecran d'accueil : grille/liste, page d'un jeu, favoris, depot d'une rom), `library` (roms du dossier rom, banniere, preferences launcher.toml), `titlebar` (barre de titre dessinee, bouton fusion), `logfile` (journal log/launcher.log a cote de l'exe, `NDSGS_LOG_DIR`),
   `devtools` (F5 fenetre Code, surveillance des sources -> cargo build -> relance avec LaunchOptions),
   `options` (F1 fenetre Options), `controllers` (manettes : controllers/<id>.toml, detection, dessin),
   `i18n` (langue : anglais par defaut, francais au choix ; tout texte montre s'ecrit `tr("en", "fr")` ou `t!("en {x}", "fr {x}")`, jamais une seule langue),
