@@ -9,16 +9,17 @@
 //! la rom de l'utilisateur en argument. Il envoie ses deux écrans par sa sortie standard et lit les commandes
 //! sur son entrée standard ; le moteur les affiche sur les écrans habituels (fenêtres liées ou séparées, F8, F9).
 
-use std::io::{Read, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use bevy::asset::RenderAssetUsages;
 use bevy::image::ImageSampler;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
+use crate::activity::{self, What};
 use crate::i18n::{t, tr};
 use crate::input::{DsButton, DsInput, Stylus};
 use crate::link::ShowToast;
@@ -69,11 +70,13 @@ pub struct GameState {
 }
 
 pub fn game_state(code: &str) -> Option<GameState> {
-    index().games.remove(code).map(|g| GameState { code: g.code, c: g.c, data: g.data, play: g.play })
+    index().games.get(code).map(|g| GameState { code: g.code, c: g.c, data: g.data, play: g.play.clone() })
 }
 
-fn index() -> Index {
-    serde_json::from_str(INDEX).expect("native/games/index.json")
+/// Lu une fois : le launcher le consulte pour chaque jeu de la vue.
+fn index() -> &'static Index {
+    static PARSED: OnceLock<Index> = OnceLock::new();
+    PARSED.get_or_init(|| serde_json::from_str(INDEX).expect("native/games/index.json"))
 }
 
 /// Ce jeu se lance mais n'a pas été essayé jusqu'en jeu, ou ne marche pas encore.
@@ -94,7 +97,50 @@ fn module_path(code: &str) -> Option<PathBuf> {
 #[derive(Default)]
 pub struct Generation {
     message: String,
+    /// Les dernières lignes écrites par le programme qui prépare le jeu.
+    lines: Vec<String>,
+    started: Option<std::time::Instant>,
     result: Option<Result<PathBuf, String>>,
+}
+
+/// Lignes de la préparation gardées pour le launcher.
+const KEPT_LINES: usize = 5;
+
+/// La préparation en cours : ce que le launcher montre pendant qu'elle tourne.
+pub struct CurrentJob {
+    pub code: String,
+    pub message: String,
+    pub lines: Vec<String>,
+    pub seconds: u64,
+}
+
+pub fn current_job() -> Option<CurrentJob> {
+    let jobs = JOBS.lock().unwrap();
+    jobs.as_ref()?.iter().find_map(|(code, job)| {
+        let state = job.lock().unwrap();
+        state.result.is_none().then(|| CurrentJob { code: code.clone(), message: state.message.clone(), lines: state.lines.clone(), seconds: state.started.map_or(0, |s| s.elapsed().as_secs()) })
+    })
+}
+
+/// Où en sont les jeux installés : prêts, en attente de leur tour, en erreur.
+#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Overview {
+    pub ready: usize,
+    pub waiting: usize,
+    pub failed: usize,
+}
+
+pub fn overview<'a>(codes: impl Iterator<Item = &'a str>, all: bool) -> Overview {
+    let mut result = Overview::default();
+    for code in codes {
+        match preparation(code) {
+            Preparation::Ready => result.ready += 1,
+            Preparation::Failed(_) => result.failed += 1,
+            Preparation::NotStarted if index().games.get(code).is_some_and(|g| all || g.status == "ok") => result.waiting += 1,
+            _ => {}
+        }
+    }
+    result
 }
 
 /// Les générations de cette session, par code de jeu.
@@ -131,13 +177,18 @@ fn start_job(code: &str, rom: &Path) -> Arc<Mutex<Generation>> {
             return job.clone();
         }
     }
-    let state = Arc::new(Mutex::new(Generation::default()));
+    let state = Arc::new(Mutex::new(Generation { started: Some(std::time::Instant::now()), ..Default::default() }));
     map.insert(code.to_string(), state.clone());
     let (thread_state, code, rom) = (state.clone(), code.to_string(), rom.to_path_buf());
     std::thread::spawn(move || {
+        let started = std::time::Instant::now();
         let result = generate(&code, &rom, &thread_state);
-        if let Err(e) = &result {
-            error!("{code} : le module natif n'a pas pu etre genere : {e}");
+        match &result {
+            Ok(_) => activity::record(What::Ready { game: code.clone(), seconds: started.elapsed().as_secs() }),
+            Err(e) => {
+                error!("{code} : le module natif n'a pas pu etre genere : {e}");
+                activity::record(What::PrepareFailed { game: code.clone(), error: e.clone() });
+            }
         }
         thread_state.lock().unwrap().result = Some(result);
     });
@@ -168,7 +219,7 @@ pub fn prepare_next<'a>(roms: impl Iterator<Item = (&'a str, &'a Path)>, all: bo
     if running {
         return;
     }
-    let games = index().games;
+    let games = &index().games;
     for (code, rom) in roms {
         if games.get(code).is_some_and(|g| all || g.status == "ok") && matches!(preparation(code), Preparation::NotStarted) {
             start_job(code, rom);
@@ -226,12 +277,27 @@ fn ensure_toolchain(state: &Mutex<Generation>) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+/// Lit une sortie du programme ligne par ligne : tout pour le journal, la fin pour le launcher.
+fn follow_output(output: impl Read, state: &Mutex<Generation>, log: &Mutex<String>) {
+    for line in std::io::BufReader::new(output).split(b'\n').map_while(Result::ok) {
+        let line = String::from_utf8_lossy(&line).trim_end().to_string();
+        log.lock().unwrap().push_str(&format!("{line}\n"));
+        if !line.is_empty() {
+            let mut state = state.lock().unwrap();
+            state.lines.push(line);
+            let extra = state.lines.len().saturating_sub(KEPT_LINES);
+            state.lines.drain(..extra);
+        }
+    }
+}
+
 fn generate(code: &str, rom: &Path, state: &Mutex<Generation>) -> Result<PathBuf, String> {
     let tools = ensure_toolchain(state)?;
     say(state, tr("Preparing the game from your rom (about a minute, only once)...", "Preparation du jeu depuis votre rom (environ une minute, une seule fois)...").to_string());
     let out = crate::save::data_dir().join("native").join(format!("build-{code}"));
     let mut command = Command::new(tools.join("python").join("python.exe"));
     command
+        .arg("-u")
         .arg(tools.join("native").join("tools").join("native_build.py"))
         .arg("--recipe")
         .arg(tools.join("native").join("games").join(format!("{code}.json.gz")))
@@ -247,10 +313,18 @@ fn generate(code: &str, rom: &Path, state: &Mutex<Generation>) -> Result<PathBuf
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         command.creation_flags(CREATE_NO_WINDOW);
     }
-    let output = command.output().map_err(|e| e.to_string())?;
-    let log = format!("{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn().map_err(|e| e.to_string())?;
+    let log = Mutex::new(String::new());
+    let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
+    std::thread::scope(|scope| {
+        scope.spawn(|| stdout.map(|out| follow_output(out, state, &log)));
+        scope.spawn(|| stderr.map(|err| follow_output(err, state, &log)));
+    });
+    let status = child.wait().map_err(|e| e.to_string())?;
+    let log = log.into_inner().unwrap();
     let built = out.join(format!("{code}.exe"));
-    if !output.status.success() || !built.exists() {
+    if !status.success() || !built.exists() {
         let tail: Vec<&str> = log.lines().rev().filter(|l| !l.trim().is_empty()).take(3).collect();
         error!("generation de {code} :\n{log}");
         return Err(tail.into_iter().rev().collect::<Vec<_>>().join(" / "));
@@ -266,7 +340,7 @@ pub struct NativeGamesPlugin;
 impl Plugin for NativeGamesPlugin {
     fn build(&self, app: &mut App) {
         // Le runtime et les modules sont des programmes Windows
-        let mut codes: std::collections::BTreeSet<String> = if cfg!(windows) { index().games.into_keys().collect() } else { Default::default() };
+        let mut codes: std::collections::BTreeSet<String> = if cfg!(windows) { index().games.keys().cloned().collect() } else { Default::default() };
         for entry in std::fs::read_dir(native_dir()).into_iter().flatten().flatten() {
             let path = entry.path();
             let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
@@ -286,6 +360,7 @@ impl Plugin for NativeGamesPlugin {
 
 #[derive(Resource)]
 struct Running {
+    code: String,
     child: Child,
     stdin: Option<ChildStdin>,
     latest: Arc<Mutex<Option<Vec<u8>>>>,
@@ -373,6 +448,7 @@ fn launch(commands: &mut Commands, images: &mut Assets<Image>, code: &str, rom: 
         Ok(child) => child,
         Err(e) => {
             error!("{code} : le module natif ne demarre pas : {e}");
+            activity::record(What::GameStopped { game: code.to_string(), error: e.to_string() });
             commands.set_state(StudioState::Menu);
             return;
         }
@@ -404,7 +480,7 @@ fn launch(commands: &mut Commands, images: &mut Assets<Image>, code: &str, rom: 
         commands.spawn((Sprite { image: image.clone(), custom_size: Some(size), ..default() }, engine.layers(), in_game()));
     }
     let stdin = child.stdin.take();
-    commands.insert_resource(Running { child, stdin, latest, top, bottom, sent: [0xFF; 8] });
+    commands.insert_resource(Running { code: code.to_string(), child, stdin, latest, top, bottom, sent: [0xFF; 8] });
 }
 
 fn show_frames(mut commands: Commands, mut running: ResMut<Running>, mut images: ResMut<Assets<Image>>) {
@@ -413,6 +489,7 @@ fn show_frames(mut commands: Commands, mut running: ResMut<Running>, mut images:
             info!("jeu natif termine");
         } else {
             error!("le jeu natif s'est arrete : {status}");
+            activity::record(What::GameStopped { game: running.code.clone(), error: status.to_string() });
         }
         commands.set_state(StudioState::Menu);
         return;

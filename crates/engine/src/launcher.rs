@@ -6,7 +6,9 @@
 //! - la page d'un jeu : son image, son nom, le bouton favori et quatre boutons qui changent la zone
 //!   du bas (Jouer, Moding, Description, Parametres) ;
 //! - les textes suivent la langue (`i18n`) ; la zone est refaite quand elle change ;
-//! - le bouton Options, toujours en bas à droite, même quand on fait défiler.
+//! - le bouton Options, toujours en bas à droite, même quand on fait défiler ;
+//! - à droite de la vue des jeux, le panneau d'activité : ce que l'app fait, où en est la décompilation et
+//!   l'historique (`activity`). Il n'est jamais refait avec la zone, pour garder sa position.
 //!
 //! Sans rom, aucun jeu n'est montré : seulement le message qui dit de déposer une rom dans la
 //! fenêtre. Elle est copiée dans le dossier `rom` à côté du launcher (voir `library`).
@@ -30,6 +32,7 @@ use bevy::ui::{Pressed, ScrollPosition};
 use bevy::ui_widgets::{Activate, Button};
 use bevy::window::FileDragAndDrop;
 
+use crate::activity::{self, What};
 use crate::asset_browser::AssetBrowser;
 use crate::i18n::{self, t, tr, Lang, Language, Tr};
 use crate::library::{self, Imported, LibraryPrefs, LibraryView, RomInfo};
@@ -53,8 +56,16 @@ const BORDER: Color = Color::srgb(0.27, 0.29, 0.35);
 const TEXT: Color = Color::srgb(0.92, 0.93, 0.95);
 const DIM: Color = Color::srgb(0.6, 0.63, 0.7);
 const GOLD: Color = Color::srgb(0.98, 0.78, 0.25);
+const GOOD: Color = Color::srgb(0.35, 0.78, 0.48);
+const BAD: Color = Color::srgb(0.95, 0.42, 0.38);
+const INFO: Color = Color::srgb(0.45, 0.62, 0.95);
 
 const SIDEBAR_W: f32 = 170.0;
+/// Panneau d'activité : largeur, fenêtre en dessous de laquelle il s'efface, lignes d'historique, longueur d'une ligne de la préparation.
+const ACTIVITY_W: f32 = 340.0;
+const ACTIVITY_MIN_WINDOW: f32 = 1100.0;
+const ACTIVITY_ROWS: usize = 100;
+const ACTIVITY_LINE: usize = 60;
 const COVER: f32 = 300.0;
 const MAIN_PAD: f32 = 24.0;
 /// Hauteur au-dessus de la zone du bas ; le reste de l'image déborde dans la zone.
@@ -188,6 +199,19 @@ struct CoverStatus;
 #[derive(Component)]
 struct LangChoice(Lang);
 
+#[derive(Component)]
+struct ActivityPanel;
+
+/// Les trois parties du panneau refaites quand leur contenu change.
+#[derive(Component)]
+struct ActivityNow;
+
+#[derive(Component)]
+struct ActivityDecomp;
+
+#[derive(Component)]
+struct ActivityHistory;
+
 pub struct LauncherPlugin;
 
 impl Plugin for LauncherPlugin {
@@ -196,6 +220,7 @@ impl Plugin for LauncherPlugin {
             .add_systems(Startup, setup)
             .add_systems(OnEnter(StudioState::Menu), spawn_launcher.before(crate::studio::auto_start))
             .add_systems(Update, (take_drops, poll_copies, poll_disk, back_key, type_folder_name, expire_confirm, log_clicks, rebuild, show_status).chain().run_if(in_state(StudioState::Menu)))
+            .add_systems(Update, (activity_visibility, activity_now, activity_decomp, activity_history, note_update).run_if(in_state(StudioState::Menu)))
             .add_systems(Update, (wheel, looks, view_choice_looks, lang_choice_looks, version_text, redo_on_language))
             .init_resource::<UpdateOffer>()
             .add_systems(Update, (poll_covers, cover_choice_looks, prepare_games, update_banner.run_if(in_state(StudioState::Menu))));
@@ -283,6 +308,8 @@ fn spawn_launcher(mut commands: Commands, mut lau: ResMut<Launcher>, mut images:
     let Some((camera, _)) = cameras.iter().find(|(_, d)| d.0 == screens.main_window()) else { return };
     let font = lau.font.clone();
     reload_roms(&mut lau, &mut images);
+    let progress: Vec<(String, f32)> = lau.roms.iter().filter_map(|r| Some((r.info.code.clone(), crate::native_game::game_state(&r.info.code)?.code?))).collect();
+    activity::compare_progress(&progress);
     let mut content = None;
     commands
         .spawn((
@@ -292,7 +319,8 @@ fn spawn_launcher(mut commands: Commands, mut lau: ResMut<Launcher>, mut images:
             DespawnOnExit(StudioState::Menu),
         ))
         .with_children(|root| {
-            content = Some(root.spawn(Node { width: percent(100), height: percent(100), flex_direction: FlexDirection::Row, ..default() }).id());
+            content = Some(root.spawn(Node { flex_grow: 1.0, flex_basis: px(0), min_width: px(0), height: percent(100), flex_direction: FlexDirection::Row, ..default() }).id());
+            spawn_activity_panel(root, &font);
             // Fixe : ne bouge pas quand on fait défiler
             root.spawn((
                 Button,
@@ -470,6 +498,9 @@ fn poll_covers(mut lau: ResMut<Launcher>, mut images: ResMut<Assets<Image>>, mut
     }
     if done == total {
         info!("jaquettes : {found} trouvees sur {total}");
+        if found > 0 {
+            activity::record(What::Covers { found, total });
+        }
         lau.cover_job = None;
     }
 }
@@ -541,8 +572,14 @@ fn poll_copies(mut lau: ResMut<Launcher>, mut images: ResMut<Assets<Image>>, tim
     for result in results {
         let message = match result {
             Ok(Imported { title, already: true }) => t!("{title} is already in the launcher", "{title} est deja dans le launcher"),
-            Ok(Imported { title, already: false }) => t!("{title} added", "{title} ajoute"),
-            Err(e) => e,
+            Ok(Imported { title, already: false }) => {
+                activity::record(What::RomAdded { title: title.clone() });
+                t!("{title} added", "{title} ajoute")
+            }
+            Err(e) => {
+                activity::record(What::RomFailed { error: e.clone() });
+                e
+            }
         };
         say(&mut lau, &time, message);
     }
@@ -955,14 +992,26 @@ fn spawn_grid(area: &mut ChildSpawnerCommands, lau: &Launcher) {
                     }
                     card.spawn((text(font, rom.info.title.clone(), 14.0, TEXT), Node { width: percent(100), ..default() }));
                     card.spawn((text(font, rom.info.publisher.clone(), 12.0, DIM), Node { width: percent(100), ..default() }));
+                    if let Some(code) = decompiled(&rom.info.code) {
+                        progress_bar(card, code);
+                    }
                 });
         }
     });
 }
 
+/// Le pourcentage de code décompilé de ce jeu.
+fn decompiled(code: &str) -> Option<f32> {
+    crate::native_game::game_state(code)?.code
+}
+
+fn progress_bar(c: &mut ChildSpawnerCommands, value: f32) {
+    c.spawn((Node { width: percent(100), height: px(5), flex_shrink: 0.0, border_radius: BorderRadius::all(px(3)), overflow: Overflow::clip(), ..default() }, BackgroundColor(ITEM))).with_child((Node { width: percent(value.clamp(0.0, 100.0)), height: percent(100), ..default() }, BackgroundColor(GOOD)));
+}
+
 fn spawn_list(area: &mut ChildSpawnerCommands, lau: &Launcher) {
     let font = &lau.font;
-    let columns: [(&str, f32); 4] = [(tr("Publisher", "Editeur"), 210.0), ("Code", 70.0), ("Region", 90.0), (tr("Size", "Taille"), 80.0)];
+    let columns: [(&str, f32); 5] = [(tr("Publisher", "Editeur"), 170.0), ("Code", 60.0), ("Region", 70.0), (tr("Size", "Taille"), 70.0), ("Decomp", 70.0)];
     area.spawn(Node { width: percent(100), height: auto(), flex_direction: FlexDirection::Column, row_gap: px(4), padding: UiRect::new(px(MAIN_PAD), px(MAIN_PAD), px(6), px(84)), ..default() }).with_children(|list| {
         list.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(14), padding: UiRect::axes(px(8), px(4)), ..default() }).with_children(|head| {
             head.spawn(Node { width: px(44), ..default() });
@@ -988,7 +1037,8 @@ fn spawn_list(area: &mut ChildSpawnerCommands, lau: &Launcher) {
                 .with_children(|row| {
                     cover(row, rom, 44.0);
                     row.spawn((text(font, info.title.clone(), 15.0, TEXT), Node { flex_grow: 1.0, flex_basis: px(0), min_width: px(0), ..default() }));
-                    let values = [info.publisher.clone(), info.code.clone(), info.region().to_string(), format_size(info.size)];
+                    let decomp = decompiled(&info.code).map_or_else(|| "-".to_string(), |v| format!("{v:.1} %"));
+                    let values = [info.publisher.clone(), info.code.clone(), info.region().to_string(), format_size(info.size), decomp];
                     for ((_, width), value) in columns.iter().zip(values) {
                         row.spawn((text(font, value, 14.0, DIM), Node { width: px(*width), ..default() }));
                     }
@@ -996,6 +1046,200 @@ fn spawn_list(area: &mut ChildSpawnerCommands, lau: &Launcher) {
                 });
         }
     });
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  Le panneau d'activité
+// ─────────────────────────────────────────────────────────────────────────
+
+fn spawn_activity_panel(root: &mut ChildSpawnerCommands, font: &Fonts) {
+    root.spawn((
+        Node { width: px(ACTIVITY_W), flex_shrink: 0.0, height: percent(100), flex_direction: FlexDirection::Column, row_gap: px(8), padding: UiRect::new(px(16), px(16), px(16), px(76)), ..default() },
+        BackgroundColor(SIDEBAR),
+        ActivityPanel,
+    ))
+    .with_children(|panel| {
+        let heading = |panel: &mut ChildSpawnerCommands, en: &'static str, fr: &'static str| {
+            panel.spawn((text(font, tr(en, fr), 14.0, DIM), Tr(en, fr), Node { flex_shrink: 0.0, margin: UiRect::top(px(6)), ..default() }));
+        };
+        heading(panel, "Now", "En ce moment");
+        panel.spawn((Node { flex_shrink: 0.0, flex_direction: FlexDirection::Column, row_gap: px(4), ..default() }, ActivityNow));
+        heading(panel, "Decompilation", "Decompilation");
+        panel.spawn((Node { flex_shrink: 0.0, flex_direction: FlexDirection::Column, row_gap: px(6), ..default() }, ActivityDecomp));
+        heading(panel, "History", "Historique");
+        panel.spawn((
+            Node { flex_grow: 1.0, flex_basis: px(0), min_height: px(0), flex_direction: FlexDirection::Column, row_gap: px(8), overflow: Overflow::scroll_y(), ..default() },
+            ScrollPosition::default(),
+            Hovered::default(),
+            Scrollable,
+            ActivityHistory,
+        ));
+    });
+}
+
+/// Le panneau va avec la vue des jeux, et laisse la place aux jeux dans une petite fenêtre.
+fn activity_visibility(lau: Res<Launcher>, screens: Res<DsScreens>, windows: Query<&Window>, mut panels: Query<&mut Node, With<ActivityPanel>>) {
+    let wide = windows.get(screens.main_window()).is_ok_and(|w| w.width() >= ACTIVITY_MIN_WINDOW);
+    let wanted = if lau.open.is_none() && wide { Display::Flex } else { Display::None };
+    for mut node in &mut panels {
+        if node.display != wanted {
+            node.display = wanted;
+        }
+    }
+}
+
+/// Une fois par seconde : ces textes changent lentement et les refaire coûte plus que les comparer.
+fn second_passed(time: &Time<Real>, next: &mut f64) -> bool {
+    if time.elapsed_secs_f64() < *next {
+        return false;
+    }
+    *next = time.elapsed_secs_f64() + 1.0;
+    true
+}
+
+fn game_title(lau: &Launcher, code: &str) -> String {
+    lau.roms.iter().find(|r| r.info.code == code).map_or_else(|| code.to_string(), |r| r.info.title.clone())
+}
+
+fn shorten(line: &str, limit: usize) -> String {
+    if line.chars().count() <= limit { line.to_string() } else { line.chars().take(limit).chain("...".chars()).collect() }
+}
+
+fn clear_children(commands: &mut Commands, parent: Entity, children: &Query<&Children>) {
+    if let Ok(old) = children.get(parent) {
+        for child in old.iter() {
+            commands.entity(child).despawn();
+        }
+    }
+}
+
+/// Ce que l'app fait maintenant : la préparation d'un jeu avec ses dernières lignes, les jaquettes, les copies.
+#[allow(clippy::too_many_arguments)]
+fn activity_now(mut commands: Commands, lau: Res<Launcher>, time: Res<Time<Real>>, mut next: Local<f64>, mut shown: Local<Vec<(String, f32, bool)>>, boxes: Query<Entity, With<ActivityNow>>, children: Query<&Children>) {
+    if !second_passed(&time, &mut next) {
+        return;
+    }
+    // (texte, taille, ligne principale)
+    let mut lines: Vec<(String, f32, bool)> = Vec::new();
+    if let Some(job) = crate::native_game::current_job() {
+        lines.push((t!("Preparing {} ({} s)", "Preparation de {} ({} s)", game_title(&lau, &job.code), job.seconds), 15.0, true));
+        if !job.message.is_empty() {
+            lines.push((job.message, 12.0, false));
+        }
+        lines.extend(job.lines.iter().map(|line| (shorten(line, ACTIVITY_LINE), 11.0, false)));
+    }
+    if let Some(job) = &lau.cover_job {
+        let p = job.lock().unwrap();
+        lines.push((t!("Downloading covers: {} of {}", "Telechargement des jaquettes : {} sur {}", p.done, p.total), 14.0, true));
+    }
+    if lau.copying > 0 {
+        lines.push((t!("Copying roms: {}", "Copie de roms : {}", lau.copying), 14.0, true));
+    }
+    if lines.is_empty() {
+        lines.push((tr("Nothing running.", "Rien en cours.").to_string(), 14.0, false));
+    }
+    if *shown == lines {
+        return;
+    }
+    let font = lau.font.clone();
+    for parent in &boxes {
+        clear_children(&mut commands, parent, &children);
+        commands.entity(parent).with_children(|c| {
+            for (line, size, main) in &lines {
+                c.spawn(text(&font, line.clone(), *size, if *main { TEXT } else { DIM }));
+            }
+        });
+    }
+    *shown = lines;
+}
+
+/// La moyenne des jeux installés et où en est leur préparation.
+fn activity_decomp(mut commands: Commands, lau: Res<Launcher>, time: Res<Time<Real>>, mut next: Local<f64>, mut shown: Local<Option<(i32, i32, i32, crate::native_game::Overview, usize)>>, boxes: Query<Entity, With<ActivityDecomp>>, children: Query<&Children>) {
+    if !second_passed(&time, &mut next) {
+        return;
+    }
+    let states: Vec<_> = lau.roms.iter().filter_map(|r| crate::native_game::game_state(&r.info.code)).collect();
+    let average = |pick: fn(&crate::native_game::GameState) -> Option<f32>| {
+        let values: Vec<f32> = states.iter().filter_map(pick).collect();
+        // En dixièmes de point : comparé à ce qui est montré
+        if values.is_empty() { 0 } else { (values.iter().sum::<f32>() / values.len() as f32 * 10.0).round() as i32 }
+    };
+    let (code, c_code, data) = (average(|s| s.code), average(|s| s.c), average(|s| s.data));
+    let overview = crate::native_game::overview(lau.roms.iter().map(|r| r.info.code.as_str()), lau.prepare_all);
+    let state = Some((code, c_code, data, overview, lau.roms.len()));
+    if *shown == state {
+        return;
+    }
+    *shown = state;
+    let font = lau.font.clone();
+    let games = lau.roms.len();
+    for parent in &boxes {
+        clear_children(&mut commands, parent, &children);
+        commands.entity(parent).with_children(|c| {
+            c.spawn(text(&font, t!("Code matched: {:.1} %", "Code decompile : {:.1} %", code as f32 / 10.0), 15.0, TEXT));
+            progress_bar(c, code as f32 / 10.0);
+            c.spawn(text(&font, t!("In C: {:.1} %   Data: {:.1} %", "En C : {:.1} %   Donnees : {:.1} %", c_code as f32 / 10.0, data as f32 / 10.0), 13.0, DIM));
+            c.spawn(text(&font, t!("Prepared: {} of {games} games", "Prepares : {} jeux sur {games}", overview.ready), 13.0, DIM));
+            if overview.waiting > 0 {
+                c.spawn(text(&font, t!("Waiting: {}", "En attente : {}", overview.waiting), 13.0, DIM));
+            }
+            if overview.failed > 0 {
+                c.spawn(text(&font, t!("Errors: {}", "En erreur : {}", overview.failed), 13.0, BAD));
+            }
+        });
+    }
+}
+
+/// L'historique : refait quand un événement arrive, quand la langue change, et chaque minute pour les « il y a ».
+#[allow(clippy::too_many_arguments)]
+fn activity_history(mut commands: Commands, lau: Res<Launcher>, language: Res<Language>, time: Res<Time<Real>>, mut shown: Local<Option<(u64, u64, usize, Lang)>>, boxes: Query<Entity, With<ActivityHistory>>, added: Query<(), Added<ActivityHistory>>, children: Query<&Children>) {
+    let state = Some((activity::revision(), (time.elapsed_secs_f64() / 60.0) as u64, lau.roms.len(), language.0));
+    if *shown == state && added.is_empty() {
+        return;
+    }
+    *shown = state;
+    let events = activity::latest(ACTIVITY_ROWS);
+    let now = activity::now_secs();
+    let font = lau.font.clone();
+    let title = |code: &str| game_title(&lau, code);
+    let rows: Vec<(Color, String, String)> = events
+        .iter()
+        .map(|event| {
+            let color = match event.what.level() {
+                activity::Level::Good => GOOD,
+                activity::Level::Error => BAD,
+                activity::Level::Update => GOLD,
+                activity::Level::Info => INFO,
+            };
+            (color, event.what.text(&title), activity::ago(event.time, now))
+        })
+        .collect();
+    for parent in &boxes {
+        clear_children(&mut commands, parent, &children);
+        commands.entity(parent).with_children(|c| {
+            if rows.is_empty() {
+                c.spawn(text(&font, tr("Nothing yet.", "Rien pour l'instant."), 13.0, DIM));
+            }
+            for (color, line, when) in &rows {
+                c.spawn(Node { flex_shrink: 0.0, flex_direction: FlexDirection::Row, column_gap: px(8), ..default() }).with_children(|row| {
+                    row.spawn((Node { width: px(8), height: px(8), flex_shrink: 0.0, margin: UiRect::top(px(5)), border_radius: BorderRadius::all(px(4)), ..default() }, BackgroundColor(*color)));
+                    row.spawn(Node { flex_grow: 1.0, flex_basis: px(0), min_width: px(0), flex_direction: FlexDirection::Column, ..default() }).with_children(|lines| {
+                        lines.spawn(text(&font, line.clone(), 13.0, TEXT));
+                        lines.spawn(text(&font, when.clone(), 11.0, DIM));
+                    });
+                });
+            }
+        });
+    }
+}
+
+/// Une nouvelle version trouvée a sa ligne dans l'historique.
+fn note_update(offer: Res<UpdateOffer>, mut noted: Local<String>) {
+    let Some(info) = offer.0.lock().unwrap().clone() else { return };
+    if *noted != info.version {
+        activity::update_found(&info.version);
+        *noted = info.version;
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1270,6 +1514,7 @@ fn remove_rom(lau: &mut Launcher, file: &str, path: &Path, time: &Time<Real>) {
             lau.open = None;
             lau.roms.retain(|r| r.info.file != file);
             lau.stamp.retain(|(name, _)| name != file);
+            activity::record(What::RomRemoved { file: file.to_string() });
             say(lau, time, t!("{file} removed", "{file} retire"));
         }
         Err(e) => say(lau, time, format!("{file} : {e}")),

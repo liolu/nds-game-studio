@@ -18,6 +18,8 @@ fn main() {
     // Raccourcis qui ouvriraient le studio sans passer par le launcher : redirigés vers lui
     std::thread::spawn(ndsgs_common::repair_shortcuts);
 
+    nds_engine::activity::version_started(&format!("{} build {}", ndsgs_common::display_version(), ndsgs_common::BUILD));
+
     // Une version plus récente : le launcher la propose
     let offer = UpdateOffer::default();
     {

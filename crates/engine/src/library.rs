@@ -324,7 +324,7 @@ pub enum LibraryView {
 
 /// Préférences du launcher (`launcher.toml`, à part d'options.toml : réinitialiser les options ne
 /// doit pas effacer les favoris).
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LibraryPrefs {
     /// Noms de fichier des roms, dans l'ordre où elles ont été ajoutées aux favoris.
@@ -335,6 +335,12 @@ pub struct LibraryPrefs {
     /// Mise à jour remise à plus tard : sa version, et jusqu'à quand (secondes depuis 1970).
     pub update_later: String,
     pub update_later_until: u64,
+}
+
+impl Default for LibraryPrefs {
+    fn default() -> Self {
+        LibraryPrefs { favorites: Vec::new(), view: LibraryView::default(), covers: true, update_later: String::new(), update_later_until: 0 }
+    }
 }
 
 fn prefs_path() -> PathBuf {
@@ -485,5 +491,8 @@ mod tests {
         let text = toml::to_string_pretty(&prefs).unwrap();
         assert_eq!(toml::from_str::<LibraryPrefs>(&text).unwrap(), prefs);
         assert_eq!(toml::from_str::<LibraryPrefs>("").unwrap(), LibraryPrefs::default());
+        // Un launcher.toml d'avant les jaquettes les active ; un « non » choisi reste un non
+        assert!(toml::from_str::<LibraryPrefs>("view = \"grid\"").unwrap().covers);
+        assert!(!toml::from_str::<LibraryPrefs>("covers = false").unwrap().covers);
     }
 }

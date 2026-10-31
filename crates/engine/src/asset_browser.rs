@@ -4,7 +4,10 @@
 //! - les jeux sont les roms du dossier `rom` du launcher (`library`) ;
 //! - la liste montre chaque fichier avec son chemin dans NitroFS (celui que le code du jeu
 //!   charge ; `archive.narc#n` pour le n-ième fichier d'une archive), reconnu par sa signature ;
-//!   taper du texte filtre la liste (dans tout le jeu), la molette la fait défiler ;
+//!   taper du texte filtre la liste (dans tout le jeu), la molette ou la barre la font défiler ;
+//! - les flèches se déplacent dans la liste, la grille et les menus (Page préc./suiv., Début et Fin aussi),
+//!   Droite ou Entrée ouvrent un dossier, Gauche remonte ;
+//! - un curseur règle la vitesse des animations (aperçu et vignettes) ;
 //! - la liste se parcourt par dossiers, et une archive s'ouvre comme un dossier (clic pour entrer, `..` ou
 //!   Retour arrière pour remonter) ; le bouton « A plat » montre tous les fichiers d'un coup ;
 //! - clic = aperçu : `.nsbmd` en 3D (glisser = tourner, clic droit / milieu = déplacer, molette =
@@ -38,13 +41,13 @@ use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerD
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::input::mouse::MouseScrollUnit;
 use bevy::mesh::{Indices, PrimitiveTopology};
-use bevy::picking::events::{PointerDrag, PointerScroll};
+use bevy::picking::events::{PointerDrag, PointerDragEnd, PointerPress, PointerScroll};
 use bevy::picking::hover::Hovered;
 use bevy::picking::pointer::PointerButton;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::render::view::Tonemapping;
-use bevy::ui::Pressed;
+use bevy::ui::{Pressed, UiGlobalTransform};
 use bevy::ui_widgets::{Activate, Button};
 use bevy::window::{WindowRef, WindowResolution};
 use nds_nitro::{model3d, Kind, Rgba};
@@ -81,6 +84,16 @@ const MENU_COLUMN: f32 = 100.0;
 /// Taille de l'image où la vue 3D est rendue.
 const VIEW_W: u32 = 1280;
 const VIEW_H: u32 = 960;
+/// Barres de défilement : largeur et plus petite part de la barre pour le bouton (il reste attrapable avec des milliers de fichiers).
+const BAR_W: f32 = 14.0;
+const BAR_MIN_THUMB: f32 = 0.06;
+/// Colonne de gauche : les marges, la barre et les colonnes de vignettes (une vignette et ses marges : 138).
+const LEFT_W: f32 = 22.0 + BAR_W + 4.0 + GRID_COLUMNS as f32 * 138.0;
+/// Vitesse des animations : bornes, et écart autour de x1 où le curseur s'accroche.
+const SPEED_MIN: f32 = 0.1;
+const SPEED_MAX: f32 = 4.0;
+const SPEED_SNAP: f32 = 0.06;
+const SPEED_W: f32 = 240.0;
 
 const BG: Color = Color::srgb(0.1, 0.11, 0.13);
 const SIDEBAR: Color = Color::srgb(0.075, 0.08, 0.095);
@@ -139,6 +152,8 @@ pub(crate) struct AssetBrowser {
     menu_query: String,
     menu_scroll: usize,
     menu_len: usize,
+    /// La ligne du menu choisie aux flèches (Entrée la prend).
+    menu_cursor: usize,
     menu_dirty: bool,
     index: Arc<Mutex<IndexState>>,
     index_started: bool,
@@ -151,6 +166,8 @@ pub(crate) struct AssetBrowser {
     folder: String,
     folders: Vec<FolderLine>,
     folder_scroll: HashMap<String, usize>,
+    /// Le dossier où les flèches se sont arrêtées (un fichier, lui, est choisi et montré).
+    folder_cursor: Option<String>,
     filter: String,
     /// Format choisi dans le menu des formats : seuls ses fichiers sont listés.
     format_filter: Option<String>,
@@ -182,6 +199,7 @@ pub(crate) struct AssetBrowser {
     thumbs: HashMap<usize, Vec<(Handle<Image>, f32)>>,
     jobs: Arc<ThumbJobs>,
     anim_time: f32,
+    anim_speed: f32,
     sound: Option<Handle<bevy::audio::AudioSource>>,
     video: Option<VideoPlayer>,
     /// Aperçu en texte, et sa première ligne visible.
@@ -251,6 +269,7 @@ impl Default for AssetBrowser {
             menu_query: String::new(),
             menu_scroll: 0,
             menu_len: 0,
+            menu_cursor: 0,
             menu_dirty: false,
             index: Arc::default(),
             index_started: false,
@@ -261,6 +280,7 @@ impl Default for AssetBrowser {
             folder: String::new(),
             folders: Vec::new(),
             folder_scroll: HashMap::new(),
+            folder_cursor: None,
             filter: String::new(),
             format_filter: None,
             all_files: false,
@@ -285,6 +305,7 @@ impl Default for AssetBrowser {
             thumbs: HashMap::new(),
             jobs: Arc::new(ThumbJobs::default()),
             anim_time: 0.0,
+            anim_speed: 1.0,
             sound: None,
             video: None,
             text_lines: Vec::new(),
@@ -352,11 +373,35 @@ struct PathText;
 #[derive(Component)]
 struct Preview3d;
 
+/// Ce que fait défiler une barre.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
+enum Bar {
+    List,
+    Menu,
+}
+
+/// Le bouton de la barre (il suit la position).
+#[derive(Component)]
+struct BarThumb(Bar);
+
+#[derive(Component)]
+struct SpeedTrack;
+
+#[derive(Component)]
+struct SpeedKnob;
+
+#[derive(Component)]
+struct SpeedText;
+
+/// La ligne du menu où sont les flèches.
+#[derive(Component)]
+struct MenuCursor;
+
 pub struct AssetBrowserPlugin;
 
 impl Plugin for AssetBrowserPlugin {
     fn build(&self, app: &mut App) {
-        let mut browser = AssetBrowser::default();
+        let mut browser = AssetBrowser { anim_speed: load_speed(), ..default() };
         let (mut game, mut file, mut open) = (None, None, false);
         for arg in std::env::args().skip(1) {
             if arg == "--assets" {
@@ -376,7 +421,7 @@ impl Plugin for AssetBrowserPlugin {
         }
         app.insert_resource(browser).add_message::<ToggleAssets>().add_systems(
             Update,
-            (redo_on_language, toggle_window, poll_scan, type_filter, rebuild_menu, rebuild_list, render_preview, play_preview, update_grid, show_preview_text, rebuild_controls, refresh_texts, fit_image, place_camera, looks).chain(),
+            (redo_on_language, toggle_window, poll_scan, type_filter, rebuild_menu, rebuild_list, render_preview, play_preview, update_grid, show_preview_text, rebuild_controls, refresh_texts, fit_image, place_camera, looks, update_bars, update_speed).chain(),
         );
     }
 }
@@ -428,7 +473,110 @@ impl AssetBrowser {
         self.folder_mode && self.filter.is_empty() && self.format_filter.is_none()
     }
 
+    /// La ligne où sont les flèches : le dossier retenu, sinon le fichier choisi s'il est dans la liste.
+    fn cursor_row(&self) -> Option<usize> {
+        if let Some(i) = self.folder_cursor.as_ref().and_then(|path| self.folders.iter().position(|f| f.path == *path)) {
+            return Some(i);
+        }
+        let selected = self.selected?;
+        self.shown.iter().position(|&s| s == selected).map(|i| i + self.folders.len())
+    }
+
+    /// Aller à une ligne : un fichier est montré, un dossier attend Entrée ; la page suit.
+    fn move_to_row(&mut self, row: usize) {
+        let total = self.row_count();
+        if total == 0 {
+            return;
+        }
+        let row = row.min(total - 1);
+        let (page, step) = (self.page_size(), if self.grid { GRID_COLUMNS } else { 1 });
+        let wanted = if row < self.scroll {
+            row / step * step
+        } else if row >= self.scroll + page {
+            (row / step + 1) * step - page
+        } else {
+            self.scroll
+        };
+        if wanted != self.scroll {
+            self.scroll = wanted;
+            self.list_dirty = true;
+        }
+        if self.cursor_row() == Some(row) {
+            return;
+        }
+        match self.folders.get(row) {
+            Some(folder) => self.folder_cursor = Some(folder.path.clone()),
+            None => self.select(self.shown[row - self.folders.len()]),
+        }
+    }
+
+    fn move_cursor(&mut self, delta: i64) {
+        // Rien de choisi : la première flèche prend la première ligne de la page
+        let row = match self.cursor_row() {
+            Some(row) => (row as i64 + delta).max(0) as usize,
+            None => self.scroll,
+        };
+        self.move_to_row(row);
+    }
+
+    /// Droite ou Entrée sur un dossier : il s'ouvre.
+    fn open_cursor_folder(&mut self) {
+        let path = self.cursor_row().and_then(|row| self.folders.get(row)).map(|f| f.path.clone());
+        if let Some(path) = path {
+            self.open_folder(path);
+        }
+    }
+
+    fn move_menu_cursor(&mut self, delta: i64) {
+        let last = self.menu_len.saturating_sub(1) as i64;
+        self.menu_cursor = (self.menu_cursor as i64 + delta).clamp(0, last) as usize;
+        if self.menu_cursor < self.menu_scroll {
+            self.menu_scroll = self.menu_cursor;
+        } else if self.menu_cursor >= self.menu_scroll + MENU_ROWS {
+            self.menu_scroll = self.menu_cursor + 1 - MENU_ROWS;
+        }
+        self.menu_dirty = true;
+    }
+
+    /// Position, nombre de lignes et lignes visibles de ce que fait défiler une barre.
+    fn bar_range(&self, bar: Bar) -> (usize, usize, usize) {
+        match bar {
+            Bar::List => (self.scroll, self.row_count(), self.page_size()),
+            Bar::Menu => (self.menu_scroll, self.menu_len, MENU_ROWS),
+        }
+    }
+
+    /// Fait défiler d'après la place du pointeur dans la barre (0 = en haut, 1 = en bas).
+    fn scroll_bar_to(&mut self, bar: Bar, place: f32) {
+        let (position, total, page) = self.bar_range(bar);
+        let max = total.saturating_sub(page);
+        if max == 0 {
+            return;
+        }
+        let share = thumb_share(total, page);
+        let ratio = ((place - share / 2.0) / (1.0 - share)).clamp(0.0, 1.0);
+        let mut wanted = (ratio * max as f32).round() as usize;
+        if bar == Bar::List && self.grid {
+            wanted = wanted / GRID_COLUMNS * GRID_COLUMNS;
+        }
+        if wanted == position {
+            return;
+        }
+        match bar {
+            Bar::List => {
+                self.scroll = wanted;
+                self.list_dirty = true;
+            }
+            Bar::Menu => {
+                self.menu_scroll = wanted;
+                self.menu_cursor = wanted;
+                self.menu_dirty = true;
+            }
+        }
+    }
+
     fn open_folder(&mut self, path: String) {
+        self.folder_cursor = None;
         let scroll = self.scroll;
         self.folder_scroll.insert(std::mem::take(&mut self.folder), scroll);
         self.scroll = self.folder_scroll.get(&path).copied().unwrap_or(0);
@@ -438,7 +586,10 @@ impl AssetBrowser {
 
     fn folder_up(&mut self) {
         let parent = self.folder.rsplit_once('/').map_or(String::new(), |(parent, _)| parent.to_string());
+        let left = self.folder.clone();
         self.open_folder(parent);
+        // Les flèches repartent du dossier qu'on vient de quitter
+        self.folder_cursor = Some(left);
     }
 
     /// Les fils en cours finissent sur l'ancienne file : leurs résultats ne servent plus.
@@ -518,6 +669,7 @@ impl AssetBrowser {
         self.menu = if self.menu == menu { Menu::None } else { menu };
         self.menu_query.clear();
         self.menu_scroll = 0;
+        self.menu_cursor = 0;
         self.menu_dirty = true;
     }
 
@@ -559,6 +711,7 @@ impl AssetBrowser {
         self.format_filter = None;
         self.folder.clear();
         self.folder_scroll.clear();
+        self.folder_cursor = None;
         let result = Arc::new(Mutex::new(None));
         let (rom, out) = (self.games[index].rom.clone(), result.clone());
         std::thread::spawn(move || {
@@ -652,6 +805,7 @@ impl AssetBrowser {
     }
 
     fn select(&mut self, index: usize) {
+        self.folder_cursor = None;
         self.selected = Some(index);
         self.choices = choices_for(&self.entries, index);
         self.orbit = Orbit::default();
@@ -735,7 +889,7 @@ fn toggle_window(
         .spawn((Node { width: percent(100), height: percent(100), flex_direction: FlexDirection::Row, ..default() }, UiTargetCamera(camera)))
         .with_children(|root| {
             // Colonne de gauche : jeu, filtre, liste des fichiers
-            root.spawn((Node { width: px(560), flex_shrink: 0.0, height: percent(100), flex_direction: FlexDirection::Column, padding: UiRect::all(px(10)), row_gap: px(6), ..default() }, BackgroundColor(SIDEBAR)))
+            root.spawn((Node { width: px(LEFT_W), flex_shrink: 0.0, height: percent(100), flex_direction: FlexDirection::Column, padding: UiRect::all(px(10)), row_gap: px(6), ..default() }, BackgroundColor(SIDEBAR)))
                 .with_children(|side| {
                     side.spawn(Node { flex_direction: FlexDirection::Row, column_gap: px(8), align_items: AlignItems::Center, ..default() }).with_children(|row| {
                         row.spawn((label(tr("Game:", "Jeu :"), 15.0, DIM), Tr("Game:", "Jeu :")));
@@ -774,8 +928,10 @@ fn toggle_window(
                         row.spawn((Button, Hovered::default(), item_node(), BackgroundColor(ITEM), PageButton(1))).observe(page).with_child(label("v", 14.0, TEXT));
                     });
                     side.spawn((label("", 13.0, DIM), ListTitle));
+                    let mut list_row = side.spawn(Node { flex_grow: 1.0, flex_basis: px(0), min_height: px(0), flex_direction: FlexDirection::Row, column_gap: px(4), ..default() });
+                    list_row.with_children(|side| {
                     let list = side
-                        .spawn((Node { flex_grow: 1.0, flex_direction: FlexDirection::Column, overflow: Overflow::clip(), ..default() }, Pickable::default()))
+                        .spawn((Node { flex_grow: 1.0, flex_basis: px(0), min_width: px(0), flex_direction: FlexDirection::Column, overflow: Overflow::clip(), ..default() }, Pickable::default()))
                         .observe(|scroll: On<PointerScroll>, mut b: ResMut<AssetBrowser>| {
                             let lines = match scroll.unit {
                                 MouseScrollUnit::Line => scroll.y * 3.0,
@@ -792,6 +948,8 @@ fn toggle_window(
                         })
                         .id();
                     ids.insert("list", list);
+                    spawn_bar(side, Bar::List, Node { width: px(BAR_W), flex_shrink: 0.0, ..default() });
+                    });
                 });
             // Aperçu
             root.spawn(Node { flex_grow: 1.0, height: percent(100), flex_direction: FlexDirection::Column, padding: UiRect::all(px(14)), row_gap: px(8), ..default() }).with_children(|panel| {
@@ -810,6 +968,33 @@ fn toggle_window(
                     row.spawn((label("", 18.0, TEXT), PathText));
                 });
                 panel.spawn((label("", 13.0, DIM), InfoText));
+                panel.spawn(Node { flex_direction: FlexDirection::Row, column_gap: px(10), align_items: AlignItems::Center, ..default() }).with_children(|row| {
+                    row.spawn((label(tr("Animation speed", "Vitesse des animations"), 14.0, DIM), Tr("Animation speed", "Vitesse des animations")));
+                    row.spawn((Node { width: px(SPEED_W), height: px(18), justify_content: JustifyContent::Center, ..default() }, BackgroundColor(Color::NONE), Pickable::default(), SpeedTrack))
+                        .observe(|press: On<PointerPress>, tracks: Query<(&ComputedNode, &UiGlobalTransform)>, mut b: ResMut<AssetBrowser>| {
+                            if let Ok((node, transform)) = tracks.get(press.entity) {
+                                b.anim_speed = speed_at(track_place(press.pointer.position, node, transform).x);
+                                save_speed(b.anim_speed);
+                            }
+                        })
+                        .observe(|drag: On<PointerDrag>, tracks: Query<(&ComputedNode, &UiGlobalTransform)>, mut b: ResMut<AssetBrowser>| {
+                            if let Ok((node, transform)) = tracks.get(drag.entity) {
+                                b.anim_speed = speed_at(track_place(drag.pointer.position, node, transform).x);
+                            }
+                        })
+                        .observe(|_: On<PointerDragEnd>, b: Res<AssetBrowser>| save_speed(b.anim_speed))
+                        .with_children(|track| {
+                            track.spawn((Node { position_type: PositionType::Absolute, left: px(0), right: px(0), top: px(7), height: px(4), border_radius: BorderRadius::all(px(2)), ..default() }, BackgroundColor(ITEM), Pickable::IGNORE));
+                            track.spawn((Node { position_type: PositionType::Absolute, top: px(1), width: px(16), height: px(16), border_radius: BorderRadius::all(px(8)), ..default() }, BackgroundColor(ITEM_ON), Pickable::IGNORE, SpeedKnob));
+                        });
+                    row.spawn((label("", 14.0, TEXT), Node { width: px(48), ..default() }, SpeedText));
+                    row.spawn((Button, Hovered::default(), item_node(), BackgroundColor(ITEM), CopyButton))
+                        .observe(|_: On<Activate>, mut b: ResMut<AssetBrowser>| {
+                            b.anim_speed = 1.0;
+                            save_speed(1.0);
+                        })
+                        .with_child(label("x1", 14.0, TEXT));
+                });
                 let controls = panel.spawn(Node { flex_direction: FlexDirection::Row, column_gap: px(14), row_gap: px(6), flex_wrap: FlexWrap::Wrap, ..default() }).id();
                 ids.insert("controls", controls);
                 let image_box = panel
@@ -839,7 +1024,7 @@ fn toggle_window(
     // Menus déroulants des jeux et des formats (par-dessus tout)
     let overlay = commands
         .spawn((
-            Node { position_type: PositionType::Absolute, top: px(48), left: px(10), width: px(MENU_W), flex_direction: FlexDirection::Column, row_gap: px(2), padding: UiRect::all(px(10)), border_radius: BorderRadius::all(px(8)), display: Display::None, ..default() },
+            Node { position_type: PositionType::Absolute, top: px(48), left: px(10), width: px(MENU_W), flex_direction: FlexDirection::Column, row_gap: px(2), padding: UiRect::new(px(10), px(12.0 + BAR_W), px(10), px(10)), border_radius: BorderRadius::all(px(8)), display: Display::None, ..default() },
             BackgroundColor(Color::srgb(0.13, 0.14, 0.17)),
             GlobalZIndex(10),
             UiTargetCamera(camera),
@@ -858,8 +1043,19 @@ fn toggle_window(
             }
         })
         .id();
+    // À côté du menu et pas dedans : le menu est refait pendant qu'on tire la barre
+    let menu_bar = commands
+        .spawn((
+            bar_bundle(Bar::Menu, Node { position_type: PositionType::Absolute, left: px(10.0 + MENU_W - BAR_W - 6.0), width: px(BAR_W), display: Display::None, ..default() }),
+            GlobalZIndex(11),
+            UiTargetCamera(camera),
+        ))
+        .observe(bar_press)
+        .observe(bar_drag)
+        .with_child(thumb_bundle(Bar::Menu))
+        .id();
     browser.window = Some(window);
-    browser.parts = vec![camera, camera3d, light, root, overlay];
+    browser.parts = vec![camera, camera3d, light, root, overlay, menu_bar];
     browser.list = ids.get("list").copied();
     browser.controls = ids.get("controls").copied();
     browser.image_box = ids.get("image_box").copied();
@@ -898,6 +1094,117 @@ fn toggle_window(
     if let Some((menu, query)) = browser.start_menu.take() {
         browser.menu = menu;
         browser.menu_query = query;
+    }
+}
+
+fn bar_bundle(bar: Bar, node: Node) -> impl Bundle {
+    (Node { border_radius: BorderRadius::all(px(BAR_W / 2.0)), ..node }, BackgroundColor(Color::srgb(0.13, 0.14, 0.17)), Pickable::default(), bar)
+}
+
+fn thumb_bundle(bar: Bar) -> impl Bundle {
+    (Node { position_type: PositionType::Absolute, left: px(2), right: px(2), border_radius: BorderRadius::all(px(BAR_W / 2.0 - 2.0)), ..default() }, BackgroundColor(Color::srgb(0.4, 0.43, 0.5)), Pickable::IGNORE, BarThumb(bar))
+}
+
+fn spawn_bar(c: &mut ChildSpawnerCommands, bar: Bar, node: Node) {
+    c.spawn(bar_bundle(bar, node)).observe(bar_press).observe(bar_drag).with_child(thumb_bundle(bar));
+}
+
+/// La part de la barre prise par son bouton.
+fn thumb_share(total: usize, page: usize) -> f32 {
+    (page as f32 / total.max(1) as f32).clamp(BAR_MIN_THUMB, 1.0)
+}
+
+/// Où est le pointeur dans ce noeud : (0, 0) en haut à gauche, (1, 1) en bas à droite.
+fn track_place(pointer: Vec2, node: &ComputedNode, transform: &UiGlobalTransform) -> Vec2 {
+    (pointer / node.inverse_scale_factor() - transform.translation) / node.size().max(Vec2::ONE) + Vec2::splat(0.5)
+}
+
+fn bar_press(press: On<PointerPress>, tracks: Query<(&Bar, &ComputedNode, &UiGlobalTransform)>, mut b: ResMut<AssetBrowser>) {
+    if let Ok((bar, node, transform)) = tracks.get(press.entity) {
+        b.scroll_bar_to(*bar, track_place(press.pointer.position, node, transform).y);
+    }
+}
+
+fn bar_drag(drag: On<PointerDrag>, tracks: Query<(&Bar, &ComputedNode, &UiGlobalTransform)>, mut b: ResMut<AssetBrowser>) {
+    if let Ok((bar, node, transform)) = tracks.get(drag.entity) {
+        b.scroll_bar_to(*bar, track_place(drag.pointer.position, node, transform).y);
+    }
+}
+
+/// Les boutons suivent la position ; la barre du menu suit le menu.
+fn update_bars(b: Res<AssetBrowser>, computed: Query<&ComputedNode>, mut thumbs: Query<(&BarThumb, &mut Node), Without<Bar>>, mut bars: Query<(&Bar, &mut Node), Without<BarThumb>>) {
+    if b.window.is_none() {
+        return;
+    }
+    for (thumb, mut node) in &mut thumbs {
+        let (position, total, page) = b.bar_range(thumb.0);
+        let max = total.saturating_sub(page);
+        let display = if max == 0 { Display::None } else { Display::Flex };
+        if node.display != display {
+            node.display = display;
+        }
+        let share = thumb_share(total, page);
+        let (height, top) = (percent(share * 100.0), percent(position as f32 / max.max(1) as f32 * (1.0 - share) * 100.0));
+        if node.height != height || node.top != top {
+            node.height = height;
+            node.top = top;
+        }
+    }
+    for (bar, mut node) in &mut bars {
+        if *bar != Bar::Menu {
+            continue;
+        }
+        let display = if b.menu == Menu::None { Display::None } else { Display::Flex };
+        if node.display != display {
+            node.display = display;
+        }
+        let Some(area) = b.menu_overlay.and_then(|o| computed.get(o).ok()) else { continue };
+        let (top, height) = (px(menu_top(b.menu) + 8.0), px((area.size().y * area.inverse_scale_factor() - 16.0).max(0.0)));
+        if node.top != top || node.height != height {
+            node.top = top;
+            node.height = height;
+        }
+    }
+}
+
+fn menu_top(menu: Menu) -> f32 {
+    if menu == Menu::Formats { 80.0 } else { 48.0 }
+}
+
+fn speed_path() -> std::path::PathBuf {
+    crate::save::data_dir().join("assets_speed.txt")
+}
+
+fn load_speed() -> f32 {
+    std::fs::read_to_string(speed_path()).ok().and_then(|text| text.trim().parse().ok()).filter(|v: &f32| v.is_finite()).unwrap_or(1.0f32).clamp(SPEED_MIN, SPEED_MAX)
+}
+
+fn save_speed(speed: f32) {
+    let _ = crate::save::write_atomic(&speed_path(), &speed.to_string());
+}
+
+/// Échelle logarithmique : x1 tombe vers le milieu, et le ralenti a autant de place que l'accéléré.
+fn speed_at(place: f32) -> f32 {
+    let speed = SPEED_MIN * (SPEED_MAX / SPEED_MIN).powf(place.clamp(0.0, 1.0));
+    if (speed - 1.0).abs() < SPEED_SNAP { 1.0 } else { speed }
+}
+
+fn speed_place(speed: f32) -> f32 {
+    (speed / SPEED_MIN).ln() / (SPEED_MAX / SPEED_MIN).ln()
+}
+
+fn update_speed(b: Res<AssetBrowser>, mut knobs: Query<&mut Node, With<SpeedKnob>>, mut texts: Query<&mut Text, With<SpeedText>>) {
+    let left = px(speed_place(b.anim_speed) * (SPEED_W - 16.0));
+    for mut node in &mut knobs {
+        if node.left != left {
+            node.left = left;
+        }
+    }
+    let wanted = format!("x{:.1}", b.anim_speed);
+    for mut text in &mut texts {
+        if text.0 != wanted {
+            text.0 = wanted.clone();
+        }
     }
 }
 
@@ -953,21 +1260,48 @@ fn type_filter(mut b: ResMut<AssetBrowser>, mut typed: MessageReader<KeyboardInp
             }
             Key::Enter => {
                 if in_menu {
+                    let cursor = b.menu_cursor;
                     match b.menu {
                         Menu::Games => {
-                            if let Some(&first) = b.matching_games().first() {
-                                b.open_game(first);
+                            if let Some(&game) = b.matching_games().get(cursor) {
+                                b.open_game(game);
                             }
                         }
                         _ => {
-                            if let Some((ext, stat)) = b.matching_formats().first() {
+                            if let Some((ext, stat)) = b.matching_formats().get(cursor) {
                                 b.pick_format(ext, stat.viewable == stat.count);
                             }
                         }
                     }
                     return;
                 }
+                b.open_cursor_folder();
             }
+            Key::ArrowUp | Key::ArrowDown | Key::PageUp | Key::PageDown | Key::Home | Key::End if in_menu => {
+                let delta = match &key.logical_key {
+                    Key::ArrowUp => -1,
+                    Key::ArrowDown => 1,
+                    Key::PageUp => -(MENU_ROWS as i64),
+                    Key::PageDown => MENU_ROWS as i64,
+                    Key::Home => i64::MIN / 2,
+                    _ => i64::MAX / 2,
+                };
+                b.move_menu_cursor(delta);
+            }
+            Key::ArrowUp => b.move_cursor(-(if b.grid { GRID_COLUMNS as i64 } else { 1 })),
+            Key::ArrowDown => b.move_cursor(if b.grid { GRID_COLUMNS as i64 } else { 1 }),
+            Key::ArrowLeft if !in_menu && b.grid => b.move_cursor(-1),
+            Key::ArrowRight if !in_menu && b.grid => b.move_cursor(1),
+            Key::ArrowLeft if !in_menu => {
+                if b.folder_view() && !b.folder.is_empty() {
+                    b.folder_up();
+                }
+            }
+            Key::ArrowRight if !in_menu => b.open_cursor_folder(),
+            Key::PageUp if !in_menu => b.move_cursor(-(b.page_size() as i64)),
+            Key::PageDown if !in_menu => b.move_cursor(b.page_size() as i64),
+            Key::Home if !in_menu => b.move_to_row(0),
+            Key::End if !in_menu => b.move_to_row(usize::MAX),
             _ => {
                 if let Some(text) = &key.text {
                     let text: String = text.chars().filter(|c| !c.is_control()).collect();
@@ -982,6 +1316,7 @@ fn type_filter(mut b: ResMut<AssetBrowser>, mut typed: MessageReader<KeyboardInp
     if changed {
         if in_menu {
             b.menu_scroll = 0;
+            b.menu_cursor = 0;
             b.menu_dirty = true;
         } else {
             b.scroll = 0;
@@ -1011,7 +1346,7 @@ fn rebuild_menu(mut commands: Commands, mut b: ResMut<AssetBrowser>, mut nodes: 
     b.menu_dirty = false;
     if let Ok(mut node) = nodes.get_mut(overlay) {
         node.display = if b.menu == Menu::None { Display::None } else { Display::Flex };
-        node.top = px(if b.menu == Menu::Formats { 80 } else { 48 });
+        node.top = px(menu_top(b.menu));
     }
     if let Ok(old) = children.get(overlay) {
         for child in old.iter() {
@@ -1060,6 +1395,8 @@ fn rebuild_menu(mut commands: Commands, mut b: ResMut<AssetBrowser>, mut nodes: 
     };
     b.menu_len = rows.len();
     b.menu_scroll = b.menu_scroll.min(rows.len().saturating_sub(MENU_ROWS));
+    b.menu_cursor = b.menu_cursor.min(rows.len().saturating_sub(1));
+    let cursor = b.menu_cursor;
     let (first, count) = (b.menu_scroll + usize::from(!rows.is_empty()), rows.len());
     let last = (b.menu_scroll + MENU_ROWS).min(count);
     let scroll = b.menu_scroll;
@@ -1073,8 +1410,11 @@ fn rebuild_menu(mut commands: Commands, mut b: ResMut<AssetBrowser>, mut nodes: 
                 head.spawn((label(*column, 12.0, DIM), Node { width: px(MENU_COLUMN), ..default() }));
             }
         });
-        for (check, name, cells, pick) in rows.into_iter().skip(scroll).take(MENU_ROWS) {
+        for (i, (check, name, cells, pick)) in rows.into_iter().enumerate().skip(scroll).take(MENU_ROWS) {
             let mut row = menu.spawn((Button, Hovered::default(), Node { height: px(MENU_ROW_H), flex_shrink: 0.0, padding: UiRect::horizontal(px(6)), align_items: AlignItems::Center, column_gap: px(8), border_radius: BorderRadius::all(px(4)), ..default() }, BackgroundColor(ROW)));
+            if i == cursor {
+                row.insert(MenuCursor);
+            }
             match pick {
                 Pick::Game(i) => {
                     row.insert(GameChoice(i)).observe(|activate: On<Activate>, choices: Query<&GameChoice>, mut b: ResMut<AssetBrowser>| {
@@ -1234,16 +1574,15 @@ fn refresh_texts(
 
 fn looks(
     b: Res<AssetBrowser>,
-    mut items: Query<(Entity, &Hovered, Has<Pressed>, &mut BackgroundColor, Option<&ListRow>, Option<&GameChoice>, Option<&FilterButton>, Has<FormatChoice>), Or<(With<ListRow>, With<FolderRow>, With<GameChoice>, With<FormatChoice>, With<GameButton>, With<FormatButton>, With<FilterButton>, With<CopyButton>, With<PageButton>, With<StepButton>)>>,
-    folder_rows: Query<(), With<FolderRow>>,
+    mut items: Query<(&Hovered, Has<Pressed>, &mut BackgroundColor, Option<&ListRow>, Option<&FolderRow>, Option<&GameChoice>, Option<&FilterButton>, Has<FormatChoice>, Has<MenuCursor>), Or<(With<ListRow>, With<FolderRow>, With<GameChoice>, With<FormatChoice>, With<GameButton>, With<FormatButton>, With<FilterButton>, With<CopyButton>, With<PageButton>, With<StepButton>)>>,
 ) {
     if b.window.is_none() {
         return;
     }
-    for (entity, hovered, pressed, mut color, row, game, filter, format) in &mut items {
-        let selected = row.is_some_and(|r| Some(r.0) == b.selected) || game.is_some_and(|g| Some(g.0) == b.game) || (filter.is_some() && b.all_files);
-        let idle = if row.is_some() || game.is_some() || format || folder_rows.contains(entity) { ROW } else { ITEM };
-        let wanted = if selected || pressed { ITEM_ON } else if hovered.get() { ITEM_HOVER } else { idle };
+    for (hovered, pressed, mut color, row, folder, game, filter, format, at_cursor) in &mut items {
+        let selected = row.is_some_and(|r| Some(r.0) == b.selected) || folder.is_some_and(|f| b.folder_cursor.as_ref() == Some(&f.0)) || game.is_some_and(|g| Some(g.0) == b.game) || (filter.is_some() && b.all_files);
+        let idle = if row.is_some() || game.is_some() || format || folder.is_some() { ROW } else { ITEM };
+        let wanted = if selected || pressed { ITEM_ON } else if hovered.get() || at_cursor { ITEM_HOVER } else { idle };
         if color.0 != wanted {
             color.0 = wanted;
         }
@@ -1378,7 +1717,7 @@ fn play_preview(time: Res<Time>, mut b: ResMut<AssetBrowser>, mut meshes: ResMut
     if let Some(video) = &mut b.video {
         video.update(time.delta_secs(), &mut images);
     }
-    b.anim_time += time.delta_secs();
+    b.anim_time += time.delta_secs() * b.anim_speed;
     let now = b.anim_time;
     if !b.frames.is_empty() {
         let total: f32 = b.frames.iter().map(|f| f.1).sum();
@@ -1447,7 +1786,7 @@ fn update_grid(
         let visible = b.page_files();
         b.thumbs.retain(|i, _| visible.contains(i));
     }
-    *clock += time.delta_secs();
+    *clock += time.delta_secs() * b.anim_speed;
     for (thumb, mut node, mut visibility) in &mut thumbs {
         let Some(frames) = b.thumbs.get(&thumb.0).filter(|f| !f.is_empty()) else {
             if *visibility != Visibility::Hidden {
@@ -1769,5 +2108,77 @@ fn place_camera(b: Res<AssetBrowser>, mut cameras: Query<(&mut Transform, &mut P
     // La lumière vient de derrière l'épaule de la caméra
     if let Ok(mut transform) = lights.get_mut(light) {
         *transform = Transform::from_rotation(rot * Quat::from_euler(EulerRot::YXZ, 0.5, -0.6, 0.0));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn browser(folders: usize, files: usize) -> AssetBrowser {
+        let mut b = AssetBrowser::default();
+        b.folders = (0..folders).map(|i| FolderLine { path: format!("d{i}"), name: format!("d{i}"), files: Some(1) }).collect();
+        b.shown = (0..files).collect();
+        b.entries = Arc::new((0..files).map(|i| Entry { path: format!("f{i}"), member_name: None, rom: Default::default(), span: (0, 0), member: None, kind: Kind::Font, size: 0, dir: String::new(), stem: format!("f{i}"), rom_index: None }).collect());
+        b
+    }
+
+    #[test]
+    fn les_fleches_passent_des_dossiers_aux_fichiers_et_la_page_suit() {
+        let mut b = browser(2, 100);
+        b.move_cursor(1);
+        assert_eq!(b.folder_cursor.as_deref(), Some("d0"));
+        b.move_cursor(1);
+        b.move_cursor(1);
+        assert_eq!((b.folder_cursor.as_deref(), b.selected), (None, Some(0)));
+        for _ in 0..ROWS {
+            b.move_cursor(1);
+        }
+        assert_eq!(b.selected, Some(ROWS));
+        assert_eq!(b.scroll, ROWS + 2 + 1 - ROWS);
+        b.move_to_row(0);
+        assert_eq!((b.scroll, b.folder_cursor.as_deref()), (0, Some("d0")));
+        b.move_to_row(usize::MAX);
+        assert_eq!((b.selected, b.scroll), (Some(99), 102 - ROWS));
+    }
+
+    #[test]
+    fn en_grille_la_page_avance_par_lignes_de_vignettes() {
+        let mut b = browser(0, 100);
+        b.grid = true;
+        b.move_to_row(GRID_COLUMNS * GRID_LINES);
+        assert_eq!(b.scroll, GRID_COLUMNS);
+        b.move_to_row(1);
+        assert_eq!(b.scroll, 0);
+    }
+
+    #[test]
+    fn la_barre_va_de_la_premiere_a_la_derniere_page() {
+        let mut b = browser(0, 1000);
+        b.scroll_bar_to(Bar::List, 0.0);
+        assert_eq!(b.scroll, 0);
+        b.scroll_bar_to(Bar::List, 1.0);
+        assert_eq!(b.scroll, 1000 - ROWS);
+        b.scroll_bar_to(Bar::List, 0.5);
+        assert!((b.scroll as i64 - (1000 - ROWS as i64) / 2).abs() <= 1, "{}", b.scroll);
+    }
+
+    #[test]
+    fn la_vitesse_va_de_la_borne_basse_a_la_borne_haute_en_passant_par_x1() {
+        assert!((speed_at(0.0) - SPEED_MIN).abs() < 1e-5);
+        assert!((speed_at(1.0) - SPEED_MAX).abs() < 1e-3);
+        assert_eq!(speed_at(speed_place(1.0)), 1.0);
+        assert!((speed_place(speed_at(0.3)) - 0.3).abs() < 1e-5);
+    }
+
+    #[test]
+    fn le_curseur_du_menu_reste_dans_la_page() {
+        let mut b = AssetBrowser { menu_len: 100, ..default() };
+        b.move_menu_cursor(MENU_ROWS as i64);
+        assert_eq!((b.menu_cursor, b.menu_scroll), (MENU_ROWS, 1));
+        b.move_menu_cursor(i64::MAX / 2);
+        assert_eq!((b.menu_cursor, b.menu_scroll), (99, 100 - MENU_ROWS));
+        b.move_menu_cursor(i64::MIN / 2);
+        assert_eq!((b.menu_cursor, b.menu_scroll), (0, 0));
     }
 }

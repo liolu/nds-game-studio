@@ -1,5 +1,5 @@
 //! Jaquettes des jeux installés, téléchargées depuis GameTDB (art.gametdb.com) et gardées dans `covers/` du dossier
-//! des données. Activé dans Options > Launcher ; rien n'est téléchargé tant que l'option est coupée.
+//! des données. Actif par défaut, coupé dans Options > Launcher ; rien n'est téléchargé tant que l'option est coupée.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};

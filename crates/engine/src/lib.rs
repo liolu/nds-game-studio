@@ -12,6 +12,7 @@
 //! - F5 montre le code du jeu, et enregistrer un fichier recompile et relance le studio (`devtools`) ;
 //! - F6 montre les fichiers (modèles 3D, images) des jeux décompilés (`asset_browser`).
 
+pub mod activity;
 pub mod asset_browser;
 pub mod asset_scan;
 pub mod controllers;
