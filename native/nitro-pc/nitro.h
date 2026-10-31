@@ -38,6 +38,11 @@ IMPORT void *WINAPI MapViewOfFile(void *, unsigned long, unsigned long, unsigned
 IMPORT void *WINAPI CreateThread(void *, unsigned long, void *, void *, unsigned long, unsigned long *);
 IMPORT int WINAPI SetThreadPriority(void *, int);
 IMPORT void *WINAPI GetCurrentThread(void);
+IMPORT void *WINAPI OpenFileMappingA(unsigned long, int, const char *);
+IMPORT void *WINAPI CreateEventA(void *, int, int, const char *);
+IMPORT int WINAPI SetEvent(void *);
+IMPORT unsigned long WINAPI WaitForSingleObject(void *, unsigned long);
+IMPORT unsigned long WINAPI GetActiveProcessorCount(unsigned short);
 
 /* core.c */
 extern u32 nds_cpsr;
@@ -67,8 +72,7 @@ void gx_write(u32 reg, u32 value);
 void gx_fifo_word(u32 value);
 void gx_begin_frame(void);
 u32 gx_status(void);
-const u16 *gx_frame3d(void);
-const u8 *gx_alpha3d(void);
+const u32 *gx_render(int w, int h, int k, int margin);
 
 /* gfx.c */
 void gfx_render(void);
@@ -76,14 +80,16 @@ void vram_cnt_changed(void);
 u8 *vram_bank(int index);
 u8 *vram_tex_slot(int slot);
 u8 *vram_texpal_slot(int slot);
-u16 *gfx_top(void);
-u16 *gfx_bottom(void);
+void gfx_parallel(void (*fn)(void *arg, int band, int bands), void *arg);
 
 /* present.c */
 void present_init(void);
 void present_frame(void);
 u32 present_keys(void);
 void present_touch(int *down, int *x, int *y);
+void present_config(int *scale, int *ds_width);
+void present_back(u32 **top, u32 **bottom);
+void present_flip(int w, int h, u32 frame);
 
 /* arm7.c */
 void arm7_fifo_send(u32 word);

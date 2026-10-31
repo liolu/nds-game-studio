@@ -1,6 +1,6 @@
 //! Essai sans prendre le clavier : lance un jeu natif, sans focus et muet, simule des commandes, enregistre une
 //! capture et ferme.
-//! `cargo run --release -p nds-engine --example native_check -- <code> <rom> <capture.png> <secondes> [enter@s] [touch@s]`
+//! `cargo run --release -p nds-engine --example native_check -- <code> <rom> <capture.png> <secondes> [enter@s] [touch@s] [f8@s]`
 //! `click=texte@s` active le bouton qui porte ce texte (le dernier s'il y en a plusieurs) ; une capture par fenetre.
 //! (avec `NDSGS_NATIVE_MUTE=1` et `NDSGS_NATIVE_DIR`)
 
@@ -14,7 +14,8 @@ struct Check {
     at: f32,
     done: bool,
     enter_at: Option<f32>,
-    touch_at: Option<f32>,
+    touch_at: Vec<f32>,
+    f8_at: Option<f32>,
     clicks: Vec<(String, f32, bool)>,
 }
 
@@ -65,7 +66,12 @@ fn simulate(
     } else {
         keys.release(KeyCode::Enter);
     }
-    if during(check.touch_at) {
+    if during(check.f8_at) {
+        keys.press(KeyCode::F8);
+    } else {
+        keys.release(KeyCode::F8);
+    }
+    if check.touch_at.iter().any(|t| during(Some(*t))) {
         // Milieu de l'écran du bas, dans la fenêtre où les deux écrans sont fusionnés
         for mut window in &mut windows {
             let (w, h) = (window.physical_width() as f64, window.physical_height() as f64);
@@ -110,7 +116,8 @@ fn main() {
             at: secs,
             done: false,
             enter_at: time_of("enter@"),
-            touch_at: time_of("touch@"),
+            touch_at: args.iter().filter_map(|a| a.strip_prefix("touch@")?.parse().ok()).collect(),
+            f8_at: time_of("f8@"),
             clicks: args.iter().filter_map(|a| a.strip_prefix("click=")).filter_map(|a| a.rsplit_once('@')).filter_map(|(t, s)| Some((t.to_string(), s.parse().ok()?, false))).collect(),
         })
         .add_systems(PreUpdate, simulate.after(bevy::input::InputSystems))

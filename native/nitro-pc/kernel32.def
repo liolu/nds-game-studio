@@ -26,3 +26,7 @@ ResumeThread@4
 GetThreadContext@8
 DuplicateHandle@28
 GetCurrentProcess@0
+CreateEventA@16
+SetEvent@4
+WaitForSingleObject@8
+GetActiveProcessorCount@4

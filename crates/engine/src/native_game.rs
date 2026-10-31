@@ -6,8 +6,9 @@
 //! studio, dans `native-toolchain` ; sinon ils sont téléchargés. Un `native/<code>.exe` à côté du studio passe avant.
 //!
 //! Le jeu tourne dans son propre processus 32 bits, car son code suppose des pointeurs 32 bits, et reçoit
-//! la rom de l'utilisateur en argument. Il envoie ses deux écrans par sa sortie standard et lit les commandes
-//! sur son entrée standard ; le moteur les affiche sur les écrans habituels (fenêtres liées ou séparées, F8, F9).
+//! la rom de l'utilisateur en argument. Il dessine ses deux écrans à la définition de la fenêtre dans une mémoire
+//! partagée et lit les commandes sur son entrée standard ; le moteur les affiche sur les écrans habituels (fenêtres
+//! liées ou séparées, F8, F9). Le launcher lui donne le format et la définition : tout changement s'applique en jeu.
 
 use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
@@ -23,13 +24,88 @@ use crate::activity::{self, What};
 use crate::i18n::{t, tr};
 use crate::input::{DsButton, DsInput, Stylus};
 use crate::link::ShowToast;
-use crate::screens::Engine;
+use crate::screens::{Aspect, Engine, RenderStyle, Screen, ScreenLayout, ScreenPlaces};
+use crate::settings::PlayerSettings;
 use crate::studio::{in_game, ActiveGame, ActiveRom, AppGameExt, StudioState};
 
 const W: usize = 256;
 const H: usize = 192;
-/// Une image du jeu : les deux écrans en RGB 555 sur 16 bits.
-const FRAME_BYTES: usize = W * H * 2 * 2;
+/// Mémoire d'images, comme `native/nitro-pc/present.c` : un en-tête, puis deux jeux de deux écrans en RGBA.
+const MAX_W: usize = 2688;
+const MAX_H: usize = 1152;
+const SHM_HEADER: usize = 4096;
+const SHM_BYTES: usize = SHM_HEADER + 4 * MAX_W * MAX_H * 4;
+/// Pixels dessinés par pixel DS : au moins 2 pour la HD, le runtime ne va pas au-delà de 6.
+const MAX_SCALE: f32 = 6.0;
+
+/// La mémoire que le launcher et le jeu partagent.
+struct SharedFrames {
+    #[cfg(windows)]
+    handle: windows_sys::Win32::Foundation::HANDLE,
+    view: *const u8,
+}
+
+// La mémoire reste valable tant que `SharedFrames` existe et n'est que lue ici.
+unsafe impl Send for SharedFrames {}
+unsafe impl Sync for SharedFrames {}
+
+impl SharedFrames {
+    #[cfg(windows)]
+    fn new(name: &str) -> Option<Self> {
+        use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+        use windows_sys::Win32::System::Memory::{CreateFileMappingW, MapViewOfFile, FILE_MAP_ALL_ACCESS, PAGE_READWRITE};
+        let wide: Vec<u16> = name.encode_utf16().chain([0]).collect();
+        // SAFETY: nom terminé par zéro, mémoire demandée au système et rendue dans `drop`.
+        unsafe {
+            let handle = CreateFileMappingW(INVALID_HANDLE_VALUE, std::ptr::null(), PAGE_READWRITE, 0, SHM_BYTES as u32, wide.as_ptr());
+            if handle.is_null() {
+                return None;
+            }
+            let view = MapViewOfFile(handle, FILE_MAP_ALL_ACCESS, 0, 0, 0);
+            if view.Value.is_null() {
+                windows_sys::Win32::Foundation::CloseHandle(handle);
+                return None;
+            }
+            Some(Self { handle, view: view.Value as *const u8 })
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn new(_name: &str) -> Option<Self> {
+        None
+    }
+
+    /// (numéro de l'image, largeur, hauteur, jeu d'images terminé)
+    fn header(&self) -> [u32; 4] {
+        // SAFETY: l'en-tête est dans la mémoire ; le jeu l'écrit, d'où la lecture volatile.
+        std::array::from_fn(|i| unsafe { std::ptr::read_volatile((self.view as *const u32).add(i)) })
+    }
+
+    /// Les lignes d'un écran, bout à bout.
+    fn screen(&self, set: usize, screen: usize, width: usize, height: usize) -> Vec<u8> {
+        let mut pixels = Vec::with_capacity(width * height * 4);
+        // SAFETY: width <= MAX_W et height <= MAX_H sont vérifiés par l'appelant, set et screen valent 0 ou 1.
+        unsafe {
+            let base = self.view.add(SHM_HEADER + (set * 2 + screen) * MAX_W * MAX_H * 4);
+            for y in 0..height {
+                pixels.extend_from_slice(std::slice::from_raw_parts(base.add(y * MAX_W * 4), width * 4));
+            }
+        }
+        pixels
+    }
+}
+
+#[cfg(windows)]
+impl Drop for SharedFrames {
+    fn drop(&mut self) {
+        use windows_sys::Win32::System::Memory::{UnmapViewOfFile, MEMORY_MAPPED_VIEW_ADDRESS};
+        // SAFETY: vue et poignée viennent de `new` et ne servent plus.
+        unsafe {
+            UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: self.view as *mut _ });
+            windows_sys::Win32::Foundation::CloseHandle(self.handle);
+        }
+    }
+}
 
 /// Le dossier `native` à côté de l'exécutable.
 pub fn native_dir() -> PathBuf {
@@ -363,11 +439,15 @@ struct Running {
     code: String,
     child: Child,
     stdin: Option<ChildStdin>,
-    latest: Arc<Mutex<Option<Vec<u8>>>>,
+    frames: SharedFrames,
+    seq: u32,
     top: Handle<Image>,
     bottom: Handle<Image>,
-    sent: [u8; 8],
+    sent: [u8; 12],
 }
+
+#[derive(Component)]
+struct NativeScreen;
 
 impl Drop for Running {
     fn drop(&mut self) {
@@ -389,7 +469,22 @@ fn screen_image(images: &mut Assets<Image>) -> Handle<Image> {
     images.add(image)
 }
 
-fn start_module(mut commands: Commands, mut images: ResMut<Assets<Image>>, rom: Option<Res<ActiveRom>>, active: Res<ActiveGame>) {
+fn start_module(
+    mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
+    rom: Option<Res<ActiveRom>>,
+    active: Res<ActiveGame>,
+    settings: Option<Res<PlayerSettings>>,
+    mut style: ResMut<RenderStyle>,
+    mut layout: ResMut<ScreenLayout>,
+) {
+    // La spécification a remis le rendu HD : le choix du joueur passe avant. Sans format choisi : 16:9.
+    if let Some(settings) = settings {
+        *style = settings.chosen_render();
+    }
+    if layout.aspect == Aspect::Fill {
+        layout.aspect = Aspect::Wide16x9;
+    }
     let Some(rom) = rom else {
         error!("jeu natif lance sans rom");
         commands.set_state(StudioState::Menu);
@@ -433,8 +528,14 @@ fn launch(commands: &mut Commands, images: &mut Assets<Image>, code: &str, rom: 
     let _ = std::fs::create_dir_all(&saves);
     let log = std::fs::File::create(saves.join("runtime.log")).map(Stdio::from).unwrap_or_else(|_| Stdio::null());
 
+    let name = format!("nds-game-studio-{}-{code}", std::process::id());
+    let Some(frames) = SharedFrames::new(&name) else {
+        error!("{code} : pas de memoire pour les images");
+        commands.set_state(StudioState::Menu);
+        return;
+    };
     let mut command = Command::new(module);
-    command.arg(rom).arg("--pipe").arg("--save").arg(saves.join("backup.sav")).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(log);
+    command.arg(rom).arg("--pipe").arg("--shm").arg(&name).arg("--save").arg(saves.join("backup.sav")).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(log);
     if std::env::var_os("NDSGS_NATIVE_MUTE").is_some() {
         command.arg("--mute");
     }
@@ -454,36 +555,17 @@ fn launch(commands: &mut Commands, images: &mut Assets<Image>, code: &str, rom: 
         }
     };
 
-    let latest = Arc::new(Mutex::new(None));
-    if let Some(mut stdout) = child.stdout.take() {
-        let latest = latest.clone();
-        std::thread::spawn(move || {
-            let mut raw = vec![0u8; FRAME_BYTES];
-            while stdout.read_exact(&mut raw).is_ok() {
-                let rgba: Vec<u8> = raw
-                    .chunks_exact(2)
-                    .flat_map(|p| {
-                        let c = u16::from_le_bytes([p[0], p[1]]) as u32;
-                        let scale = |v: u32| ((v & 31) * 255 / 31) as u8;
-                        [scale(c), scale(c >> 5), scale(c >> 10), 255]
-                    })
-                    .collect();
-                *latest.lock().unwrap() = Some(rgba);
-            }
-        });
-    }
-
     let top = screen_image(images);
     let bottom = screen_image(images);
     let size = Vec2::new(W as f32, H as f32);
     for (engine, image) in [(Engine::Main, &top), (Engine::Sub, &bottom)] {
-        commands.spawn((Sprite { image: image.clone(), custom_size: Some(size), ..default() }, engine.layers(), in_game()));
+        commands.spawn((Sprite { image: image.clone(), custom_size: Some(size), ..default() }, NativeScreen, engine.layers(), in_game()));
     }
     let stdin = child.stdin.take();
-    commands.insert_resource(Running { code: code.to_string(), child, stdin, latest, top, bottom, sent: [0xFF; 8] });
+    commands.insert_resource(Running { code: code.to_string(), child, stdin, frames, seq: 0, top, bottom, sent: [0xFF; 12] });
 }
 
-fn show_frames(mut commands: Commands, mut running: ResMut<Running>, mut images: ResMut<Assets<Image>>) {
+fn show_frames(mut commands: Commands, mut running: ResMut<Running>, mut images: ResMut<Assets<Image>>, mut sprites: Query<&mut Sprite, With<NativeScreen>>) {
     if let Ok(Some(status)) = running.child.try_wait() {
         if status.success() {
             info!("jeu natif termine");
@@ -494,16 +576,32 @@ fn show_frames(mut commands: Commands, mut running: ResMut<Running>, mut images:
         commands.set_state(StudioState::Menu);
         return;
     }
-    let Some(rgba) = running.latest.lock().unwrap().take() else { return };
-    let (top, bottom) = rgba.split_at(W * H * 4);
-    for (handle, pixels) in [(running.top.clone(), top), (running.bottom.clone(), bottom)] {
-        if let Some(mut image) = images.get_mut(&handle) {
-            image.data = Some(pixels.to_vec());
+    let [seq, width, height, front] = running.frames.header();
+    let (width, height) = (width as usize, height as usize);
+    if seq == running.seq || width == 0 || width > MAX_W || height == 0 || height > MAX_H {
+        return;
+    }
+    running.seq = seq;
+    let set = (front & 1) as usize;
+    for (screen, handle) in [running.top.clone(), running.bottom.clone()].iter().enumerate() {
+        let pixels = running.frames.screen(set, screen, width, height);
+        let Some(mut image) = images.get_mut(handle) else { continue };
+        let size = Extent3d { width: width as u32, height: height as u32, depth_or_array_layers: 1 };
+        if image.texture_descriptor.size != size {
+            image.resize(size);
+            image.sampler = if height == H { ImageSampler::nearest() } else { ImageSampler::linear() };
+        }
+        image.data = Some(pixels);
+    }
+    let shown = Vec2::new(width as f32 * H as f32 / height as f32, H as f32);
+    for mut sprite in &mut sprites {
+        if sprite.custom_size != Some(shown) {
+            sprite.custom_size = Some(shown);
         }
     }
 }
 
-fn send_input(mut running: ResMut<Running>, input: Res<DsInput>, stylus: Res<Stylus>) {
+fn send_input(mut running: ResMut<Running>, input: Res<DsInput>, stylus: Res<Stylus>, places: Res<ScreenPlaces>, style: Res<RenderStyle>, windows: Query<&Window>) {
     // Bits du registre KEYINPUT du DS, puis X et Y
     const ORDER: [DsButton; 12] = [
         DsButton::A,
@@ -527,11 +625,27 @@ fn send_input(mut running: ResMut<Running>, input: Res<DsInput>, stylus: Res<Sty
     }
     let touch = stylus.touch().filter(|p| p.x >= 0.0 && p.y >= 0.0 && p.x < W as f32 && p.y < H as f32);
     let (down, x, y) = touch.map_or((0u16, 0u16, 0u16), |p| (1, p.x as u16, p.y as u16));
-    let mut packet = [0u8; 8];
+    // La définition suit la fenêtre : un pixel d'image par pixel d'écran, ou 1 en rendu DS
+    let mut ds_width = W as u16;
+    let mut scale = 1u16;
+    for place in [Screen::Top, Screen::Bottom].into_iter().filter_map(|screen| places.get(screen)) {
+        ds_width = ds_width.max(place.ds_width.round() as u16);
+        if *style == RenderStyle::Hd {
+            let factor = windows.get(place.window).map_or(1.0, |window| window.scale_factor());
+            scale = scale.max((place.scale * factor).ceil().clamp(2.0, MAX_SCALE) as u16);
+        }
+    }
+    // La 2D est affinée par puissances de 2 : 3 passe à 4, l'image réduite reste régulière
+    if scale == 3 {
+        scale = 4;
+    }
+    let mut packet = [0u8; 12];
     packet[0..2].copy_from_slice(&keys.to_le_bytes());
     packet[2..4].copy_from_slice(&down.to_le_bytes());
     packet[4..6].copy_from_slice(&x.to_le_bytes());
     packet[6..8].copy_from_slice(&y.to_le_bytes());
+    packet[8..10].copy_from_slice(&ds_width.to_le_bytes());
+    packet[10..12].copy_from_slice(&scale.to_le_bytes());
     if packet != running.sent {
         running.sent = packet;
         if let Some(stdin) = running.stdin.as_mut() {

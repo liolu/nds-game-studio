@@ -66,6 +66,18 @@ bash native/tools/run_game.sh AJTP "<rom>" 60 --mute --save test.sav --dump capt
 
 - `--keys "image:masque[/x/y],..."` : touches (bits de KEYINPUT : A=1, B=2, Select=4, Start=8, droite=16, gauche=32,
   haut=64, bas=128, R=256, L=512, X=1024, Y=2048) et stylet.
+
+## Image
+
+Le jeu dessine ses écrans à la définition de la fenêtre, dans des fils à part : il garde ainsi sa cadence, et une image trop longue à dessiner est simplement sautée.
+
+- 3D : recalculée à la définition demandée, textures filtrées (bilinéaire). En format large, elle montre ce que le DS coupait sur les côtés.
+- 2D : les moteurs dessinent toujours 256x192, car c'est la définition des dessins du jeu. L'image est affinée par Scale2x, posée sur la 3D et reste au centre, avec du noir sur les côtés si la 3D n'est pas affichée.
+- Launcher : l'option Rendu (HD ou DS) et le format (F8 ou options) s'appliquent en jeu. Sans format choisi, un jeu natif démarre en 16:9.
+- Échange : mémoire partagée (`--shm nom`, voir `present.c` et `native_game.rs`) ; le paquet d'entrée donne aussi la largeur en pixels DS et le nombre de pixels par pixel DS.
+- Essais sans fenêtre : `--scale k --dswidth n --dump dossier --every n --frames n`.
+
+Limites : les ombres (mode 3 des polygones) ne sont pas dessinées. Un objet que le jeu cache hors de l'écran du DS peut apparaître sur les côtés en format large : F8 repasse en 4:3.
 - `--trace`, `--prof` : état et profil ; `--wav fichier` : le son mixé en PCM brut.
 - `native_build.py --instrument` : version de débogage (dernière instruction ARM, registres et derniers appels au plantage) ;
   `--watch adresse` y montre qui écrit à une adresse.

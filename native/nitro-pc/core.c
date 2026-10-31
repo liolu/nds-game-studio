@@ -71,7 +71,7 @@ void nds_unhandled(const char *f, u32 pc) { nds_fatal("instruction non traduite 
 void nds_missing(const char *name) { nds_fatal("fonction absente : %s", name); }
 
 /* ------------------------------------------------------------------ arguments */
-static const char *argv_[16];
+static const char *argv_[32];
 static int argc_;
 
 static void parse_args(void) {
@@ -81,7 +81,7 @@ static void parse_args(void) {
     while (*c && n < 2047) line[n++] = *c++;
     line[n] = 0;
     char *p = line;
-    while (*p && argc_ < 16) {
+    while (*p && argc_ < 32) {
         while (*p == ' ') p++;
         if (!*p) break;
         char end = ' ';

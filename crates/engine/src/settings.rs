@@ -167,11 +167,18 @@ pub struct ResetSettings;
 
 /// Les choix du joueur, et ce qui était à l'écran à la dernière image.
 #[derive(Resource, Default)]
-struct PlayerSettings {
+pub(crate) struct PlayerSettings {
     player: Settings,
     seen: Option<Settings>,
     /// Moment du dernier changement pas encore écrit.
     dirty_at: Option<f64>,
+}
+
+impl PlayerSettings {
+    /// Le rendu choisi par le joueur : la spécification d'un jeu peut en imposer un autre.
+    pub(crate) fn chosen_render(&self) -> RenderStyle {
+        self.player.render()
+    }
 }
 
 /// Agrandir la fenêtre principale dès qu'elle existe (winit ne le fait pas à la création).

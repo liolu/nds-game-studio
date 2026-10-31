@@ -1,18 +1,14 @@
-/* Moteur 3D du DS : commandes de geometrie -> liste de polygones -> image 256x192 au moment du VBlank. */
+/* Moteur 3D du DS : commandes de geometrie -> liste de polygones -> image a la definition de la fenetre.
+ * Le jeu remplit une liste ; a l'echange elle part au fil de rendu avec une copie des textures. */
 #include "nitro.h"
-
-static u16 frame3d[256 * 192];
-static u8 alpha3d[256 * 192];
-const u16 *gx_frame3d(void) { return frame3d; }
-const u8 *gx_alpha3d(void) { return alpha3d; }
 
 typedef struct { s32 m[16]; } Mtx;
 typedef struct { float x, y, z, w, r, g, b, s, t; } Vtx;
 typedef struct { Vtx v[10]; int n; u32 attr, tex, pal; int translucent; float ysort; } Poly;
 
 #define MAX_POLYS 8192
-static Poly polys[2][MAX_POLYS];
-static int poly_count[2];
+static Poly polys[3][MAX_POLYS];
+static int poly_count[3];
 static int build = 0;
 static int swap_pending, swap_flags, render_flags;
 
@@ -134,8 +130,9 @@ static int strip_flip;
 
 static inline float plane(const Vtx *v, int p) {
     switch (p) {
-    case 0: return v->w + v->x;
-    case 1: return v->w - v->x;
+    /* plus large que l'ecran : le format large montre ce que le DS coupait (MAX_WIDE / 256) */
+    case 0: return v->w * 1.75f + v->x;
+    case 1: return v->w * 1.75f - v->x;
     case 2: return v->w + v->y;
     case 3: return v->w - v->y;
     case 4: return v->w + v->z;
@@ -433,18 +430,38 @@ u32 gx_status(void) {
     return 0x06000002u | (pos_sp & 31) << 8 | (proj_sp & 1) << 13;
 }
 
+/* ------------------------------------------------------------------ images des textures, figees avec la liste */
+#define KB(n) ((n) * 1024u)
+
+/* Une liste prete : polygones, textures et registres du moment de l'echange */
+typedef struct {
+    u8 tex[4][KB(128)], has_tex[4];
+    u8 pal[6][KB(16)], has_pal[6];
+    u32 disp3d, clear, cdepth, aref, flags;
+    u16 toon[32], edge[8];
+    int vx1, vy1, vx2, vy2;
+} ListState;
+static ListState list_state[3];
+static int list_ready = 1, list_shown = 2;
+static volatile int list_fresh;
+static volatile long list_lock;
+
 /* ------------------------------------------------------------------ textures */
-static u8 *tex_ptr(u32 byte) {
-    u8 *s = vram_tex_slot((byte >> 17) & 3);
-    return s ? s + (byte & 0x1FFFF) : 0;
+static const ListState *cur_state;
+
+static inline float ffloor(float v) { s32 i = (s32)v; return (float)(i - (v < (float)i)); }
+
+static inline const u8 *tex_ptr(u32 byte) {
+    u32 slot = (byte >> 17) & 3;
+    return cur_state->has_tex[slot] ? cur_state->tex[slot] + (byte & 0x1FFFF) : 0;
 }
-static u8 *pal_ptr(u32 byte) {
-    u8 *s = vram_texpal_slot((byte >> 14) % 6);
-    return s ? s + (byte & 0x3FFF) : 0;
+static inline const u8 *pal_ptr(u32 byte) {
+    u32 slot = (byte >> 14) % 6;
+    return cur_state->has_pal[slot] ? cur_state->pal[slot] + (byte & 0x3FFF) : 0;
 }
 
 /* renvoie 0 si transparent ; sinon alpha sur 5 bits en haut, couleur 555 */
-static inline u32 sample(u32 texparam, u32 palbase, s32 s, s32 t) {
+static inline u32 texel(u32 texparam, u32 palbase, s32 s, s32 t) {
     u32 fmt = (texparam >> 26) & 7;
     u32 w = 8u << ((texparam >> 20) & 7), h = 8u << ((texparam >> 23) & 7);
     if (texparam & (1u << 16)) {
@@ -460,62 +477,61 @@ static inline u32 sample(u32 texparam, u32 palbase, s32 s, s32 t) {
     u32 pb = palbase << 4;
     switch (fmt) {
     case 1: {
-        u8 *p = tex_ptr(base + t * w + s);
+        const u8 *p = tex_ptr(base + t * w + s);
         if (!p) return 0;
         u32 idx = *p & 31, a = *p >> 5;
-        u8 *q = pal_ptr(pb + idx * 2);
+        const u8 *q = pal_ptr(pb + idx * 2);
         if (!q || !a) return 0;
-        return (*(u16 *)q & 0x7FFF) | ((a * 4 + a / 2) << 16);
+        return (*(const u16 *)q & 0x7FFF) | ((a * 4 + a / 2) << 16);
     }
     case 2: {
-        u8 *p = tex_ptr(base + (t * w + s) / 4);
+        const u8 *p = tex_ptr(base + (t * w + s) / 4);
         if (!p) return 0;
         u32 idx = (*p >> (((t * w + s) & 3) * 2)) & 3;
         if (c0trans && !idx) return 0;
-        u8 *q = pal_ptr((palbase << 3) + idx * 2);
-        return q ? (*(u16 *)q & 0x7FFF) | (31u << 16) : 0;
+        const u8 *q = pal_ptr((palbase << 3) + idx * 2);
+        return q ? (*(const u16 *)q & 0x7FFF) | (31u << 16) : 0;
     }
     case 3: {
-        u8 *p = tex_ptr(base + (t * w + s) / 2);
+        const u8 *p = tex_ptr(base + (t * w + s) / 2);
         if (!p) return 0;
         u32 idx = (*p >> (((t * w + s) & 1) * 4)) & 15;
         if (c0trans && !idx) return 0;
-        u8 *q = pal_ptr(pb + idx * 2);
-        return q ? (*(u16 *)q & 0x7FFF) | (31u << 16) : 0;
+        const u8 *q = pal_ptr(pb + idx * 2);
+        return q ? (*(const u16 *)q & 0x7FFF) | (31u << 16) : 0;
     }
     case 4: {
-        u8 *p = tex_ptr(base + t * w + s);
+        const u8 *p = tex_ptr(base + t * w + s);
         if (!p) return 0;
         if (c0trans && !*p) return 0;
-        u8 *q = pal_ptr(pb + *p * 2);
-        return q ? (*(u16 *)q & 0x7FFF) | (31u << 16) : 0;
+        const u8 *q = pal_ptr(pb + *p * 2);
+        return q ? (*(const u16 *)q & 0x7FFF) | (31u << 16) : 0;
     }
     case 5: {
         u32 bx = s >> 2, by = t >> 2;
         u32 off = base + (by * (w >> 2) + bx) * 4;
-        u8 *p = tex_ptr(off);
+        const u8 *p = tex_ptr(off);
         if (!p) return 0;
         u32 code = (p[t & 3] >> ((s & 3) * 2)) & 3;
         u32 slotoff = off & 0x1FFFF;
         u32 idxbase = 0x20000 + ((off >> 17) == 2 ? 0x10000 : 0) + slotoff / 2;
-        u8 *ip = tex_ptr(idxbase & ~1u);
+        const u8 *ip = tex_ptr(idxbase & ~1u);
         if (!ip) return 0;
-        u16 info = *(u16 *)ip;
+        u16 info = *(const u16 *)ip;
         u32 pa = pb + (info & 0x3FFF) * 4;
         u32 mode = info >> 14;
-#define PAL(i) (pal_ptr(pa + (i) * 2) ? *(u16 *)pal_ptr(pa + (i) * 2) & 0x7FFF : 0)
+#define PAL(i) (pal_ptr(pa + (i) * 2) ? *(const u16 *)pal_ptr(pa + (i) * 2) & 0x7FFF : 0)
         switch (code) {
         case 0: return PAL(0) | (31u << 16);
         case 1: return PAL(1) | (31u << 16);
         case 2:
             if (mode == 0 || mode == 2) return PAL(2) | (31u << 16);
-            if (mode == 1 || mode == 3) {
+            {
                 u32 a = PAL(0), b = PAL(1), r;
                 if (mode == 1) r = ((a & 31) + (b & 31)) / 2 | ((((a >> 5) & 31) + ((b >> 5) & 31)) / 2) << 5 | ((((a >> 10) & 31) + ((b >> 10) & 31)) / 2) << 10;
                 else r = ((a & 31) * 5 + (b & 31) * 3) / 8 | ((((a >> 5) & 31) * 5 + ((b >> 5) & 31) * 3) / 8) << 5 | ((((a >> 10) & 31) * 5 + ((b >> 10) & 31) * 3) / 8) << 10;
                 return r | (31u << 16);
             }
-            break;
         default:
             if (mode == 0 || mode == 1) return 0;
             if (mode == 2) return PAL(3) | (31u << 16);
@@ -525,20 +541,19 @@ static inline u32 sample(u32 texparam, u32 palbase, s32 s, s32 t) {
                 return r | (31u << 16);
             }
         }
-        return 0;
     }
     case 6: {
-        u8 *p = tex_ptr(base + t * w + s);
+        const u8 *p = tex_ptr(base + t * w + s);
         if (!p) return 0;
         u32 idx = *p & 7, a = *p >> 3;
-        u8 *q = pal_ptr(pb + idx * 2);
+        const u8 *q = pal_ptr(pb + idx * 2);
         if (!q || !a) return 0;
-        return (*(u16 *)q & 0x7FFF) | (a << 16);
+        return (*(const u16 *)q & 0x7FFF) | (a << 16);
     }
     case 7: {
-        u8 *p = tex_ptr(base + (t * w + s) * 2);
+        const u8 *p = tex_ptr(base + (t * w + s) * 2);
         if (!p) return 0;
-        u16 c = *(u16 *)p;
+        u16 c = *(const u16 *)p;
         if (!(c & 0x8000)) return 0;
         return (c & 0x7FFF) | (31u << 16);
     }
@@ -546,50 +561,157 @@ static inline u32 sample(u32 texparam, u32 palbase, s32 s, s32 t) {
     return 0;
 }
 
-/* ------------------------------------------------------------------ rasterisation */
-static float zbuf[256 * 192];
-static u8 idbuf[256 * 192];
+/* ------------------------------------------------------------------ textures decodees, gardees tant que la VRAM ne change pas */
+#define TEX_TABLE 4096
+#define TEX_ARENA (40u * 1024 * 1024 / 4)
+typedef struct { u32 key, pal; const u32 *pixels; } TexEntry;
+static TexEntry tex_table[TEX_TABLE];
+static u32 *tex_arena;
+static u32 tex_used;
+static u8 seen_tex[4][KB(128)], seen_pal[6][KB(16)], seen_has_tex[4], seen_has_pal[6];
+
+static int same_words(const void *a, const void *b, u32 bytes) {
+    const u32 *x = a, *y = b;
+    for (u32 i = 0; i < bytes / 4; i++) if (x[i] != y[i]) return 0;
+    return 1;
+}
+
+static void tex_cache_check(void) {
+    const ListState *st = cur_state;
+    int same = 1;
+    for (int i = 0; i < 4 && same; i++)
+        same = seen_has_tex[i] == st->has_tex[i] && (!st->has_tex[i] || same_words(seen_tex[i], st->tex[i], KB(128)));
+    for (int i = 0; i < 6 && same; i++)
+        same = seen_has_pal[i] == st->has_pal[i] && (!st->has_pal[i] || same_words(seen_pal[i], st->pal[i], KB(16)));
+    if (same) return;
+    for (int i = 0; i < 4; i++) {
+        seen_has_tex[i] = st->has_tex[i];
+        if (st->has_tex[i]) nds_copy(seen_tex[i], st->tex[i], KB(128));
+    }
+    for (int i = 0; i < 6; i++) {
+        seen_has_pal[i] = st->has_pal[i];
+        if (st->has_pal[i]) nds_copy(seen_pal[i], st->pal[i], KB(16));
+    }
+    nds_zero(tex_table, sizeof tex_table);
+    tex_used = 0;
+}
+
+/* Une texture en RGBA 8 bits ; 0 si elle ne tient plus dans le cache. Appele avant le dessin, par un seul fil. */
+static const u32 *tex_decoded(u32 texparam, u32 pal) {
+    u32 key = texparam & 0x3FF0FFFFu; /* sans repetition ni miroir, qui se font a la lecture */
+    u32 at = ((key * 2654435761u) ^ (pal * 40503u)) >> 20;
+    for (int probe = 0; probe < TEX_TABLE; probe++, at = (at + 1) & (TEX_TABLE - 1)) {
+        TexEntry *e = &tex_table[at];
+        if (e->pixels) {
+            if (e->key == key && e->pal == pal) return e->pixels;
+            continue;
+        }
+        u32 w = 8u << ((key >> 20) & 7), h = 8u << ((key >> 23) & 7);
+        if (tex_used + w * h > TEX_ARENA) return 0;
+        u32 *out = tex_arena + tex_used;
+        for (u32 t = 0; t < h; t++) {
+            for (u32 s = 0; s < w; s++) {
+                u32 c = texel(key, pal, s, t);
+                u32 a = c >> 16;
+                out[t * w + s] = a ? ((c & 31) * 255 / 31) | (((c >> 5) & 31) * 255 / 31) << 8 | (((c >> 10) & 31) * 255 / 31) << 16 | (a * 255 / 31) << 24 : 0;
+            }
+        }
+        tex_used += w * h;
+        e->key = key;
+        e->pal = pal;
+        e->pixels = out;
+        return out;
+    }
+    return 0;
+}
+
+static inline s32 wrap_coord(s32 c, s32 size, int repeat, int flip) {
+    if (repeat) {
+        if (flip && (c & size)) c = ~c;
+        return c & (size - 1);
+    }
+    return c < 0 ? 0 : c >= size ? size - 1 : c;
+}
+
+/* ------------------------------------------------------------------ rasterisation a la definition demandee */
+#define MAX_W 2688
+#define MAX_H 1152
+#define STRIPS 48
+static u32 *color_buf;
+static float *z_buf;
+static u8 *id_buf;
 
 typedef struct { float sx, sy, iw, zw, rw, gw, bw, sw, tw; } SV;
+typedef struct { SV sv[10]; const u32 *texels; s32 tex_w, tex_h; u8 rep_s, rep_t, flip_s, flip_t, alpha_tex; } Prep;
+static Prep prep[MAX_POLYS];
+static short prep_y0[MAX_POLYS], prep_y1[MAX_POLYS];
+static u32 toon8[32], edge8[8];
+typedef struct { int w, h, k, margin; const Poly *polys; int n; } Raster;
+static volatile long next_strip;
 
-u32 gx_stat[8]; /* essais : pixels ecrits, rejetes (z, texture, alpha), polygones par format */
+static void prepare_polys(const Raster *ra) {
+    const ListState *st = cur_state;
+    float vw = (float)(st->vx2 - st->vx1 + 1), vh = (float)(st->vy2 - st->vy1 + 1);
+    float left = (float)ra->margin + st->vx1 * ra->k;
+    for (int n = 0; n < ra->n; n++) {
+        const Poly *p = &ra->polys[n];
+        Prep *q = &prep[n];
+        float ymin = 1e9f, ymax = -1e9f;
+        for (int i = 0; i < p->n; i++) {
+            const Vtx *v = &p->v[i];
+            SV *o = &q->sv[i];
+            float iw = v->w > 1e-6f || v->w < -1e-6f ? 1.0f / v->w : 1e6f;
+            o->sx = left + (v->x * iw + 1.0f) * 0.5f * vw * ra->k;
+            o->sy = ((192 - st->vy1) - (v->y * iw + 1.0f) * 0.5f * vh) * ra->k;
+            o->iw = iw;
+            o->zw = v->z * iw;
+            o->rw = v->r * iw;
+            o->gw = v->g * iw;
+            o->bw = v->b * iw;
+            o->sw = v->s * iw;
+            o->tw = v->t * iw;
+            if (o->sy < ymin) ymin = o->sy;
+            if (o->sy > ymax) ymax = o->sy;
+        }
+        prep_y0[n] = ymin < 0 ? 0 : ymin > 32000 ? 32000 : (short)ymin;
+        prep_y1[n] = ymax < 0 ? -1 : ymax > 32000 ? 32000 : (short)ymax;
+        u32 texp = p->tex, fmt = (texp >> 26) & 7;
+        q->texels = (st->disp3d & 1) && fmt ? tex_decoded(texp, p->pal) : 0;
+        q->tex_w = 8 << ((texp >> 20) & 7);
+        q->tex_h = 8 << ((texp >> 23) & 7);
+        q->rep_s = (texp >> 16) & 1;
+        q->rep_t = (texp >> 17) & 1;
+        q->flip_s = (texp >> 18) & 1;
+        q->flip_t = (texp >> 19) & 1;
+        q->alpha_tex = fmt == 1 || fmt == 6;
+    }
+}
 
-static void draw_poly(const Poly *p, int disp3d, u32 alpha_ref) {
-    SV sv[10];
-    float vw = (float)(vp_x2 - vp_x1 + 1), vh = (float)(vp_y2 - vp_y1 + 1);
-    for (int i = 0; i < p->n; i++) {
-        const Vtx *v = &p->v[i];
-        float iw = v->w > 1e-6f || v->w < -1e-6f ? 1.0f / v->w : 1e6f;
-        sv[i].sx = vp_x1 + (v->x * iw + 1.0f) * 0.5f * vw;
-        sv[i].sy = (191 - vp_y1) - (v->y * iw + 1.0f) * 0.5f * vh + 1.0f;
-        sv[i].iw = iw;
-        sv[i].zw = v->z * iw;
-        sv[i].rw = v->r * iw;
-        sv[i].gw = v->g * iw;
-        sv[i].bw = v->b * iw;
-        sv[i].sw = v->s * iw;
-        sv[i].tw = v->t * iw;
-    }
-    float ymin = 1e9f, ymax = -1e9f;
-    for (int i = 0; i < p->n; i++) {
-        if (sv[i].sy < ymin) ymin = sv[i].sy;
-        if (sv[i].sy > ymax) ymax = sv[i].sy;
-    }
-    int y0 = (int)ymin, y1 = (int)ymax;
-    if (y0 < 0) y0 = 0;
-    if (y1 > 191) y1 = 191;
-    u32 attr = p->attr, texp = p->tex;
-    u32 fmt = (texp >> 26) & 7;
+static void draw_poly(const Poly *p, const Prep *q, const Raster *ra, int y0, int y1) {
+    const ListState *st = cur_state;
+    const SV *sv = q->sv;
+    int full_x = st->vx1 == 0 && st->vx2 >= 255;
+    int clip_x0 = full_x ? 0 : ra->margin + st->vx1 * ra->k;
+    int clip_x1 = full_x ? ra->w - 1 : ra->margin + (st->vx2 + 1) * ra->k - 1;
+    u32 attr = p->attr;
     u32 mode = (attr >> 4) & 3;
-    u32 palpha = (attr >> 16) & 31;
-    int wire = palpha == 0;
-    if (wire) palpha = 31;
-    u32 pid = (attr >> 24) & 63;
-    int blend_on = (disp3d >> 3) & 1;
-    int tex_on = (disp3d & 1) && fmt != 0;
-    int alpha_test = (disp3d >> 2) & 1;
+    if (mode == 3) return; /* ombres : non gerees */
+    u32 raw_alpha = (attr >> 16) & 31;
+    int wire = raw_alpha == 0;
+    u32 palpha = wire ? 255 : raw_alpha * 255 / 31;
+    u8 pid = (attr >> 24) & 63;
+    u32 disp = st->disp3d;
+    int blend_on = (disp >> 3) & 1;
+    int alpha_test = (disp >> 2) & 1;
+    int highlight = (disp >> 1) & 1;
+    u32 aref = st->aref * 255 / 31;
     int update_depth = !p->translucent || ((attr >> 11) & 1);
     int depth_equal = (attr >> 14) & 1;
+    int wmode = st->flags & 2;
+    int smooth = ra->k > 1;
+    const u32 *texels = q->texels;
+    s32 tw = q->tex_w, th = q->tex_h;
+    int wire_w = ra->k;
     for (int y = y0; y <= y1; y++) {
         float fy = y + 0.5f;
         float xl = 1e9f, xr = -1e9f;
@@ -599,106 +721,260 @@ static void draw_poly(const Poly *p, int disp3d, u32 alpha_ref) {
             if ((a->sy <= fy) == (b->sy <= fy)) continue;
             float t = (fy - a->sy) / (b->sy - a->sy);
             float x = a->sx + (b->sx - a->sx) * t;
-#define MIXV(o) o.sx = x; o.iw = a->iw + (b->iw - a->iw) * t; o.zw = a->zw + (b->zw - a->zw) * t; o.rw = a->rw + (b->rw - a->rw) * t; o.gw = a->gw + (b->gw - a->gw) * t; o.bw = a->bw + (b->bw - a->bw) * t; o.sw = a->sw + (b->sw - a->sw) * t; o.tw = a->tw + (b->tw - a->tw) * t;
+#define MIXV(o) o.iw = a->iw + (b->iw - a->iw) * t; o.zw = a->zw + (b->zw - a->zw) * t; o.rw = a->rw + (b->rw - a->rw) * t; o.gw = a->gw + (b->gw - a->gw) * t; o.bw = a->bw + (b->bw - a->bw) * t; o.sw = a->sw + (b->sw - a->sw) * t; o.tw = a->tw + (b->tw - a->tw) * t;
             if (x < xl) { xl = x; MIXV(l) }
             if (x > xr) { xr = x; MIXV(r) }
         }
         if (xl > xr) continue;
-        int x0 = (int)(xl + 0.5f), x1 = (int)(xr + 0.5f) - 1;
-        if (x0 < 0) x0 = 0;
-        if (x1 > 255) x1 = 255;
-        float span = xr - xl;
-        float di = span > 0 ? 1.0f / span : 0;
-        for (int x = x0; x <= x1; x++) {
-            float t = (x + 0.5f - xl) * di;
-            if (t < 0) t = 0;
-            if (t > 1) t = 1;
-            float iw = l.iw + (r.iw - l.iw) * t;
-            float w = iw != 0 ? 1.0f / iw : 0;
+        int x0 = xl < clip_x0 ? clip_x0 : (int)(xl + 0.5f);
+        int x1 = xr > clip_x1 + 1 ? clip_x1 : (int)(xr + 0.5f) - 1;
+        if (x0 > x1) continue;
+        float di = xr > xl ? 1.0f / (xr - xl) : 0;
+        float diw = (r.iw - l.iw) * di, dzw = (r.zw - l.zw) * di, drw = (r.rw - l.rw) * di, dgw = (r.gw - l.gw) * di, dbw = (r.bw - l.bw) * di, dsw = (r.sw - l.sw) * di, dtw = (r.tw - l.tw) * di;
+        float start = x0 + 0.5f - xl;
+        float iw = l.iw + diw * start, zw = l.zw + dzw * start, rw = l.rw + drw * start, gw = l.gw + dgw * start, bw = l.bw + dbw * start, sw = l.sw + dsw * start, tcw = l.tw + dtw * start;
+        u32 *colors = color_buf + y * ra->w;
+        float *depths = z_buf + y * ra->w;
+        u8 *ids = id_buf + y * ra->w;
+        for (int x = x0; x <= x1; x++, iw += diw, zw += dzw, rw += drw, gw += dgw, bw += dbw, sw += dsw, tcw += dtw) {
+            float w = 1.0f / iw;
             /* z/w varie lineairement a l'ecran ; mode W de l'echange : la profondeur est w */
-            float z = (swap_flags & 2) ? w : l.zw + (r.zw - l.zw) * t;
-            int at = y * 256 + x;
-            if (depth_equal ? (z > zbuf[at] + 0.002f || z < zbuf[at] - 0.002f) : z >= zbuf[at]) { gx_stat[1]++; continue; }
-            if (wire && x != x0 && x != x1 && y != y0 && y != y1) continue;
-            u32 cr = (u32)((l.rw + (r.rw - l.rw) * t) * w), cg = (u32)((l.gw + (r.gw - l.gw) * t) * w), cb = (u32)((l.bw + (r.bw - l.bw) * t) * w);
-            if (cr > 31) cr = 31;
-            if (cg > 31) cg = 31;
-            if (cb > 31) cb = 31;
-            u32 a = palpha;
-            if (tex_on) {
-                s32 s = (s32)((l.sw + (r.sw - l.sw) * t) * w), tt = (s32)((l.tw + (r.tw - l.tw) * t) * w);
-                u32 tc = sample(texp, p->pal, s, tt);
-                u32 ta = tc >> 16;
-                if (!ta) { gx_stat[2]++; continue; }
-                u32 tr = tc & 31, tg = (tc >> 5) & 31, tb = (tc >> 10) & 31;
-                if (mode == 1) { /* decalque */
-                    cr = (tr * ta + cr * (31 - ta)) / 31;
-                    cg = (tg * ta + cg * (31 - ta)) / 31;
-                    cb = (tb * ta + cb * (31 - ta)) / 31;
+            float z = wmode ? w : zw;
+            if (depth_equal ? (z > depths[x] + 0.002f || z < depths[x] - 0.002f) : z >= depths[x]) continue;
+            if (wire && x - x0 >= wire_w && x1 - x >= wire_w && y - y0 >= wire_w && y1 - y >= wire_w) continue;
+            s32 cr = (s32)(rw * w * 8.2258f), cg = (s32)(gw * w * 8.2258f), cb = (s32)(bw * w * 8.2258f);
+            cr = cr < 0 ? 0 : cr > 255 ? 255 : cr;
+            cg = cg < 0 ? 0 : cg > 255 ? 255 : cg;
+            cb = cb < 0 ? 0 : cb > 255 ? 255 : cb;
+            if (mode == 2) {
+                /* ombrage par la table de toon, indexee par le rouge du sommet */
+                u32 toon = toon8[cr >> 3];
+                if (highlight) {
+                    s32 base = cr;
+                    cr = base + (s32)(toon & 255);
+                    cg = base + (s32)((toon >> 8) & 255);
+                    cb = base + (s32)((toon >> 16) & 255);
+                    cr = cr > 255 ? 255 : cr;
+                    cg = cg > 255 ? 255 : cg;
+                    cb = cb > 255 ? 255 : cb;
                 } else {
-                    cr = (tr + 1) * (cr + 1) / 32;
-                    cg = (tg + 1) * (cg + 1) / 32;
-                    cb = (tb + 1) * (cb + 1) / 32;
-                    if (cr) cr--;
-                    if (cg) cg--;
-                    if (cb) cb--;
-                    a = (ta + 1) * (palpha + 1) / 32;
-                    if (a) a--;
+                    cr = toon & 255;
+                    cg = (toon >> 8) & 255;
+                    cb = (toon >> 16) & 255;
                 }
             }
-            if (mode == 3) continue; /* ombres : non gerees */
-            if (alpha_test && a <= alpha_ref) continue;
-            if (!a) continue;
-            if (blend_on && a < 31 && alpha3d[at]) {
-                u16 d = frame3d[at];
-                u32 inv = 31 - a;
-                cr = (cr * (a + 1) + (d & 31) * inv) >> 5;
-                cg = (cg * (a + 1) + ((d >> 5) & 31) * inv) >> 5;
-                cb = (cb * (a + 1) + ((d >> 10) & 31) * inv) >> 5;
-                if (a < alpha3d[at]) a = alpha3d[at];
+            u32 a = palpha;
+            if (texels) {
+                float s = sw * w, t = tcw * w;
+                u32 tr, tg, tb, ta;
+                if (smooth) {
+                    /* filtrage bilineaire ; les texels transparents ne deteignent pas sur leurs voisins */
+                    float fs = s - 0.5f, ft = t - 0.5f;
+                    float bs = ffloor(fs), bt = ffloor(ft);
+                    u32 ux = (u32)((fs - bs) * 256.0f), uy = (u32)((ft - bt) * 256.0f);
+                    s32 is = (s32)bs, it = (s32)bt;
+                    s32 u0 = wrap_coord(is, tw, q->rep_s, q->flip_s), u1 = wrap_coord(is + 1, tw, q->rep_s, q->flip_s);
+                    s32 v0 = wrap_coord(it, th, q->rep_t, q->flip_t) * tw, v1 = wrap_coord(it + 1, th, q->rep_t, q->flip_t) * tw;
+                    u32 c00 = texels[v0 + u0], c01 = texels[v0 + u1], c10 = texels[v1 + u0], c11 = texels[v1 + u1];
+                    if ((c00 & c01 & c10 & c11) >> 24 == 255) {
+                        u32 vx = 256 - ux, vy = 256 - uy;
+                        u32 top_rb = (((c00 & 0xFF00FF) * vx + (c01 & 0xFF00FF) * ux) >> 8) & 0xFF00FF;
+                        u32 top_g = (((c00 & 0xFF00) * vx + (c01 & 0xFF00) * ux) >> 8) & 0xFF00;
+                        u32 low_rb = (((c10 & 0xFF00FF) * vx + (c11 & 0xFF00FF) * ux) >> 8) & 0xFF00FF;
+                        u32 low_g = (((c10 & 0xFF00) * vx + (c11 & 0xFF00) * ux) >> 8) & 0xFF00;
+                        u32 rb = ((top_rb * vy + low_rb * uy) >> 8) & 0xFF00FF;
+                        u32 gg = ((top_g * vy + low_g * uy) >> 8) & 0xFF00;
+                        tr = rb & 255;
+                        tg = gg >> 8;
+                        tb = rb >> 16;
+                        ta = 255;
+                    } else {
+                        const u32 cs[4] = {c00, c01, c10, c11};
+                        const u32 wt[4] = {(256 - ux) * (256 - uy), ux * (256 - uy), (256 - ux) * uy, ux * uy};
+                        u32 sum_a = 0, sum_r = 0, sum_g = 0, sum_b = 0;
+                        for (int i = 0; i < 4; i++) {
+                            u32 wa = (wt[i] >> 8) * (cs[i] >> 24) >> 8;
+                            sum_a += wa;
+                            sum_r += wa * (cs[i] & 255);
+                            sum_g += wa * ((cs[i] >> 8) & 255);
+                            sum_b += wa * ((cs[i] >> 16) & 255);
+                        }
+                        if (!sum_a) continue;
+                        tr = sum_r / sum_a;
+                        tg = sum_g / sum_a;
+                        tb = sum_b / sum_a;
+                        ta = sum_a > 255 ? 255 : sum_a;
+                    }
+                } else {
+                    s32 u = wrap_coord((s32)ffloor(s), tw, q->rep_s, q->flip_s), v = wrap_coord((s32)ffloor(t), th, q->rep_t, q->flip_t);
+                    u32 c = texels[v * tw + u];
+                    if (!c) continue;
+                    tr = c & 255;
+                    tg = (c >> 8) & 255;
+                    tb = (c >> 16) & 255;
+                    ta = c >> 24;
+                }
+                /* bord d'une texture a trous : net, sans halo */
+                if (!q->alpha_tex) {
+                    if (ta < 128) continue;
+                    ta = 255;
+                }
+                if (mode == 1) {
+                    cr = (tr * ta + cr * (255 - ta)) / 255;
+                    cg = (tg * ta + cg * (255 - ta)) / 255;
+                    cb = (tb * ta + cb * (255 - ta)) / 255;
+                } else {
+                    cr = (cr * tr + 127) / 255;
+                    cg = (cg * tg + 127) / 255;
+                    cb = (cb * tb + 127) / 255;
+                    a = (a * ta + 127) / 255;
+                }
             }
-            gx_stat[0]++;
-            frame3d[at] = (u16)(cr | (cg << 5) | (cb << 10));
-            alpha3d[at] = (u8)a;
-            if (update_depth) zbuf[at] = z;
-            idbuf[at] = (u8)pid;
+            if (alpha_test && a <= aref) continue;
+            if (!a) continue;
+            u32 d = colors[x];
+            if (blend_on && a < 255 && (d >> 24)) {
+                u32 inv = 255 - a;
+                cr = (cr * a + (d & 255) * inv) / 255;
+                cg = (cg * a + ((d >> 8) & 255) * inv) / 255;
+                cb = (cb * a + ((d >> 16) & 255) * inv) / 255;
+                if ((d >> 24) > a) a = d >> 24;
+            }
+            colors[x] = (u32)cr | ((u32)cg << 8) | ((u32)cb << 16) | (a << 24);
+            if (update_depth) depths[x] = z;
+            ids[x] = pid;
         }
     }
 }
 
-static void render_polys(int list) {
-    u32 disp3d = REG16(IO + 0x60);
-    u32 clear = REG32(IO + 0x350);
-    u16 color = (u16)(clear & 0x7FFF);
-    u8 alpha = (u8)((clear >> 16) & 31);
-    u32 cdepth = REG16(IO + 0x354) & 0x7FFF;
-    float zclear = cdepth / 16383.5f - 1.0f;
-    if (cdepth == 0x7FFF) zclear = 1.0001f;
-    if (swap_flags & 2) zclear = 1e30f;
-    for (int i = 0; i < 256 * 192; i++) {
-        frame3d[i] = color;
-        alpha3d[i] = alpha;
-        zbuf[i] = zclear;
-    }
-    u32 aref = REG8(IO + 0x340) & 31;
-    Poly *ps = polys[list];
-    int n = poly_count[list];
-    for (int i = 0; i < n; i++) if (!ps[i].translucent) draw_poly(&ps[i], disp3d, aref);
-    for (int i = 0; i < n; i++) if (ps[i].translucent) draw_poly(&ps[i], disp3d, aref);
-    REG16(IO + 0x604) = (u16)n;
-    gx_stat[3] = n;
-    if (n) {
-        const Poly *q = &ps[n / 2];
-        gx_stat[4] = q->tex;
-        gx_stat[5] = q->attr;
+static void clear_band(void *arg, int band, int bands) {
+    const Raster *ra = arg;
+    const ListState *st = cur_state;
+    u32 c = st->clear;
+    u32 color = ((c & 31) * 255 / 31) | (((c >> 5) & 31) * 255 / 31) << 8 | (((c >> 10) & 31) * 255 / 31) << 16 | (((c >> 16) & 31) * 255 / 31) << 24;
+    u8 clear_id = (c >> 24) & 63;
+    float zclear = st->cdepth / 16383.5f - 1.0f;
+    if (st->cdepth == 0x7FFF) zclear = 1.0001f;
+    if (st->flags & 2) zclear = 1e30f;
+    int y0 = ra->h * band / bands, y1 = ra->h * (band + 1) / bands;
+    for (int i = y0 * ra->w; i < y1 * ra->w; i++) {
+        color_buf[i] = color;
+        z_buf[i] = zclear;
+        id_buf[i] = clear_id;
     }
 }
 
-/* appele a chaque VBlank : si le jeu a demande l'echange, on dessine ce qu'il a envoye */
+/* Chaque fil prend la prochaine bande libre : les bandes chargees ne retardent pas tout le monde */
+static void raster_band(void *arg, int band, int bands) {
+    const Raster *ra = arg;
+    for (;;) {
+        int strip = __sync_fetch_and_add(&next_strip, 1);
+        if (strip >= STRIPS) return;
+        int y0 = ra->h * strip / STRIPS, y1 = ra->h * (strip + 1) / STRIPS - 1;
+        for (int pass = 0; pass < 2; pass++) {
+            for (int i = 0; i < ra->n; i++) {
+                if (prep_y1[i] < y0 || prep_y0[i] > y1 || ra->polys[i].translucent != pass) continue;
+                draw_poly(&ra->polys[i], &prep[i], ra, prep_y0[i] > y0 ? prep_y0[i] : y0, prep_y1[i] < y1 ? prep_y1[i] : y1);
+            }
+        }
+    }
+}
+
+/* contours : un pixel dont le voisin plus lointain appartient a un autre polygone */
+static void edge_band(void *arg, int band, int bands) {
+    const Raster *ra = arg;
+    int y0 = ra->h * band / bands, y1 = ra->h * (band + 1) / bands;
+    int step = ra->k > 2 ? ra->k / 2 : 1;
+    if (y0 < step) y0 = step;
+    if (y1 > ra->h - step) y1 = ra->h - step;
+    for (int y = y0; y < y1; y++) {
+        for (int x = step; x < ra->w - step; x++) {
+            int at = y * ra->w + x;
+            u8 id = id_buf[at];
+            float z = z_buf[at];
+            int n[4] = {at - step, at + step, at - step * ra->w, at + step * ra->w};
+            for (int i = 0; i < 4; i++) {
+                if (id_buf[n[i]] != id && z < z_buf[n[i]]) {
+                    color_buf[at] = (color_buf[at] & 0xFF000000u) | edge8[id >> 3];
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/* Dans le fil de rendu : l'image 3D a cette definition, refaite si la liste ou la definition a change. */
+const u32 *gx_render(int w, int h, int k, int margin) {
+    static int last_w, last_h;
+    if (!color_buf) {
+        color_buf = VirtualAlloc(0, MAX_W * MAX_H * 4, 0x3000, 4);
+        z_buf = VirtualAlloc(0, MAX_W * MAX_H * 4, 0x3000, 4);
+        id_buf = VirtualAlloc(0, MAX_W * MAX_H, 0x3000, 4);
+        tex_arena = VirtualAlloc(0, TEX_ARENA * 4, 0x3000, 4);
+    }
+    while (__sync_lock_test_and_set(&list_lock, 1)) Sleep(0);
+    int fresh = list_fresh;
+    if (fresh) {
+        int t = list_shown;
+        list_shown = list_ready;
+        list_ready = t;
+        list_fresh = 0;
+    }
+    __sync_lock_release(&list_lock);
+    if (!fresh && w == last_w && h == last_h) return color_buf;
+    last_w = w;
+    last_h = h;
+    cur_state = &list_state[list_shown];
+    Raster ra = {w, h, k, margin, polys[list_shown], poly_count[list_shown]};
+    for (int i = 0; i < 32; i++) {
+        u32 c = cur_state->toon[i];
+        toon8[i] = ((c & 31) * 255 / 31) | (((c >> 5) & 31) * 255 / 31) << 8 | (((c >> 10) & 31) * 255 / 31) << 16;
+    }
+    for (int i = 0; i < 8; i++) {
+        u32 c = cur_state->edge[i];
+        edge8[i] = ((c & 31) * 255 / 31) | (((c >> 5) & 31) * 255 / 31) << 8 | (((c >> 10) & 31) * 255 / 31) << 16;
+    }
+    tex_cache_check();
+    prepare_polys(&ra);
+    gfx_parallel(clear_band, &ra);
+    next_strip = 0;
+    gfx_parallel(raster_band, &ra);
+    if (cur_state->disp3d & 0x20) gfx_parallel(edge_band, &ra);
+    return color_buf;
+}
+
+/* appele a chaque VBlank par le fil du jeu : si le jeu a demande l'echange, sa liste part au dessin */
 void gx_begin_frame(void) {
     if (!swap_pending) return;
     swap_pending = 0;
-    render_polys(build);
-    build = !build;
+    ListState *st = &list_state[build];
+    for (int i = 0; i < 4; i++) {
+        u8 *src = vram_tex_slot(i);
+        st->has_tex[i] = src != 0;
+        if (src) nds_copy(st->tex[i], src, KB(128));
+    }
+    for (int i = 0; i < 6; i++) {
+        u8 *src = vram_texpal_slot(i);
+        st->has_pal[i] = src != 0;
+        if (src) nds_copy(st->pal[i], src, KB(16));
+    }
+    st->disp3d = REG16(IO + 0x60);
+    st->clear = REG32(IO + 0x350);
+    st->cdepth = REG16(IO + 0x354) & 0x7FFF;
+    st->aref = REG8(IO + 0x340) & 31;
+    st->flags = swap_flags;
+    nds_copy(st->toon, (void *)(IO + 0x380), 64);
+    nds_copy(st->edge, (void *)(IO + 0x330), 16);
+    st->vx1 = vp_x1;
+    st->vy1 = vp_y1;
+    st->vx2 = vp_x2;
+    st->vy2 = vp_y2;
+    REG16(IO + 0x604) = (u16)poly_count[build];
+    while (__sync_lock_test_and_set(&list_lock, 1)) Sleep(0);
+    int t = list_ready;
+    list_ready = build;
+    build = t;
+    list_fresh = 1;
+    __sync_lock_release(&list_lock);
     poly_count[build] = 0;
 }

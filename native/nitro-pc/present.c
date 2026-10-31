@@ -1,4 +1,5 @@
-/* Sortie : les deux ecrans vers le launcher (--pipe), ou images BMP pour les essais (--dump dossier --every n --frames n). */
+/* Sortie : les deux ecrans vers le launcher (--shm), ou images BMP pour les essais (--dump dossier --every n --frames n).
+ * Definition : --scale k (pixels par pixel DS), --dswidth n (largeur en pixels DS, 256 = 4:3, 341 = 16:9). */
 #include "nitro.h"
 
 static const char *dump_dir;
@@ -9,6 +10,8 @@ static unsigned long WINAPI input_thread(void *arg);
 static volatile u32 keys_now;
 static volatile int touch_down, touch_x, touch_y;
 static void script_step(void);
+static u8 *shm;
+static volatile int cfg_scale = 1, cfg_width = 256;
 
 void present_init(void) {
     const char *v;
@@ -16,47 +19,104 @@ void present_init(void) {
     if (nds_arg("--every", &v) && v) { every = 0; while (*v) every = every * 10 + *v++ - '0'; }
     if (nds_arg("--frames", &v) && v) { while (*v) max_frames = max_frames * 10 + *v++ - '0'; }
     nds_arg("--keys", &key_script);
+    if (nds_arg("--scale", &v) && v) { cfg_scale = 0; while (*v) cfg_scale = cfg_scale * 10 + *v++ - '0'; }
+    if (nds_arg("--dswidth", &v) && v) { cfg_width = 0; while (*v) cfg_width = cfg_width * 10 + *v++ - '0'; }
+    if (nds_arg("--shm", &v) && v) {
+        void *map = OpenFileMappingA(0xF001F, 0, v);
+        if (map) shm = MapViewOfFile(map, 0xF001F, 0, 0, 0);
+        if (!shm) nds_fatal("memoire d'images introuvable : %s", v);
+    }
     pipe_mode = nds_arg("--pipe", 0);
     if (pipe_mode) CreateThread(0, 0x10000, input_thread, 0, 0, 0);
 }
 
-static void write_bmp(u32 frame) {
-    static u8 file[54 + 256 * 384 * 3];
-    u8 *h = file;
-    u32 size = sizeof(file);
-    nds_zero(h, 54);
-    h[0] = 'B'; h[1] = 'M';
-    *(u32 *)(h + 2) = size; *(u32 *)(h + 10) = 54; *(u32 *)(h + 14) = 40;
-    *(u32 *)(h + 18) = 256; *(u32 *)(h + 22) = 384;
-    *(u16 *)(h + 26) = 1; *(u16 *)(h + 28) = 24;
-    u8 *p = h + 54;
-    for (int y = 383; y >= 0; y--) {
-        const u16 *line = y < 192 ? gfx_top() + y * 256 : gfx_bottom() + (y - 192) * 256;
-        for (int x = 0; x < 256; x++) {
-            u16 c = line[x];
-            *p++ = (u8)(((c >> 10) & 31) * 255 / 31);
-            *p++ = (u8)(((c >> 5) & 31) * 255 / 31);
-            *p++ = (u8)((c & 31) * 255 / 31);
+/* Images partagees avec le launcher : en-tete, puis deux jeux de deux ecrans, RGBA 8 bits. */
+#define MAX_W 2688
+#define MAX_H 1152
+#define SHM_HEADER 4096
+typedef struct { volatile u32 seq, width, height, front; } ShmHeader;
+static u32 *local_frames;
+static int back_set;
+static volatile u32 flips;
+
+static u32 *frame_ptr(int set, int screen) {
+    u8 *base = shm ? shm + SHM_HEADER : (u8 *)local_frames;
+    return (u32 *)(base + (u32)(set * 2 + screen) * MAX_W * MAX_H * 4);
+}
+
+void present_config(int *scale, int *ds_width) {
+    int k = cfg_scale, w = cfg_width;
+    if (k < 1) k = 1;
+    if (k > 6) k = 6;
+    if (w < 256) w = 256;
+    if (w * k > MAX_W) w = MAX_W / k;
+    *scale = k;
+    *ds_width = w;
+}
+
+void present_back(u32 **top, u32 **bottom) {
+    if (!shm && !local_frames) local_frames = VirtualAlloc(0, 4u * MAX_W * MAX_H * 4, 0x3000, 4);
+    *top = frame_ptr(back_set, 0);
+    *bottom = frame_ptr(back_set, 1);
+}
+
+static void write_bmp(u32 frame, const u32 *top, const u32 *bottom, int w, int h) {
+    static u8 *file;
+    if (!file) file = VirtualAlloc(0, 54 + MAX_W * MAX_H * 2 * 3 + MAX_H * 8, 0x3000, 4);
+    int stride = (w * 3 + 3) & ~3;
+    u32 size = 54 + stride * h * 2;
+    u8 *d = file;
+    nds_zero(d, 54);
+    d[0] = 'B'; d[1] = 'M';
+    *(u32 *)(d + 2) = size; *(u32 *)(d + 10) = 54; *(u32 *)(d + 14) = 40;
+    *(u32 *)(d + 18) = w; *(u32 *)(d + 22) = h * 2;
+    *(u16 *)(d + 26) = 1; *(u16 *)(d + 28) = 24;
+    u8 *p = d + 54;
+    for (int y = h * 2 - 1; y >= 0; y--) {
+        const u32 *line = y < h ? top + y * MAX_W : bottom + (y - h) * MAX_W;
+        for (int x = 0; x < w; x++) {
+            u32 c = line[x];
+            p[x * 3] = (u8)(c >> 16);
+            p[x * 3 + 1] = (u8)(c >> 8);
+            p[x * 3 + 2] = (u8)c;
         }
+        p += stride;
     }
     char name[300];
     int n = 0;
-    for (const char *d = dump_dir; *d && n < 260; d++) name[n++] = *d;
+    for (const char *t = dump_dir; *t && n < 260; t++) name[n++] = *t;
     name[n++] = '/';
     u32 v = frame, div = 100000;
     while (div) { name[n++] = '0' + (v / div) % 10; div /= 10; }
     name[n++] = '.'; name[n++] = 'b'; name[n++] = 'm'; name[n++] = 'p'; name[n] = 0;
     void *f = CreateFileA(name, 0x40000000u, 0, 0, 2, 0, 0);
-    unsigned long w;
-    WriteFile(f, file, size, &w, 0);
+    unsigned long written;
+    WriteFile(f, file, size, &written, 0);
     CloseHandle(f);
+}
+
+/* Fin d'une image dans le fil de rendu : les lignes vont d'un seul tenant dans le jeu d'images, et le launcher lit le jeu termine */
+void present_flip(int w, int h, u32 frame) {
+    static u32 last_dump = 0xFFFFFFFFu;
+    if (dump_dir && frame / every != last_dump) {
+        last_dump = frame / every;
+        write_bmp(frame, frame_ptr(back_set, 0), frame_ptr(back_set, 1), w, h);
+    }
+    if (shm) {
+        ShmHeader *header = (ShmHeader *)shm;
+        header->width = w;
+        header->height = h;
+        header->front = back_set;
+        header->seq++;
+    }
+    back_set = !back_set;
+    flips++;
 }
 
 extern int nds_trace;
 extern u32 nds_trace_count, nds_trace_eip, nds_trace_addr, nds_trace_stack[13];
 
 void present_frame(void) {
-    if (dump_dir && nds_frame % every == 0) write_bmp(nds_frame);
     script_step();
     /* boutons X/Y : actifs a 0 ; bit 15 a 0 = couvercle ouvert */
     {
@@ -67,13 +127,6 @@ void present_frame(void) {
         /* dernier releve du stylet pour le SDK : x 12 bits, y 12 bits, touche */
         *(volatile u16 *)0x027FFFAAu = (u16)((touch_x & 0xFFF) | ((touch_y & 0xF) << 12));
         *(volatile u16 *)0x027FFFACu = (u16)(((touch_y >> 4) & 0xFF) | (touch_down ? 0x100 : 0));
-    }
-    if (pipe_mode) {
-        static u16 both[256 * 192 * 2];
-        unsigned long w;
-        nds_copy(both, gfx_top(), 256 * 192 * 2);
-        nds_copy(both + 256 * 192, gfx_bottom(), 256 * 192 * 2);
-        if (!WriteFile(GetStdHandle((unsigned long)-11), both, sizeof(both), &w, 0)) ExitProcess(0);
     }
     static int trace_on = -1;
     if (trace_on < 0) trace_on = nds_arg("--trace", 0);
@@ -90,11 +143,6 @@ void present_frame(void) {
                 for (u32 i = 0; i < 0x400; i += 8) if ((REG16(0x07000000u + i) & 0x300) != 0x200) oam++;
                 nds_log("  pal=%u palB=%u vramBG=%u objs=%u polys=%u etat=%x sub=%x clear=%x disp3d=%x", pal, pal2, vram, oam, REG16(IO + 0x604), REG32(0x02088438u), REG32(0x02088448u), REG32(IO + 0x350), REG16(IO + 0x60));
             }
-            {
-                extern u32 gx_stat[8];
-                nds_log("  3d ecrits=%u rejZ=%u rejTex=%u polys=%u", gx_stat[0], gx_stat[1], gx_stat[2], gx_stat[3]);
-                gx_stat[0] = gx_stat[1] = gx_stat[2] = 0;
-            }
             if (nds_arg("--threads-dump", 0)) { extern void nds_dump_threads(void); nds_dump_threads(); }
             nds_log("    %8x", nds_trace_eip);
             for (int i = 0; nds_trace_stack[i]; i++) nds_log("    %8x", nds_trace_stack[i]);
@@ -107,27 +155,32 @@ void present_frame(void) {
         for (int i = 0; i < 4096; i++) nds_log("    %8x", nds_ring[(nds_ring_pos + i) & 4095]);
     }
 #endif
-    if (max_frames && nds_frame >= max_frames) ExitProcess(0);
+    if (max_frames && nds_frame >= max_frames) {
+        nds_log("%u images, %u dessinees", nds_frame, flips);
+        ExitProcess(0);
+    }
 }
 
-/* commandes : le launcher envoie 8 octets a chaque changement (touches, stylet) */
+/* commandes : le launcher envoie 12 octets a chaque changement (touches, stylet, definition) */
 static volatile u32 keys_now;
 static volatile int touch_down, touch_x, touch_y;
 
 static unsigned long WINAPI input_thread(void *arg) {
     void *in = GetStdHandle((unsigned long)-10);
-    u16 packet[4];
+    u16 packet[6];
     unsigned long got;
     for (;;) {
         u32 have = 0;
-        while (have < 8) {
-            if (!ReadFile(in, (u8 *)packet + have, 8 - have, &got, 0) || !got) ExitProcess(0); /* launcher ferme */
+        while (have < 12) {
+            if (!ReadFile(in, (u8 *)packet + have, 12 - have, &got, 0) || !got) ExitProcess(0); /* launcher ferme */
             have += got;
         }
         keys_now = packet[0];
         touch_down = packet[1];
         touch_x = packet[2];
         touch_y = packet[3];
+        cfg_width = packet[4];
+        cfg_scale = packet[5];
     }
     return 0;
 }
