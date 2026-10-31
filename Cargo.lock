@@ -4551,6 +4551,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "nds-mod-tools"
+version = "0.2.0"
+dependencies = [
+ "cgmath",
+ "encoding_rs",
+ "image",
+ "nds-nitro",
+ "nds-video",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "nds-net"
 version = "0.2.0"
 dependencies = [

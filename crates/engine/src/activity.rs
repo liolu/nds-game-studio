@@ -32,6 +32,10 @@ pub enum What {
     RomAdded { title: String },
     RomRemoved { file: String },
     RomFailed { error: String },
+    /// Les outils de mod viennent d'être installés.
+    ModTools,
+    ModApplied { game: String, applied: usize, errors: usize },
+    ModFailed { game: String, error: String },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -50,9 +54,9 @@ impl What {
     pub fn level(&self) -> Level {
         match self {
             What::Ready { .. } | What::Decompiled { .. } => Level::Good,
-            What::PrepareFailed { .. } | What::GameStopped { .. } | What::RomFailed { .. } => Level::Error,
+            What::PrepareFailed { .. } | What::GameStopped { .. } | What::RomFailed { .. } | What::ModFailed { .. } => Level::Error,
             What::Installed { .. } | What::UpdateFound { .. } => Level::Update,
-            What::Covers { .. } | What::RomAdded { .. } | What::RomRemoved { .. } => Level::Info,
+            What::Covers { .. } | What::RomAdded { .. } | What::RomRemoved { .. } | What::ModTools | What::ModApplied { .. } => Level::Info,
         }
     }
 
@@ -70,6 +74,10 @@ impl What {
             What::RomAdded { title } => t!("{title} added", "{title} ajoute"),
             What::RomRemoved { file } => t!("{file} removed", "{file} retire"),
             What::RomFailed { error } => t!("Rom not added: {error}", "Rom non ajoutee : {error}"),
+            What::ModTools => tr("Mod tools installed", "Outils de mod installes").to_string(),
+            What::ModApplied { game, applied, errors } => t!("{}: mod applied, {applied} files, {errors} errors", "{} : mod applique, {applied} fichiers, {errors} erreurs", title(game)),
+            What::ModFailed { game, error } if game.is_empty() => t!("Mod tools: {error}", "Outils de mod : {error}"),
+            What::ModFailed { game, error } => t!("{}: mod failed: {error}", "{} : echec du mod : {error}", title(game)),
         }
     }
 }

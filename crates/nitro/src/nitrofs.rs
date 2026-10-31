@@ -4,6 +4,8 @@
 use crate::errors::Result;
 
 pub struct File {
+    /// N° dans la table des positions (FAT).
+    pub id: usize,
     /// Chemin dans NitroFS, sans « / » au début.
     pub path: String,
     /// Position dans la rom.
@@ -50,7 +52,7 @@ fn walk(rom: &[u8], fnt: &[u8], fat: &[u8], dir: usize, prefix: &str, out: &mut 
         } else {
             if let (Some(start), Some(end)) = (u32_at(fat, id * 8), u32_at(fat, id * 8 + 4)) {
                 if start <= end && end <= rom.len() {
-                    out.push(File { path, start, end });
+                    out.push(File { id, path, start, end });
                 }
             }
             id += 1;

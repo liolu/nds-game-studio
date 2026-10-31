@@ -220,7 +220,7 @@ impl Plugin for LauncherPlugin {
             .add_systems(Startup, setup)
             .add_systems(OnEnter(StudioState::Menu), spawn_launcher.before(crate::studio::auto_start))
             .add_systems(Update, (take_drops, poll_copies, poll_disk, back_key, type_folder_name, expire_confirm, log_clicks, rebuild, show_status).chain().run_if(in_state(StudioState::Menu)))
-            .add_systems(Update, (activity_visibility, activity_now, activity_decomp, activity_history, note_update).run_if(in_state(StudioState::Menu)))
+            .add_systems(Update, (activity_visibility, activity_now, activity_decomp, activity_history, note_update, poll_mods).run_if(in_state(StudioState::Menu)))
             .add_systems(Update, (wheel, looks, view_choice_looks, lang_choice_looks, version_text, redo_on_language))
             .init_resource::<UpdateOffer>()
             .add_systems(Update, (poll_covers, cover_choice_looks, prepare_games, update_banner.run_if(in_state(StudioState::Menu))));
@@ -1338,7 +1338,8 @@ fn play_tab(rom: &Rom, registry: &GameRegistry) -> (Top, Rest) {
                 let ready = matches!(state, Preparation::Ready);
                 play.observe(move |_: On<Activate>, mut commands: Commands, mut lau: ResMut<Launcher>| {
                     if ready {
-                        commands.insert_resource(ActiveRom(path.clone()));
+                        // La rom de l'utilisateur, ou sa copie modifiée si les mods de ce jeu sont actifs
+                        commands.insert_resource(ActiveRom(crate::mods::rom_to_play(&code, &path)));
                         commands.insert_resource(ActiveGame(Some(id.clone())));
                         commands.set_state(StudioState::Playing);
                     } else {
@@ -1386,14 +1387,113 @@ fn play_tab(rom: &Rom, registry: &GameRegistry) -> (Top, Rest) {
             if experimental {
                 t.spawn(text(font, tr("Experimental: this game may crash or show nothing yet.", "Experimental : ce jeu peut planter ou ne rien afficher pour l'instant."), 15.0, DIM));
             }
+            if crate::mods::is_on(&code_for_state) {
+                t.spawn(text(font, tr("Mods are on: the game starts with your changes (Modding tab to go back to the originals).", "Mods actifs : le jeu demarre avec vos changements (onglet Moding pour revenir aux originaux)."), 15.0, GOLD));
+            }
             t.spawn(text(font, summary, 14.0, DIM));
         }),
         Box::new(|_, _| {}),
     )
 }
 
+/// L'option « outils de mod » : à télécharger, puis exporter, modifier, appliquer, et revenir aux originaux quand on veut.
+fn spawn_mods(r: &mut ChildSpawnerCommands, font: &Fonts, code: &str, rom: &Path) {
+    use crate::mods;
+    let wide = |r: &mut ChildSpawnerCommands| {
+        r.spawn(Node { height: px(2), margin: UiRect::vertical(px(10)), flex_shrink: 0.0, ..default() }).insert(BackgroundColor(BORDER));
+    };
+    wide(r);
+    r.spawn(text(font, tr("Mod tools (optional)", "Outils de mod (option)"), 18.0, TEXT));
+    let running = mods::running();
+    if !mods::installed() {
+        r.spawn(text(font, tr("Export the game's files as PNG, OBJ, WAV, MP3, MP4 and TXT for GIMP, Blender, Godot and Audacity, change them, and play with your changes. Your rom is never modified.", "Exporte les fichiers du jeu en PNG, OBJ, WAV, MP3, MP4 et TXT pour GIMP, Blender, Godot et Audacity, modifiez-les, et jouez avec vos changements. Votre rom n'est jamais modifiee."), 15.0, DIM));
+        let label = if running { tr("Downloading...", "Telechargement...") } else { tr("Download the mod tools", "Telecharger les outils de mod") };
+        let (normal, hover) = if running { (ITEM, ITEM) } else { (PLAY, PLAY_HOVER) };
+        button(r, Node { align_self: AlignSelf::FlexStart, ..button_node() }, normal, hover)
+            .observe(|_: On<Activate>, mut lau: ResMut<Launcher>| {
+                crate::mods::install();
+                lau.dirty = true;
+            })
+            .with_child(text(font, label, 15.0, TEXT));
+    } else {
+        r.spawn(Node { flex_direction: FlexDirection::Row, flex_wrap: FlexWrap::Wrap, column_gap: px(8), row_gap: px(8), ..default() }).with_children(|row| {
+            let (shade, shade_hover) = if running { (ITEM, ITEM) } else { (ITEM, ITEM_HOVER) };
+            let (export_code, export_rom) = (code.to_string(), rom.to_path_buf());
+            button(row, button_node(), shade, shade_hover)
+                .observe(move |_: On<Activate>, mut lau: ResMut<Launcher>| {
+                    crate::mods::export(&export_code, &export_rom);
+                    lau.dirty = true;
+                })
+                .with_child(text(font, tr("1. Export the files", "1. Exporter les fichiers"), 15.0, TEXT));
+            let open_code = code.to_string();
+            button(row, button_node(), ITEM, ITEM_HOVER)
+                .observe(move |_: On<Activate>| {
+                    let dir = crate::mods::mod_dir(&open_code);
+                    let _ = std::fs::create_dir_all(&dir);
+                    open_folder_in_system(&dir);
+                })
+                .with_child(text(font, tr("2. Open the mod folder", "2. Ouvrir le dossier du mod"), 15.0, TEXT));
+            let (apply_code, apply_rom) = (code.to_string(), rom.to_path_buf());
+            button(row, button_node(), shade, shade_hover)
+                .observe(move |_: On<Activate>, mut lau: ResMut<Launcher>| {
+                    crate::mods::apply(&apply_code, &apply_rom);
+                    lau.dirty = true;
+                })
+                .with_child(text(font, tr("3. Apply my changes", "3. Appliquer mes changements"), 15.0, TEXT));
+        });
+        if mods::has_modded_rom(code) {
+            let on = mods::is_on(code);
+            r.spawn(text(font, tr("The game starts with:", "Le jeu demarre avec :"), 15.0, DIM));
+            r.spawn(Node { flex_direction: FlexDirection::Row, column_gap: px(8), ..default() }).with_children(|row| {
+                for (value, label) in [(false, tr("The originals", "Les originaux")), (true, tr("My mods", "Mes mods"))] {
+                    let (normal, hover) = if on == value { (ITEM_ON, ITEM_ON) } else { (ITEM, ITEM_HOVER) };
+                    let choice_code = code.to_string();
+                    button(row, button_node(), normal, hover)
+                        .observe(move |_: On<Activate>, mut lau: ResMut<Launcher>| {
+                            crate::mods::set_on(&choice_code, value);
+                            lau.dirty = true;
+                        })
+                        .with_child(text(font, label, 15.0, TEXT));
+                }
+            });
+        }
+    }
+    let (lines, error) = mods::lines_for(code);
+    if let Some(e) = error {
+        r.spawn(text(font, e, 15.0, BAD));
+    }
+    for line in lines {
+        r.spawn(text(font, line, 14.0, DIM));
+    }
+    if !running {
+        for line in mods::report_lines(code) {
+            r.spawn(text(font, line, 14.0, DIM));
+        }
+        if mods::installed() {
+            button(r, Node { align_self: AlignSelf::FlexStart, margin: UiRect::top(px(10)), ..button_node() }, ITEM, ITEM_HOVER)
+                .observe(|_: On<Activate>, mut lau: ResMut<Launcher>| {
+                    crate::mods::remove_tool();
+                    lau.dirty = true;
+                })
+                .with_child(text(font, tr("Remove the mod tools (your mods stay)", "Retirer les outils de mod (vos mods restent)"), 14.0, TEXT));
+        }
+    }
+}
+
+/// Refait la page d'un jeu quand le travail de l'outil de mod avance.
+fn poll_mods(mut lau: ResMut<Launcher>, mut seen: Local<u64>) {
+    let now = crate::mods::revision();
+    if now != *seen {
+        *seen = now;
+        if lau.open.is_some() && lau.tab == Tab::Modding {
+            lau.dirty = true;
+        }
+    }
+}
+
 fn modding_tab(rom: &Rom) -> (Top, Rest) {
     let file = rom.info.file.clone();
+    let (code, path) = (rom.info.code.clone(), rom.info.path.clone());
     (
         Box::new(move |t, font| {
             button(t, Node { align_self: AlignSelf::FlexStart, ..button_node() }, ITEM, ITEM_HOVER)
@@ -1405,9 +1505,10 @@ fn modding_tab(rom: &Rom) -> (Top, Rest) {
                 })
                 .with_child(text(font, tr("Open the Code window (F5)", "Ouvrir la fenetre Code (F5)"), 15.0, TEXT));
         }),
-        Box::new(|r, font| {
+        Box::new(move |r, font| {
             r.spawn(text(font, tr("Assets: the game's 3D models and images, with their path in the rom.", "Assets : modeles 3D et images du jeu, avec leur chemin dans la rom."), 15.0, DIM));
             r.spawn(text(font, tr("Code: the game's sources, rebuilt and restarted every time you save.", "Code : les sources du jeu, recompilees et relancees a chaque enregistrement."), 15.0, DIM));
+            spawn_mods(r, font, &code, &path);
         }),
     )
 }
@@ -1543,6 +1644,11 @@ fn open_rom_folder() {
         warn!("dossier des roms impossible a creer : {}: {e}", dir.display());
         return;
     }
+    open_folder_in_system(&dir);
+}
+
+/// Montre un dossier dans l'explorateur du système.
+fn open_folder_in_system(dir: &Path) {
     let program = if cfg!(target_os = "windows") {
         "explorer"
     } else if cfg!(target_os = "macos") {
@@ -1550,7 +1656,7 @@ fn open_rom_folder() {
     } else {
         "xdg-open"
     };
-    if let Err(e) = std::process::Command::new(program).arg(&dir).spawn() {
+    if let Err(e) = std::process::Command::new(program).arg(dir).spawn() {
         warn!("impossible d'ouvrir {} : {e}", dir.display());
     }
 }

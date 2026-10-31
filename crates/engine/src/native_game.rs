@@ -328,6 +328,17 @@ fn say(state: &Mutex<Generation>, message: String) {
     state.lock().unwrap().message = message;
 }
 
+/// Télécharge un fichier d'une release du projet.
+pub(crate) fn download(url: &str, to: &Path) -> Result<(), String> {
+    let tls = ureq::tls::TlsConfig::builder().provider(ureq::tls::TlsProvider::NativeTls).build();
+    let config = ureq::Agent::config_builder().tls_config(tls).build();
+    let mut response = ureq::Agent::new_with_config(config).get(url).call().map_err(|e| format!("{url} : {e}"))?;
+    let mut body = response.body_mut().as_reader();
+    let mut file = std::fs::File::create(to).map_err(|e| e.to_string())?;
+    std::io::copy(&mut body, &mut file).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Télécharge et décompresse la boîte à outils si elle n'est pas là ; renvoie son dossier.
 fn ensure_toolchain(state: &Mutex<Generation>) -> Result<PathBuf, String> {
     let exe = std::env::current_exe().unwrap_or_default();
@@ -348,13 +359,7 @@ fn ensure_toolchain(state: &Mutex<Generation>) -> Result<PathBuf, String> {
         std::fs::copy(local, &archive).map_err(|e| e.to_string())?;
     } else {
         say(state, tr("Downloading the tools (only once)...", "Telechargement des outils (une seule fois)...").to_string());
-        let tls = ureq::tls::TlsConfig::builder().provider(ureq::tls::TlsProvider::NativeTls).build();
-        let config = ureq::Agent::config_builder().tls_config(tls).build();
-        let url = format!("{TOOLCHAIN_URL}/native-toolchain-{version}.zip");
-        let mut response = ureq::Agent::new_with_config(config).get(&url).call().map_err(|e| format!("{url} : {e}"))?;
-        let mut body = response.body_mut().as_reader();
-        let mut file = std::fs::File::create(&archive).map_err(|e| e.to_string())?;
-        std::io::copy(&mut body, &mut file).map_err(|e| e.to_string())?;
+        download(&format!("{TOOLCHAIN_URL}/native-toolchain-{version}.zip"), &archive)?;
     }
     say(state, tr("Installing the tools...", "Installation des outils...").to_string());
     let file = std::fs::File::open(&archive).map_err(|e| e.to_string())?;

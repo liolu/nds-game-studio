@@ -26,6 +26,7 @@
 - `app` (nds-game-studio) : le binaire. Plus de jeux de demo : les jeux sont les roms de l'utilisateur, joues par decompilation + runtime (pas d'emulation). Un module natif s'enregistre avec `add_ds_game` et le `game_code` de sa rom.
 - `native` : runtime nitro-pc (C 32 bits) et traduction ARM vers C, voir `native/README.md` ; `native_game` (moteur) genere le module chez le joueur depuis sa rom, le lance et affiche ses ecrans. Les modules contiennent le code du jeu : jamais commites ni publies. Apres un changement dans `native/`, augmenter `TOOLCHAIN` (`native/tools/export_recipes.py`).
 - `tools/` : common / installer / updater / launcher (repris de SpaceSpore).
+- `tools/modtools` (nds-mod-tools, sans Bevy) : option telechargee depuis l'onglet Moding (`engine/src/mods.rs`, release `mod-tools`, CI `mod-tools.yml`). Export PNG/OBJ/WAV/MP3/MP4/TXT, import, et `mods/<code>/jeu-modifie.nds` : copie de la rom, jamais la rom elle-meme. Reprend `asset_scan.rs` du moteur par `#[path]`. Apres un changement : augmenter `tools/modtools/version.txt`. Essai de toute la chaine : `NDSGS_MOD_TEST_ALL=1` a l'import reimporte tout sans changement, et la rom produite doit se reexporter pareil.
 - Une entite de jeu doit avoir `Engine::Main.layers()` ou `Engine::Sub.layers()` (sinon invisible) et `in_game()`.
   Logique de jeu dans `FixedUpdate` avec `.run_if(playing("<id>"))`.
 

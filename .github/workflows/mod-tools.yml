@@ -1,0 +1,98 @@
+# Option "outils de mod" : telechargee a la demande depuis l'onglet Moding du launcher.
+# Son numero vient de tools/modtools/version.txt. Aucun fichier de jeu dedans.
+name: Mod tools
+
+on:
+  push:
+    branches: [experimental]
+    paths:
+      - 'tools/modtools/**'
+      - 'crates/nitro/**'
+      - 'crates/video/**'
+      - 'crates/engine/src/asset_scan.rs'
+      - '.github/workflows/mod-tools.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, platform: windows }
+          - { os: ubuntu-latest, platform: linux }
+          - { os: macos-latest, platform: macos }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build (Windows, Linux)
+        if: matrix.platform != 'macos'
+        run: cargo build --release -p nds-mod-tools
+
+      # FFmpeg en version LGPL : un programme separe, livre tel quel a cote de l'outil
+      - name: Package (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path out
+          Copy-Item target/release/nds-mod-tools.exe out/
+          Invoke-WebRequest "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl.zip" -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg
+          Copy-Item ffmpeg/*/bin/ffmpeg.exe out/
+          Copy-Item ffmpeg/*/LICENSE.txt out/ffmpeg-LICENSE.txt
+          $version = (Get-Content tools/modtools/version.txt).Trim()
+          New-Item -ItemType Directory -Path dist
+          Compress-Archive -Path out/* -DestinationPath "dist/mod-tools-$version-windows.zip"
+
+      - name: Package (Linux)
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          mkdir out dist
+          cp target/release/nds-mod-tools out/
+          curl -fsSL "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-lgpl.tar.xz" | tar xJ
+          cp ffmpeg-*/bin/ffmpeg out/
+          cp ffmpeg-*/LICENSE.txt out/ffmpeg-LICENSE.txt
+          version=$(tr -d '[:space:]' < tools/modtools/version.txt)
+          (cd out && zip -r "../dist/mod-tools-$version-linux.zip" .)
+
+      # Pas de FFmpeg LGPL tout fait pour macOS : PNG, OBJ, WAV et TXT marchent sans, et celui du PATH sert s'il y en a un
+      - name: Build and package (macOS)
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          for t in aarch64-apple-darwin x86_64-apple-darwin; do cargo build --release --target $t -p nds-mod-tools; done
+          mkdir out dist
+          lipo -create -output out/nds-mod-tools target/aarch64-apple-darwin/release/nds-mod-tools target/x86_64-apple-darwin/release/nds-mod-tools
+          version=$(tr -d '[:space:]' < tools/modtools/version.txt)
+          (cd out && zip -r "../dist/mod-tools-$version-macos.zip" .)
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mod-tools-${{ matrix.platform }}
+          path: dist/*.zip
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publier
+        shell: bash
+        run: |
+          if ! gh release view mod-tools > /dev/null 2>&1; then
+            gh release create mod-tools --prerelease --latest=false --title "Outils de mod" \
+              --notes "Telecharges a la demande par le launcher : export et import des fichiers des jeux. Aucun fichier de jeu."
+          fi
+          gh release upload mod-tools dist/*.zip --clobber
