@@ -43,9 +43,15 @@ u32 nds_io_read(u32 a, u32 size); void nds_io_write(u32 a, u32 v, u32 size);
 static inline u32 RD32(u32 a) { return IS_IO(a) ? nds_io_read(a, 4) : *(volatile u32 *)a; }
 static inline u32 RD16(u32 a) { return IS_IO(a) ? nds_io_read(a, 2) : *(volatile u16 *)a; }
 static inline u32 RD8(u32 a) { return IS_IO(a) ? nds_io_read(a, 1) : *(volatile u8 *)a; }
-static inline void WR32(u32 a, u32 v) { if (IS_IO(a)) nds_io_write(a, v, 4); else *(volatile u32 *)a = v; }
-static inline void WR16(u32 a, u32 v) { if (IS_IO(a)) nds_io_write(a, v, 2); else *(volatile u16 *)a = (u16)v; }
-static inline void WR8(u32 a, u32 v) { if (IS_IO(a)) nds_io_write(a, v, 1); else *(volatile u8 *)a = (u8)v; }
+#ifdef NDS_INSTRUMENT
+extern u32 nds_watch; void nds_watch_hit(u32 a, u32 v);
+#define WATCH(a, v) do { if (((a) & ~3u) == nds_watch) nds_watch_hit(a, v); } while (0)
+#else
+#define WATCH(a, v)
+#endif
+static inline void WR32(u32 a, u32 v) { WATCH(a, v); if (IS_IO(a)) nds_io_write(a, v, 4); else *(volatile u32 *)a = v; }
+static inline void WR16(u32 a, u32 v) { WATCH(a, v); if (IS_IO(a)) nds_io_write(a, v, 2); else *(volatile u16 *)a = (u16)v; }
+static inline void WR8(u32 a, u32 v) { WATCH(a, v); if (IS_IO(a)) nds_io_write(a, v, 1); else *(volatile u8 *)a = (u8)v; }
 static inline u32 LSL(u32 x, u32 n) { n &= 255; return n >= 32 ? 0 : x << n; }
 static inline u32 LSR(u32 x, u32 n) { n &= 255; return n >= 32 ? 0 : x >> n; }
 static inline u32 ASR(u32 x, u32 n) { n &= 255; return (u32)((s32)x >> (n >= 32 ? 31 : n)); }

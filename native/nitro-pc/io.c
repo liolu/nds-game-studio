@@ -64,6 +64,14 @@ static void dma_run(int i) {
     int sstep = ((cnt >> 23) & 3) == 0 ? step : ((cnt >> 23) & 3) == 1 ? -step : 0;
     int dstep = ((cnt >> 21) & 3) == 1 ? -step : ((cnt >> 21) & 3) == 2 ? 0 : step;
     if (!n) n = 0x200000;
+#ifdef NDS_INSTRUMENT
+    {
+        extern u32 nds_watch, nds_pc, nds_r[6];
+        u32 span = n * step;
+        if (dst <= nds_watch && nds_watch < dst + span)
+            nds_log("dma%d %x -> %x, %u mots de %d, cnt=%x arm=%x image %u, source: %8x %8x %8x %8x", i, src, dst, n, step, cnt, nds_pc, nds_frame, REG32(src), REG32(src + 4), REG32(src + 8), REG32(src + 12));
+    }
+#endif
     if (src < 0x01FF0000u || dst < 0x01FF0000u) {
         /* MI_StopDma lance une copie vide pour arreter le canal */
     } else if (mode == 7|| (dst >= IO + 0x400 && dst < IO + 0x600)) {

@@ -18,13 +18,18 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 import arm2c
+import recipe
 
 HERE = Path(__file__).resolve().parent
 RUNTIME = HERE.parent / "nitro-pc"
 WINLIBS = r"C:\Users\thomr\AppData\Local\Microsoft\WinGet\Packages\BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe\mingw64\bin"
-if os.path.isdir(WINLIBS):
-    os.environ["PATH"] = WINLIBS + os.pathsep + os.environ["PATH"]
-IDLE = 0x4000  # BELOW_NORMAL_PRIORITY_CLASS : le PC reste utilisable pendant la compilation
+# La boite a outils du launcher donne son compilateur ; sinon celui installe sur ce PC
+TOOLCHAIN_BIN = HERE.parent.parent / "mingw64" / "bin"
+for bin_dir in (str(TOOLCHAIN_BIN), WINLIBS):
+    if os.path.isdir(bin_dir):
+        os.environ["PATH"] = bin_dir + os.pathsep + os.environ["PATH"]
+        break
+IDLE = 0x4000 | 0x08000000  # priorite basse, le PC reste utilisable ; pas de console quand le launcher nous lance
 
 GAME_FLAGS = ["-m32", "-std=gnu89", "-O1", "-w", "-fwrapv", "-fno-strict-aliasing", "-fno-delete-null-pointer-checks",
               "-fno-common", "-fno-builtin", "-fno-stack-protector", "-mno-stack-arg-probe", "-mno-ms-bitfields",
@@ -133,7 +138,9 @@ def nm_defined(objs, jobs):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("project")
+    ap.add_argument("project", nargs="?", help="dossier du projet de jeu ; sans projet : --recipe et --rom")
+    ap.add_argument("--recipe", help="recette du jeu (native/games/<code>.json.gz)")
+    ap.add_argument("--rom", help="rom du joueur, avec --recipe")
     ap.add_argument("--version", default=None)
     ap.add_argument("--out", default=None)
     ap.add_argument("--lift", default="", help="fonctions a traduire depuis l'ARM meme si elles ont du C (pour trouver un bug)")
@@ -141,19 +148,24 @@ def main():
     ap.add_argument("--with-c", action="store_true", help="compiler aussi le C decompile du jeu (registres par exceptions, plus lent)")
     ap.add_argument("--instrument", action="store_true", help="trace les entrees de fonctions (dernier appels au plantage)")
     a = ap.parse_args()
-    root = Path(a.project).resolve()
-    version = a.version or next(p.name for p in (root / "config").iterdir() if (p / "arm9").exists())
-    code = re.search(r"gamecode: (\w+)", (root / "extract" / version / "header.yaml").read_text()).group(1)
+    if a.recipe:
+        game = recipe.RecipeGame(a.recipe, a.rom)
+        root, code = Path("."), game.code
+    else:
+        root = Path(a.project).resolve()
+        version = a.version or next(p.name for p in (root / "config").iterdir() if (p / "arm9").exists())
+        code = re.search(r"gamecode: (\w+)", (root / "extract" / version / "header.yaml").read_text()).group(1)
     out = Path(a.out) if a.out else HERE.parent / "build" / (code + ("-c" if a.with_c else "") + ("-debug" if a.instrument else ""))
     if a.instrument:
         skip = "-finstrument-functions-exclude-function-list=LDRW,ROR,LSL,LSR,ASR,CLZ,SAT32"
         GAME_FLAGS.extend(["-finstrument-functions", skip])
-        LIFT_FLAGS.extend(["-finstrument-functions", skip])
+        LIFT_FLAGS.extend(["-finstrument-functions", skip, "-DNDS_INSTRUMENT"])
         RUNTIME_FLAGS.append("-DNDS_INSTRUMENT")
     (out / "obj").mkdir(parents=True, exist_ok=True)
     (out / "lift").mkdir(exist_ok=True)
-    print("jeu", root.name, code, version, "->", out)
-    game = Game(root, version)
+    print("jeu", code, "->", out, flush=True)
+    if not a.recipe:
+        game = Game(root, version)
     force = set(filter(None, a.lift.split(",")))
 
     # 1. runtime : ce qu'il definit remplace le jeu

@@ -1,7 +1,10 @@
 //! Jeux DS natifs : décompilation + runtime nitro-pc, sans émulateur.
 //!
-//! Chaque jeu est un programme `native/<code de la rom>.exe` à côté du studio (voir `native/README.md`).
-//! Il tourne dans son propre processus 32 bits, car le code du jeu suppose des pointeurs 32 bits, et reçoit
+//! Chaque jeu est un programme généré sur le PC du joueur, depuis sa rom, au premier lancement : il contient le code
+//! du jeu et n'est donc jamais publié (voir `native/README.md`). La boîte à outils qui le génère (traducteur,
+//! compilateur, runtime, recettes) est téléchargée une seule fois. Un `native/<code>.exe` à côté du studio passe avant.
+//!
+//! Le jeu tourne dans son propre processus 32 bits, car son code suppose des pointeurs 32 bits, et reçoit
 //! la rom de l'utilisateur en argument. Il envoie ses deux écrans par sa sortie standard et lit les commandes
 //! sur son entrée standard ; le moteur les affiche sur les écrans habituels (fenêtres liées ou séparées, F8, F9).
 
@@ -15,7 +18,9 @@ use bevy::image::ImageSampler;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
+use crate::i18n::{t, tr};
 use crate::input::{DsButton, DsInput, Stylus};
+use crate::link::ShowToast;
 use crate::screens::Engine;
 use crate::studio::{in_game, ActiveGame, ActiveRom, AppGameExt, StudioState};
 
@@ -33,28 +38,143 @@ pub fn native_dir() -> PathBuf {
     exe.parent().unwrap_or(Path::new(".")).join("native")
 }
 
-fn module_path(code: &str) -> PathBuf {
-    native_dir().join(format!("{code}.exe"))
+/// Les jeux que le launcher sait générer et la version de la boîte à outils (`native/tools/export_recipes.py`).
+const INDEX: &str = include_str!("../../../native/games/index.json");
+const TOOLCHAIN_URL: &str = "https://github.com/liolu/nds-game-studio/releases/download/native-toolchain";
+
+#[derive(serde::Deserialize)]
+struct Index {
+    toolchain: u32,
+    games: std::collections::BTreeMap<String, IndexGame>,
+}
+
+#[derive(serde::Deserialize)]
+struct IndexGame {
+    status: String,
+}
+
+fn index() -> Index {
+    serde_json::from_str(INDEX).expect("native/games/index.json")
+}
+
+/// Ce jeu se lance mais n'a pas été essayé jusqu'en jeu, ou ne marche pas encore.
+pub fn is_experimental(code: &str) -> bool {
+    index().games.get(code).is_some_and(|g| g.status != "ok")
+}
+
+fn generated_path(code: &str) -> PathBuf {
+    crate::save::data_dir().join("native").join(format!("{code}-{}.exe", index().toolchain))
+}
+
+/// Le module à lancer s'il existe déjà.
+fn module_path(code: &str) -> Option<PathBuf> {
+    [native_dir().join(format!("{code}.exe")), generated_path(code)].into_iter().find(|p| p.exists())
+}
+
+/// Où en est la génération d'un module : lu à chaque image.
+#[derive(Default)]
+struct Generation {
+    message: String,
+    result: Option<Result<PathBuf, String>>,
+}
+
+#[derive(Resource)]
+struct Generating {
+    code: String,
+    rom: PathBuf,
+    state: Arc<Mutex<Generation>>,
+    label: Entity,
+}
+
+fn say(state: &Mutex<Generation>, message: String) {
+    state.lock().unwrap().message = message;
+}
+
+/// Télécharge et décompresse la boîte à outils si elle n'est pas là ; renvoie son dossier.
+fn ensure_toolchain(state: &Mutex<Generation>) -> Result<PathBuf, String> {
+    let version = index().toolchain;
+    let dir = crate::save::data_dir().join("native-toolchain").join(version.to_string());
+    let ready = dir.join("installed");
+    if ready.exists() {
+        return Ok(dir);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let archive = dir.join("toolchain.zip");
+    if let Some(local) = std::env::var_os("NDSGS_TOOLCHAIN_ZIP") {
+        std::fs::copy(local, &archive).map_err(|e| e.to_string())?;
+    } else {
+        say(state, tr("Downloading the tools (only once)...", "Telechargement des outils (une seule fois)...").to_string());
+        let tls = ureq::tls::TlsConfig::builder().provider(ureq::tls::TlsProvider::NativeTls).build();
+        let config = ureq::Agent::config_builder().tls_config(tls).build();
+        let url = format!("{TOOLCHAIN_URL}/native-toolchain-{version}.zip");
+        let mut response = ureq::Agent::new_with_config(config).get(&url).call().map_err(|e| format!("{url} : {e}"))?;
+        let mut body = response.body_mut().as_reader();
+        let mut file = std::fs::File::create(&archive).map_err(|e| e.to_string())?;
+        std::io::copy(&mut body, &mut file).map_err(|e| e.to_string())?;
+    }
+    say(state, tr("Installing the tools...", "Installation des outils...").to_string());
+    let file = std::fs::File::open(&archive).map_err(|e| e.to_string())?;
+    zip::ZipArchive::new(file).and_then(|mut z| z.extract(&dir)).map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_file(&archive);
+    std::fs::write(ready, "").map_err(|e| e.to_string())?;
+    Ok(dir)
+}
+
+fn generate(code: &str, rom: &Path, state: &Mutex<Generation>) -> Result<PathBuf, String> {
+    let tools = ensure_toolchain(state)?;
+    say(state, tr("Preparing the game from your rom (about a minute, only once)...", "Preparation du jeu depuis votre rom (environ une minute, une seule fois)...").to_string());
+    let out = crate::save::data_dir().join("native").join(format!("build-{code}"));
+    let mut command = Command::new(tools.join("python").join("python.exe"));
+    command
+        .arg(tools.join("native").join("tools").join("native_build.py"))
+        .arg("--recipe")
+        .arg(tools.join("native").join("games").join(format!("{code}.json.gz")))
+        .arg("--rom")
+        .arg(rom)
+        .arg("--out")
+        .arg(&out)
+        .env("PYTHONPATH", tools.join("python"))
+        .env("PYTHONDONTWRITEBYTECODE", "1");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let output = command.output().map_err(|e| e.to_string())?;
+    let log = format!("{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    let built = out.join(format!("{code}.exe"));
+    if !output.status.success() || !built.exists() {
+        let tail: Vec<&str> = log.lines().rev().filter(|l| !l.trim().is_empty()).take(3).collect();
+        error!("generation de {code} :\n{log}");
+        return Err(tail.into_iter().rev().collect::<Vec<_>>().join(" / "));
+    }
+    let target = generated_path(code);
+    std::fs::rename(&built, &target).map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_dir_all(&out);
+    Ok(target)
 }
 
 pub struct NativeGamesPlugin;
 
 impl Plugin for NativeGamesPlugin {
     fn build(&self, app: &mut App) {
-        let Ok(entries) = std::fs::read_dir(native_dir()) else { return };
-        for entry in entries.flatten() {
+        // Le runtime et les modules sont des programmes Windows
+        let mut codes: std::collections::BTreeSet<String> = if cfg!(windows) { index().games.into_keys().collect() } else { Default::default() };
+        for entry in std::fs::read_dir(native_dir()).into_iter().flatten().flatten() {
             let path = entry.path();
-            if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("exe")) {
-                continue;
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("exe")) && stem.len() == 4 {
+                codes.insert(stem.to_string());
             }
-            let Some(code) = path.file_stem().and_then(|s| s.to_str()) else { continue };
-            if code.len() != 4 {
-                continue;
-            }
+        }
+        for code in codes {
             let spec = format!("id = \"native-{code}\"\nname = \"{code}\"\ngame_code = \"{code}\"\n");
             app.add_ds_game(&spec, start_module);
         }
         app.add_systems(Update, (show_frames, send_input).run_if(resource_exists::<Running>))
+            .add_systems(Update, poll_generation.run_if(resource_exists::<Generating>))
             .add_systems(OnExit(StudioState::Playing), stop_module);
     }
 }
@@ -95,14 +215,53 @@ fn start_module(mut commands: Commands, mut images: ResMut<Assets<Image>>, rom: 
         commands.set_state(StudioState::Menu);
         return;
     };
-    let id = active.0.clone().unwrap_or_default();
-    let code = id.trim_start_matches("native-").to_string();
+    let code = active.0.clone().unwrap_or_default().trim_start_matches("native-").to_string();
+    if let Some(module) = module_path(&code) {
+        launch(&mut commands, &mut images, &code, &rom.0, &module);
+        return;
+    }
+    // Pas encore de module : on le génère dans un fil à part, l'écran reste vivant
+    let state = Arc::new(Mutex::new(Generation::default()));
+    let (thread_state, thread_code, thread_rom) = (state.clone(), code.clone(), rom.0.clone());
+    std::thread::spawn(move || {
+        let result = generate(&thread_code, &thread_rom, &thread_state);
+        thread_state.lock().unwrap().result = Some(result);
+    });
+    let label = commands.spawn((Text2d::new(""), TextFont::from_font_size(10.0), TextLayout::new(Justify::Center, LineBreak::WordBoundary), bevy::text::TextBounds::new_horizontal(230.0), Engine::Main.layers(), in_game())).id();
+    commands.insert_resource(Generating { code, rom: rom.0.clone(), state, label });
+}
+
+fn poll_generation(mut commands: Commands, generating: Res<Generating>, mut images: ResMut<Assets<Image>>, mut texts: Query<&mut Text2d>, mut toasts: MessageWriter<ShowToast>) {
+    let (message, result) = {
+        let mut state = generating.state.lock().unwrap();
+        (state.message.clone(), state.result.take())
+    };
+    if let Ok(mut text) = texts.get_mut(generating.label) {
+        if text.0 != message {
+            text.0 = message;
+        }
+    }
+    let Some(result) = result else { return };
+    commands.entity(generating.label).despawn();
+    commands.remove_resource::<Generating>();
+    match result {
+        Ok(module) => launch(&mut commands, &mut images, &generating.code, &generating.rom, &module),
+        Err(e) => {
+            error!("{} : le module natif n'a pas pu etre genere : {e}", generating.code);
+            toasts.write(ShowToast(t!("This game could not be prepared: {e}", "Ce jeu n'a pas pu etre prepare : {e}")));
+            commands.set_state(StudioState::Menu);
+        }
+    }
+}
+
+fn launch(commands: &mut Commands, images: &mut Assets<Image>, code: &str, rom: &Path, module: &Path) {
+    let id = format!("native-{code}");
     let saves = crate::save::data_dir().join("saves").join(&id);
     let _ = std::fs::create_dir_all(&saves);
     let log = std::fs::File::create(saves.join("runtime.log")).map(Stdio::from).unwrap_or_else(|_| Stdio::null());
 
-    let mut command = Command::new(module_path(&code));
-    command.arg(&rom.0).arg("--pipe").arg("--save").arg(saves.join("backup.sav")).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(log);
+    let mut command = Command::new(module);
+    command.arg(rom).arg("--pipe").arg("--save").arg(saves.join("backup.sav")).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(log);
     if std::env::var_os("NDSGS_NATIVE_MUTE").is_some() {
         command.arg("--mute");
     }
@@ -140,8 +299,8 @@ fn start_module(mut commands: Commands, mut images: ResMut<Assets<Image>>, rom: 
         });
     }
 
-    let top = screen_image(&mut images);
-    let bottom = screen_image(&mut images);
+    let top = screen_image(images);
+    let bottom = screen_image(images);
     let size = Vec2::new(W as f32, H as f32);
     for (engine, image) in [(Engine::Main, &top), (Engine::Sub, &bottom)] {
         commands.spawn((Sprite { image: image.clone(), custom_size: Some(size), ..default() }, engine.layers(), in_game()));
@@ -208,4 +367,5 @@ fn send_input(mut running: ResMut<Running>, input: Res<DsInput>, stylus: Res<Sty
 
 fn stop_module(mut commands: Commands) {
     commands.remove_resource::<Running>();
+    commands.remove_resource::<Generating>();
 }

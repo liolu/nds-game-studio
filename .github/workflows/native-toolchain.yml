@@ -1,0 +1,46 @@
+# Boite a outils des jeux natifs : ce que le launcher telecharge pour generer un module chez le joueur.
+# Ne contient aucun code de jeu. Son numero vient de native/games/index.json ("toolchain").
+name: Native toolchain
+
+on:
+  push:
+    branches: [experimental]
+    paths:
+      - 'native/**'
+      - '.github/workflows/native-toolchain.yml'
+  workflow_dispatch:
+
+jobs:
+  toolchain:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Compilateur et Python
+        shell: pwsh
+        run: |
+          $winlibs = "https://github.com/brechtsanders/winlibs_mingw/releases/download/16.2.0posix-14.0.0-ucrt-r1/winlibs-x86_64-posix-seh-gcc-16.2.0-mingw-w64ucrt-14.0.0-r1.zip"
+          Invoke-WebRequest $winlibs -OutFile winlibs.zip
+          Expand-Archive winlibs.zip -DestinationPath winlibs
+          Invoke-WebRequest "https://www.python.org/ftp/python/3.13.1/python-3.13.1-embed-amd64.zip" -OutFile python.zip
+          Expand-Archive python.zip -DestinationPath python-embed
+          python -m pip install --target capstone-pkg capstone==5.0.7
+
+      - name: Assembler
+        shell: pwsh
+        run: |
+          $version = (Get-Content native/games/index.json | ConvertFrom-Json).toolchain
+          python native/tools/make_toolchain.py --gcc winlibs/mingw64 --python python-embed --capstone capstone-pkg/capstone --out "native-toolchain-$version.zip"
+
+      - name: Publier
+        shell: bash
+        run: |
+          if ! gh release view native-toolchain > /dev/null 2>&1; then
+            gh release create native-toolchain --prerelease --latest=false --title "Outils des jeux natifs" \
+              --notes "Telecharges par le launcher pour generer les jeux natifs depuis la rom du joueur. Aucun code de jeu."
+          fi
+          gh release upload native-toolchain native-toolchain-*.zip --clobber

@@ -1,0 +1,191 @@
+{
+ "games": {
+  "ABCE": {
+   "status": "experimental"
+  },
+  "ABHE": {
+   "status": "experimental"
+  },
+  "ACCE": {
+   "status": "experimental"
+  },
+  "AD2J": {
+   "status": "experimental"
+  },
+  "AD3J": {
+   "status": "experimental"
+  },
+  "ADGE": {
+   "status": "experimental"
+  },
+  "ADGJ": {
+   "status": "experimental"
+  },
+  "AE4J": {
+   "status": "experimental"
+  },
+  "AHEP": {
+   "status": "experimental"
+  },
+  "AJTP": {
+   "status": "ok"
+  },
+  "AL5E": {
+   "status": "experimental"
+  },
+  "AL7E": {
+   "status": "ok"
+  },
+  "AMGP": {
+   "status": "experimental"
+  },
+  "APDE": {
+   "status": "experimental"
+  },
+  "AQIE": {
+   "status": "experimental"
+  },
+  "AR5E": {
+   "status": "ok"
+  },
+  "ARGE": {
+   "status": "experimental"
+  },
+  "AS2E": {
+   "status": "experimental"
+  },
+  "AS2P": {
+   "status": "experimental"
+  },
+  "ASEE": {
+   "status": "experimental"
+  },
+  "ASJP": {
+   "status": "experimental"
+  },
+  "ASSE": {
+   "status": "experimental"
+  },
+  "ASTP": {
+   "status": "experimental"
+  },
+  "ATDE": {
+   "status": "experimental"
+  },
+  "AUSF": {
+   "status": "experimental"
+  },
+  "AWUP": {
+   "status": "experimental"
+  },
+  "B2IE": {
+   "status": "experimental"
+  },
+  "B3PP": {
+   "status": "experimental"
+  },
+  "B7HE": {
+   "status": "experimental"
+  },
+  "BFZE": {
+   "status": "experimental"
+  },
+  "BH6J": {
+   "status": "experimental"
+  },
+  "BHDP": {
+   "status": "experimental"
+  },
+  "BLFP": {
+   "status": "experimental"
+  },
+  "BLIJ": {
+   "status": "experimental"
+  },
+  "BQ8E": {
+   "status": "experimental"
+  },
+  "BRPP": {
+   "status": "experimental"
+  },
+  "BW7E": {
+   "status": "experimental"
+  },
+  "BW9E": {
+   "status": "experimental"
+  },
+  "BWBE": {
+   "status": "experimental"
+  },
+  "BWBX": {
+   "status": "experimental"
+  },
+  "BWBY": {
+   "status": "experimental"
+  },
+  "BZ3J": {
+   "status": "experimental"
+  },
+  "CD5E": {
+   "status": "experimental"
+  },
+  "CDZP": {
+   "status": "experimental"
+  },
+  "CIEE": {
+   "status": "experimental"
+  },
+  "CM3P": {
+   "status": "experimental"
+  },
+  "CP3E": {
+   "status": "experimental"
+  },
+  "CS5X": {
+   "status": "experimental"
+  },
+  "TFTJ": {
+   "status": "experimental"
+  },
+  "VPEV": {
+   "status": "experimental"
+  },
+  "VSKV": {
+   "status": "experimental"
+  },
+  "VT3V": {
+   "status": "experimental"
+  },
+  "YBUD": {
+   "status": "experimental"
+  },
+  "YC2P": {
+   "status": "experimental"
+  },
+  "YL2P": {
+   "status": "experimental"
+  },
+  "YMYE": {
+   "status": "experimental"
+  },
+  "YPPJ": {
+   "status": "experimental"
+  },
+  "YRRE": {
+   "status": "experimental"
+  },
+  "YSPE": {
+   "status": "experimental"
+  },
+  "YSZE": {
+   "status": "experimental"
+  },
+  "YTVE": {
+   "status": "experimental"
+  },
+  "YYBP": {
+   "status": "experimental"
+  }
+ },
+ "toolchain": 1
+}

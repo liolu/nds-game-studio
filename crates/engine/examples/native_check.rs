@@ -64,11 +64,14 @@ fn main() {
     let secs = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(20.0);
     let time_of = |prefix: &str| args.iter().find_map(|a| a.strip_prefix(prefix)?.parse::<f32>().ok());
     let mut app = App::new();
-    // Le code "launcher" montre le launcher au lieu de lancer un jeu
+    app.add_plugins(NdsEnginePlugin::default());
+    // Le moteur lit la ligne de commande : ces arguments ne sont pas pour lui.
+    // Le code "launcher" montre le launcher au lieu de lancer un jeu.
+    app.world_mut().remove_resource::<AutoStart>();
     if code != "launcher" {
         app.insert_resource(AutoStart(format!("native-{code}")));
     }
-    app.add_plugins(NdsEnginePlugin::default())
+    app
         .insert_resource(ActiveRom(rom.into()))
         .insert_resource(Check {
             capture: shot.clone(),

@@ -960,6 +960,7 @@ fn native_game(registry: &GameRegistry, code: &str) -> Option<String> {
 
 fn play_tab(rom: &Rom, registry: &GameRegistry) -> (Top, Rest) {
     let native = native_game(registry, &rom.info.code);
+    let experimental = native.is_some() && crate::native_game::is_experimental(&rom.info.code);
     let path = rom.info.path.clone();
     let summary = format!("{}  -  {}  -  {}", rom.info.code, rom.info.region(), format_size(rom.info.size));
     (
@@ -977,6 +978,9 @@ fn play_tab(rom: &Rom, registry: &GameRegistry) -> (Top, Rest) {
             play.with_child(text(font, tr("Play", "Jouer"), 22.0, if ready { TEXT } else { DIM }));
             if !ready {
                 t.spawn(text(font, tr("Not playable yet: this game has no native module (decompilation + runtime).", "Pas encore jouable : ce jeu n'a pas de module natif (decompilation + runtime)."), 15.0, DIM));
+            }
+            if experimental {
+                t.spawn(text(font, tr("Experimental: this game may crash or show nothing yet.", "Experimental : ce jeu peut planter ou ne rien afficher pour l'instant."), 15.0, DIM));
             }
             t.spawn(text(font, summary, 14.0, DIM));
         }),

@@ -9,17 +9,35 @@ nitro-pc/ (registres, BIOS, threads, 2D, 3D, son, sauvegarde) ──────
                                                                           lancé par le launcher (Jouer)
 ```
 
-## Construire un jeu
+## Chez le joueur : le launcher génère le module
+
+Au premier clic sur Jouer, le launcher :
+
+1. télécharge une seule fois la boîte à outils (39 Mo, release `native-toolchain` du dépôt, `native-toolchain-<n>.zip`) ;
+2. vérifie le SHA-1 de la rom, traduit et compile (de 30 s à 1 min 30 selon le jeu) ;
+3. garde le module dans `native/<code>-<n>.exe` du dossier des données, puis lance le jeu.
+
+**Rien de publié ne contient de code de jeu.** La boîte à outils contient le traducteur, le runtime, GCC, Python et les
+recettes `games/<code>.json.gz` (positions des fonctions, pointeurs et noms, pas d'instructions). Les modules, eux,
+contiennent le code du jeu : ils ne doivent être ni commités ni publiés. `native/build/` est ignoré par git.
+
+Quand le runtime, le traducteur ou les recettes changent, augmenter `TOOLCHAIN` dans `tools/export_recipes.py`, relancer
+ce script : le numéro passe dans `games/index.json`, la CI publie la nouvelle boîte, et les modules sont régénérés.
+
+Une rom d'une autre version que celle de la recette est refusée. Un `native/<code>.exe` à côté du studio passe avant
+le module généré ; `NDSGS_TOOLCHAIN_ZIP` donne une boîte locale au lieu de la télécharger.
+
+## Pour le développement
 
 ```bash
-python native/tools/native_build.py "<dossier du projet>"
+python native/tools/native_build.py "<dossier du projet>"       # un jeu, depuis son projet
+python native/tools/export_recipes.py "<projets>" "<roms>"      # les recettes et l'index
+python native/tools/build_all.py "<projets>" "<roms>"           # essaie tous les jeux, écrit GAMES.md
+python native/tools/make_toolchain.py --gcc ... --python ... --capstone ... --out x.zip
 ```
 
-Il faut un projet avec ses symboles SDK nommés (`OS_SaveContext`, `OS_SelectThread`, `FSi_ReadRomCallback`…). Puis
-copier `native/build/<code>/<code>.exe` dans le dossier `native` à côté de `nds-game-studio.exe`.
-
-**Les `.exe` contiennent le code du jeu traduit : ils restent sur le PC de l'utilisateur et ne doivent être ni
-commités ni publiés.** `native/build/` est ignoré par git.
+Il faut un jeu avec ses symboles SDK nommés (`OS_SaveContext`, `OS_SelectThread`, `FSi_ReadRomCallback`…) pour qu'il
+se lance : les autres sont proposés comme expérimentaux, voir [GAMES.md](GAMES.md).
 
 ## Le code vient de l'ARM, pas encore du C décompilé
 
@@ -29,6 +47,8 @@ plante aujourd'hui sur Tom et Jerry (`func_0203e3f4`). Le C matché est correct 
 
 ## Limites connues
 
+- Lego Star Wars II : parasites sur l'écran tactile pendant le jeu. La carte de la couche BG1 du moteur secondaire contient
+  des valeurs aléatoires, sans écriture visible du code traduit (`--watch`) : cause pas encore trouvée.
 - Un jeu sans symboles SDK nommés ne se lance pas encore ; les overlays ne sont pas gérés.
 - 3D : pas d'ombres (polygones mode 3), de brouillard, de contours ni de table de toon ; polygones triés seulement
   opaques puis transparents.
@@ -46,7 +66,8 @@ bash native/tools/run_game.sh AJTP "<rom>" 60 --mute --save test.sav --dump capt
 - `--keys "image:masque[/x/y],..."` : touches (bits de KEYINPUT : A=1, B=2, Select=4, Start=8, droite=16, gauche=32,
   haut=64, bas=128, R=256, L=512, X=1024, Y=2048) et stylet.
 - `--trace`, `--prof` : état et profil ; `--wav fichier` : le son mixé en PCM brut.
-- `native_build.py --instrument` : version de débogage (dernière instruction ARM, registres et derniers appels au plantage).
+- `native_build.py --instrument` : version de débogage (dernière instruction ARM, registres et derniers appels au plantage) ;
+  `--watch adresse` y montre qui écrit à une adresse.
 - `cargo run --release -p nds-engine --example native_check -- <code> <rom> <capture.png> <s> [enter@s] [touch@s]` :
   passe par le vrai moteur, sans focus (`NDSGS_NATIVE_MUTE=1`, `NDSGS_NATIVE_DIR`).
 

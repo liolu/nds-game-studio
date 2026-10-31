@@ -1,6 +1,11 @@
 /* Demarrage : memoire aux adresses DS, chargement de la rom, exceptions pour les registres, BIOS, threads. */
 #include "nitro.h"
-#include <stdarg.h>
+
+/* sans en-tete systeme : la boite a outils du launcher n'en livre aucun */
+typedef __builtin_va_list va_list;
+#define va_start(ap, last) __builtin_va_start(ap, last)
+#define va_arg(ap, type) __builtin_va_arg(ap, type)
+#define va_end(ap) __builtin_va_end(ap)
 
 u32 nds_cpsr = 0x1F;
 u32 nds_pc, nds_r[6]; /* derniere instruction ARM et registres, dans les versions de debug */
@@ -100,6 +105,12 @@ int nds_arg(const char *name, const char **value) {
 }
 
 #ifdef NDS_INSTRUMENT
+/* --watch adresse : qui ecrit a ce mot de memoire (ecritures du code traduit) */
+u32 nds_watch = 1;
+void nds_watch_hit(u32 a, u32 v) {
+    static u32 hits;
+    if (hits++ < 12) nds_log("ecriture %x = %x par arm=%x, r0=%x r1=%x r2=%x r3=%x image %u", a, v, nds_pc, nds_r[0], nds_r[1], nds_r[2], nds_r[3], nds_frame);
+}
 u32 nds_ring[4096], nds_ring_pos;
 void __cyg_profile_func_enter(void *f, void *c) { nds_ring[nds_ring_pos++ & 4095] = (u32)f; }
 void __cyg_profile_func_exit(void *f, void *c) {}
@@ -251,6 +262,9 @@ static u32 isqrt(u32 x) {
 }
 
 void nds_swi(u32 n, u32 *r0, u32 *r1, u32 *r2, u32 *r3) {
+#ifdef NDS_INSTRUMENT
+    if (n >= 0x0B && n != 0x0D && n != 0x0E && *r1 <= nds_watch && nds_watch < *r1 + 0x10000) nds_log("swi %x %x -> %x r2=%x arm=%x", n, *r0, *r1, *r2, nds_pc);
+#endif
     switch (n) {
     case 0x03: break;                                     /* WaitByLoop */
     case 0x04: case 0x05: {                               /* IntrWait, VBlankIntrWait */
@@ -660,6 +674,16 @@ void nds_start(void) {
         }
     }
     nds_log("demarrage %x", (u32)nds_entry_fn);
+#ifdef NDS_INSTRUMENT
+    {
+        const char *w;
+        if (nds_arg("--watch", &w) && w) {
+            u32 v = 0;
+            for (; *w; w++) v = v * 16 + (*w >= 'a' ? *w - 'a' + 10 : *w - '0');
+            nds_watch = v & ~3u;
+        }
+    }
+#endif
     if (nds_arg("--prof", 0)) {
         DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &main_thread, 0, 0, 2);
         CreateThread(0, 0x10000, prof_thread, 0, 0, 0);

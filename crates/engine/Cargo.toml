@@ -17,6 +17,8 @@ dirs = "5"
 # Jaquettes (Options > Launcher) : telechargement et lecture
 ureq = { version = "3", features = ["native-tls"], default-features = false }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# Boite a outils des jeux natifs
+zip = { version = "2", default-features = false, features = ["deflate"] }
 # Meme version que bevy_winit : positionner la fenetre du bas directement
 winit = { version = "0.30", default-features = false }
 
