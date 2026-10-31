@@ -8,6 +8,9 @@ use crate::bits::{Lsb, R, Vlc, clip8};
 use crate::tables::*;
 use crate::{Info, Stream, le16, le32};
 
+mod encode;
+pub use encode::encode_like;
+
 const FLAG_ALPHA: u32 = 0x0010_0000;
 const AUDIO_DCT: u16 = 0x1000;
 const AUDIO_STEREO: u16 = 0x2000;

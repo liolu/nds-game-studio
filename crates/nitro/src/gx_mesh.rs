@@ -53,26 +53,11 @@ pub fn read_geometry(file: &[u8], texture: Option<Rgba>, name: &str) -> Result<M
 /// leurs positions depuis cette table. Chaque morceau : hauteur et profondeur de son centre (2 i32), un u32, sa boîte
 /// (6 i16), taille, commandes GX.
 pub fn read_world_mesh(file: &[u8], name: &str, mut texture_of: impl FnMut(usize) -> Option<Rgba>) -> Option<ModelOut> {
-    const MAX_PARTS: usize = 4096;
-    const TABLE_AT: usize = 0x18;
-    let u32_at = |at: usize| file.get(at..at + 4).map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]));
-    const MAX_SCALE: u32 = 0x100000;
-    let scale = u32_at(0)?;
-    if scale == 0 || scale > MAX_SCALE || scale % 0x1000 != 0 {
-        return None;
-    }
-    let scale = scale as f32 / 4096.0;
-    let count = u32_at(0x14)? as usize;
-    if count == 0 || count > MAX_PARTS {
-        return None;
-    }
-    let mut models = Vec::with_capacity(count);
-    for i in 0..count {
-        let base = TABLE_AT + u32_at(TABLE_AT + i * 4)? as usize;
-        let center = [0, u32_at(base)? as i32, u32_at(base + 4)? as i32].map(|v| v as f32 / 4096.0);
-        let size = u32_at(base + 0x18)? as usize;
-        let Ok(mut model) = read_commands(file.get(base + 0x1C..base + 0x1C + size)?, texture_of(i), name) else { continue };
-        let place = |at: f32, axis: usize| (at + center[axis]) * scale;
+    let (scale, parts) = world_parts(file)?;
+    let mut models = Vec::with_capacity(parts.len());
+    for (i, piece) in parts.iter().enumerate() {
+        let Ok(mut model) = read_commands(&file[piece.list..piece.list + piece.size], texture_of(i), name) else { continue };
+        let place = |at: f32, axis: usize| (at + piece.center[axis]) * scale;
         for part in &mut model.parts {
             for position in &mut part.positions {
                 *position = [place(position[0], 0), place(position[1], 1), place(position[2], 2)];
@@ -85,6 +70,47 @@ pub fn read_world_mesh(file: &[u8], name: &str, mut texture_of: impl FnMut(usize
         models.push(model);
     }
     merge(name, models)
+}
+
+/// Un morceau d'un maillage du monde.
+pub struct WorldPart {
+    /// Le centre du morceau, avant l'échelle.
+    pub center: [f32; 3],
+    /// Où commence le morceau ; sa taille est écrite juste avant sa liste de commandes.
+    pub base: usize,
+    pub list: usize,
+    pub size: usize,
+}
+
+pub const WORLD_TABLE_AT: usize = 0x18;
+
+/// L'échelle et les morceaux d'un maillage du monde.
+pub fn world_parts(file: &[u8]) -> Option<(f32, Vec<WorldPart>)> {
+    const MAX_PARTS: usize = 4096;
+    const MAX_SCALE: u32 = 0x100000;
+    let u32_at = |at: usize| file.get(at..at + 4).map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]));
+    let scale = u32_at(0)?;
+    if scale == 0 || scale > MAX_SCALE || scale % 0x1000 != 0 {
+        return None;
+    }
+    let count = u32_at(0x14)? as usize;
+    if count == 0 || count > MAX_PARTS {
+        return None;
+    }
+    let mut parts = Vec::with_capacity(count);
+    for index in 0..count {
+        let base = WORLD_TABLE_AT + u32_at(WORLD_TABLE_AT + index * 4)? as usize;
+        let center = [0, u32_at(base)? as i32, u32_at(base + 4)? as i32].map(|v| v as f32 / 4096.0);
+        let size = u32_at(base + 0x18)? as usize;
+        file.get(base + 0x1C..base + 0x1C + size)?;
+        parts.push(WorldPart { center, base, list: base + 0x1C, size });
+    }
+    Some((scale as f32 / 4096.0, parts))
+}
+
+/// Cette liste de commandes dessine-t-elle quelque chose ? Un morceau vide n'est pas dans le modèle.
+pub fn draws_triangles(cmds: &[u8]) -> bool {
+    read_commands(cmds, None, "").is_ok()
 }
 
 /// Le modèle que dessine une liste de commandes GX.

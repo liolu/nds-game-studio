@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use cgmath::{vec4, Matrix4, One, Point3, SquareMatrix, Transform, Vector4, Zero};
-use nds_nitro::model3d::ModelOut;
+use nds_nitro::model3d::{ModelOut, Part};
 use nds_nitro::nds::gpu_cmds::{CmdParser, GpuCmd};
 use nds_nitro::nitro::render_cmds::Op;
 use nds_nitro::nitro::Model;
@@ -92,7 +92,7 @@ fn parse_obj(text: &str) -> Result<Vec<ObjPart>, String> {
             }
             Some("o" | "g") => {
                 let name = words.next().unwrap_or("");
-                let number = name.split("part_").nth(1).and_then(|rest| rest.get(..3)).and_then(|n| n.parse().ok());
+                let number = name.split("part_").nth(1).and_then(|rest| rest.split(|c: char| !c.is_ascii_digit()).next()).and_then(|n| n.parse().ok());
                 let number = number.ok_or_else(|| format!("objet {name} : le nom part_NNN doit rester"))?;
                 if parts.last().is_none_or(|p: &ObjPart| p.number != number) {
                     parts.push(ObjPart { number, corners: Vec::new() });
@@ -120,6 +120,9 @@ fn parse_obj(text: &str) -> Result<Vec<ObjPart>, String> {
     }
     Ok(parts)
 }
+
+/// Ce qui change à un sommet : sa position, sa coordonnée de texture.
+pub type Change = (Option<[f32; 3]>, Option<[f32; 2]>);
 
 /// Une commande de la DS telle qu'elle est écrite.
 struct RawCmd {
@@ -229,8 +232,7 @@ fn moved(old: f32, new: f32) -> bool {
 
 /// La nouvelle liste de commandes d'un morceau. Tous ses sommets passent en position absolue (`VTX_16`), car les autres formes
 /// dépendent du sommet d'avant. `new` donne, pour chaque sommet, ce qui a changé. `None` si rien n'a bougé.
-#[allow(clippy::type_complexity)]
-fn rewrite_piece(model: &Model, draw: &Draw, new: &[(Option<[f32; 3]>, Option<[f32; 2]>)], warned: &mut bool) -> Result<Option<Vec<u8>>, String> {
+fn rewrite_piece(model: &Model, draw: &Draw, new: &[Change], warned: &mut bool) -> Result<Option<Vec<u8>>, String> {
     let bytes = &model.pieces[draw.piece].gpu_commands;
     let material = &model.materials[draw.material];
     let (tex_w, tex_h) = (material.width as f64, material.height as f64);
@@ -277,6 +279,85 @@ fn rewrite_piece(model: &Model, draw: &Draw, new: &[(Option<[f32; 3]>, Option<[f
     Ok(changed.then(|| write_cmds(&out)))
 }
 
+/// Ce que l'OBJ change à chaque sommet d'un morceau.
+fn vertex_changes(obj: &ObjPart, part: &Part) -> Result<Vec<Change>, String> {
+    if obj.corners.len() != part.indices.len() {
+        return Err(format!("part_{:03} : {} triangles, {} attendus. Bouger les sommets oui, en ajouter non.", obj.number, obj.corners.len() / 3, part.indices.len() / 3));
+    }
+    let mut new = vec![(None, None); part.positions.len()];
+    for (corner, &vertex) in obj.corners.iter().zip(&part.indices) {
+        let vertex = vertex as usize;
+        let (old_position, old_uv) = (part.positions[vertex], part.uvs[vertex]);
+        if (0..3).any(|i| moved(old_position[i], corner.0[i])) {
+            new[vertex].0 = Some(corner.0);
+        }
+        // Comme à l'export, une valeur impossible (matériau sans texture) vaut 0
+        let finite = |v: f32| if v.is_finite() { v } else { 0.0 };
+        if let Some(t) = corner.1.map(|t| [t[0], 1.0 - t[1]]) {
+            if moved(finite(old_uv[0]), t[0]) || moved(finite(old_uv[1]), t[1]) {
+                new[vertex].1 = Some(t);
+            }
+        }
+    }
+    Ok(new)
+}
+
+/// Ce que l'OBJ change à chaque morceau d'un modèle de commandes GX, dans l'ordre des morceaux du modèle.
+pub fn gx_changes(built: &ModelOut, text: &str) -> Result<Vec<Vec<Change>>, String> {
+    let parts = parse_obj(text)?;
+    if parts.len() != built.parts.len() {
+        return Err(format!("{} objets dans l'OBJ, {} attendus", parts.len(), built.parts.len()));
+    }
+    built.parts.iter().enumerate().map(|(i, part)| {
+        let obj = parts.iter().find(|p| p.number == i).ok_or_else(|| format!("objet part_{i:03} absent"))?;
+        vertex_changes(obj, part)
+    }).collect()
+}
+
+/// Une liste de commandes GX d'un maillage sans squelette, avec les sommets qui changent : comme `rewrite_piece`, ils passent tous en
+/// position absolue. `to_local` ramène une position de l'OBJ dans le repère de la liste. `None` si rien n'a bougé.
+pub fn rewrite_gx(bytes: &[u8], new: &[Change], texture_size: (f64, f64), to_local: impl Fn([f32; 3]) -> [f64; 3], warned: &mut bool) -> Result<Option<Vec<u8>>, String> {
+    if new.iter().all(|change| change.0.is_none() && change.1.is_none()) {
+        return Ok(None);
+    }
+    let raw = read_cmds(bytes)?;
+    let mut parser = CmdParser::new(bytes);
+    let mut scale = (1.0, 1.0, 1.0);
+    let mut next = 0;
+    let mut out = Vec::with_capacity(raw.len());
+    let mut has_uv = false;
+    for cmd in raw {
+        let parsed = parser.next().ok_or("liste de commandes coupee")?.map_err(|e| e.to_string())?;
+        match parsed {
+            GpuCmd::Scale { scale: (x, y, z) } => scale = (scale.0 * x, scale.1 * y, scale.2 * z),
+            GpuCmd::TexCoord { .. } => has_uv = true,
+            _ => {}
+        }
+        if let GpuCmd::Vertex { position } = parsed {
+            let (wanted, uv) = new.get(next).copied().unwrap_or((None, None));
+            next += 1;
+            if let (Some(uv), true) = (uv, has_uv) {
+                let (s, t) = (to_fixed(uv[0] as f64 * texture_size.0, 4, warned), to_fixed(uv[1] as f64 * texture_size.1, 4, warned));
+                out.push(RawCmd { opcode: TEXCOORD, params: vec![s | (t << 16)] });
+            }
+            let local = match wanted {
+                Some(at) => {
+                    let at = to_local(at);
+                    Point3::new(at[0] / scale.0, at[1] / scale.1, at[2] / scale.2)
+                }
+                None => position,
+            };
+            let (x, y, z) = (to_fixed(local.x, 12, warned), to_fixed(local.y, 12, warned), to_fixed(local.z, 12, warned));
+            out.push(RawCmd { opcode: VTX_16, params: vec![x | (y << 16), z] });
+            continue;
+        }
+        if cmd.opcode != 0 {
+            out.push(cmd);
+        }
+    }
+    Ok(Some(write_cmds(&out)))
+}
+
 /// Début des données d'un bloc d'informations (`info_block`) et nombre d'éléments.
 fn info_block(file: &[u8], at: usize) -> (usize, usize) {
     let count = file[at + 1] as usize;
@@ -309,24 +390,7 @@ pub fn import_obj(file: &[u8], model: &Model, index: usize, built: &ModelOut, te
         }
         let obj = parts.iter().find(|p| p.number == part_at).ok_or_else(|| format!("objet part_{part_at:03} absent"))?;
         part_at += 1;
-        if obj.corners.len() != part.indices.len() {
-            return Err(format!("part_{:03} : {} triangles, {} attendus. Bouger les sommets oui, en ajouter non.", obj.number, obj.corners.len() / 3, part.indices.len() / 3));
-        }
-        let mut new = vec![(None, None); vertices];
-        for (corner, &vertex) in obj.corners.iter().zip(&part.indices) {
-            let vertex = vertex as usize;
-            let (old_position, old_uv) = (part.positions[vertex], part.uvs[vertex]);
-            if (0..3).any(|i| moved(old_position[i], corner.0[i])) {
-                new[vertex].0 = Some(corner.0);
-            }
-            // Comme à l'export, une valeur impossible (matériau sans texture) vaut 0
-            let finite = |v: f32| if v.is_finite() { v } else { 0.0 };
-            if let Some(t) = corner.1.map(|t| [t[0], 1.0 - t[1]]) {
-                if moved(finite(old_uv[0]), t[0]) || moved(finite(old_uv[1]), t[1]) {
-                    new[vertex].1 = Some(t);
-                }
-            }
-        }
+        let new = vertex_changes(obj, part)?;
         // Un morceau dessiné plusieurs fois n'a qu'une liste : le premier dessin décide
         if new_lists.contains_key(&draw.piece) {
             continue;
@@ -400,6 +464,22 @@ mod tests {
         let back = read_cmds(&bytes).unwrap();
         assert_eq!(back.len(), 4);
         assert_eq!(back[1].params, [2, 3]);
+    }
+
+    #[test]
+    fn a_gx_list_comes_back_with_the_vertices_of_the_obj() {
+        // SCALE 2, BEGIN, TEXCOORD, VTX_16 : un sommet, le 2e en VTX_DIFF suit le 1er
+        let cmds = [[0x1Bu8, 0x40, 0x22, 0x23].as_slice(), &0x2000u32.to_le_bytes(), &0x2000u32.to_le_bytes(), &0x2000u32.to_le_bytes(), &0u32.to_le_bytes(), &0x00100010u32.to_le_bytes(), &0x10001000u32.to_le_bytes(), &0x1000u32.to_le_bytes()].concat();
+        let mut warned = false;
+        assert!(rewrite_gx(&cmds, &[(None, None)], (1.0, 1.0), |p| p.map(f64::from), &mut warned).unwrap().is_none());
+        let out = rewrite_gx(&cmds, &[(Some([4.0, 2.0, 0.0]), Some([0.5, 0.25]))], (8.0, 8.0), |p| p.map(f64::from), &mut warned).unwrap().unwrap();
+        assert!(!warned);
+        let list: Vec<GpuCmd> = CmdParser::new(&out).flatten().collect();
+        let vertex = list.iter().find_map(|c| if let GpuCmd::Vertex { position } = c { Some(*position) } else { None }).unwrap();
+        // Sous une échelle de 2 : la moitié de ce que dit l'OBJ
+        assert_eq!((vertex.x, vertex.y, vertex.z), (2.0, 1.0, 0.0));
+        let uv = list.iter().filter_map(|c| if let GpuCmd::TexCoord { texcoord } = c { Some(*texcoord) } else { None }).next_back().unwrap();
+        assert_eq!((uv.x, uv.y), (4.0, 2.0));
     }
 
     #[test]

@@ -244,7 +244,8 @@ pub fn rebuild_table(file: &[u8], new: &HashMap<usize, Vec<u8>>) -> Option<Vec<u
             Some(bytes) => out.extend(bytes),
             None => out.extend(file.get(*start..end)?),
         }
-        if i + 1 != offsets.len() {
+        // Certaines tables n'alignent pas leurs morceaux : ce fichier-là reste comme il est
+        if offsets.get(i + 1).is_some_and(|next| next % 4 == 0) {
             align(&mut out, 4, 0);
         }
     }

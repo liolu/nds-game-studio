@@ -321,6 +321,13 @@ fn mesh_parts(bytes: &[u8]) -> Vec<(String, String, Option<String>)> {
     parts
 }
 
+/// Le fichier de géométrie de chaque morceau du modèle d'un `MESH`, dans l'ordre où `decode` les réunit.
+pub fn mesh_geometries(entries: &[Entry], sel: usize) -> Vec<usize> {
+    let Ok(bytes) = read_entry(&entries[sel]) else { return Vec::new() };
+    let found = mesh_parts(&bytes).into_iter().filter_map(|(geometry, _, _)| entry_at(entries, &geometry));
+    found.filter(|&at| read_entry(&entries[at]).is_ok_and(|file| gx_mesh::read_geometry(&file, None, "").is_ok())).collect()
+}
+
 /// La texture d'un `MESH` : le fichier nommé est un `TXET` qui relie pixels et palette, ou les pixels eux-mêmes.
 fn engine_texture(entries: &[Entry], index: usize, named_palette: Option<&str>) -> Option<Rgba> {
     let bytes = read_entry(&entries[index]).ok()?;
@@ -925,8 +932,9 @@ fn audio(sound: sadl::Sound, extra: String) -> Decoded {
 
 /// Sans palette : niveaux de gris.
 /// Certains `.z` sont compressés plusieurs fois (Huffman puis LZ).
-fn fully_unpacked(mut bytes: Vec<u8>) -> Vec<u8> {
-    const MAX_LAYERS: usize = 3;
+pub const MAX_LAYERS: usize = 3;
+
+pub fn fully_unpacked(mut bytes: Vec<u8>) -> Vec<u8> {
     for _ in 0..MAX_LAYERS {
         match decompress_any(&bytes) {
             Some(inner) => bytes = inner,

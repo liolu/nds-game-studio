@@ -7,6 +7,10 @@ use crate::bits::{Msb, R, Vlc, clip8};
 use crate::tables::*;
 use crate::{Info, Stream, le16, le32};
 
+mod encode;
+pub(crate) use encode::{BitWriter, SoundTrack, vec_silence};
+pub use encode::{Written, encode_like};
+
 /// Taille des données du son, par canal.
 pub const AUDIO_EXTRA: usize = 3 * 64 * 8 * 2 + 8 * 2 + 8 * 4 + 4;
 const AFRAME: usize = 128;
@@ -771,6 +775,10 @@ impl AudioChannel {
                 quarters[2][j] = (quarters[1][j] + quarters[3][j]) >> 1;
             }
         }
+        // Le code du jeu efface l'historique en repartant de la base : seul un fichier qui repart en cours de route le voit
+        if prev_offset == 0x7F {
+            self.samples_prev = [0; 8];
+        }
         let mut samples = [0i32; AFRAME];
         for i in 0..AFRAME {
             let weights = &quarters[i * 4 / AFRAME];
@@ -823,6 +831,9 @@ pub struct Vx {
     cur: usize,
     pos: usize,
     index: usize,
+    /// Le paquet lu en dernier, et où commence son son : l'écriture reprend ces octets.
+    packet_at: usize,
+    audio_span: (usize, usize),
 }
 
 const DATA_START: usize = 0x30;
@@ -844,7 +855,7 @@ impl Vx {
         let qtab = std::array::from_fn(|i| VX_QUANT[qx][i] << qy);
         let channels = if rate > 0 && bytes.len() >= audio_at + nch * AUDIO_EXTRA { nch } else { 0 };
         let info = Info { format: "VX", width: w as u32, height: h as u32, frames: frames as u32, fps: if fps > 0 { fps as f32 / 65536.0 } else { 30.0 }, sample_rate: if channels > 0 { rate } else { 0 }, channels: channels as u16 };
-        let mut vx = Vx { bytes, frames, w, h, qtab, nch: channels, audio_at, audio: Vec::new(), pics: Default::default(), cur: 0, pos: DATA_START, index: 0 };
+        let mut vx = Vx { bytes, frames, w, h, qtab, nch: channels, audio_at, audio: Vec::new(), pics: Default::default(), cur: 0, pos: DATA_START, index: 0, packet_at: DATA_START, audio_span: (0, 0) };
         vx.rewind();
         Ok((vx, info))
     }
@@ -876,6 +887,7 @@ impl Stream for Vx {
             return Some(Err("taille d'image"));
         }
         let mut gb = Msb::from_words(&self.bytes[self.pos + 4..self.pos + 2 + size]);
+        self.packet_at = self.pos;
         self.pos += 2 + size;
 
         let (w, h) = (self.w, self.h);
@@ -912,6 +924,7 @@ impl Stream for Vx {
             return Some(result);
         }
         self.cur = (self.cur + 1) % 4;
+        self.audio_span = ((self.packet_at + 4 + gb.pos() / 8).min(self.pos), self.pos);
         if aframes > 0 && self.nch > 0 {
             let start = pcm.len();
             if let Err(e) = read_aframes(&mut gb, &mut self.audio, aframes, pcm) {

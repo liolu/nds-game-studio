@@ -227,7 +227,9 @@ pub fn sheet_from_image(tiles: &mut g2d::Tiles, palette: &g2d::Palette, bank: us
     }
     let mut cache = HashMap::new();
     let bpp8 = tiles.bpp8;
-    for (i, slot) in tiles.pixels.iter_mut().enumerate() {
+    // Une fin de tuile incomplète n'est pas dessinée : elle ne change pas
+    let drawn = if tiles.linear { tiles.pixels.len() } else { tiles.count() * 64 };
+    for (i, slot) in tiles.pixels.iter_mut().take(drawn).enumerate() {
         let i = i as u32;
         let (x, y, tile) = if tiles.linear {
             (i % image.width, i / image.width, 0)
@@ -483,6 +485,197 @@ pub fn encode_4x4(image: &Rgba, before: &Rgba, data1: &[u8], data2: &[u8], palet
     out
 }
 
+// --------------------------------------------------------------------------------------------
+//  Images des moteurs maison : `.z`, BMP, PMB, polices
+// --------------------------------------------------------------------------------------------
+
+/// Deux pixels que le jeu montre pareil. Au bit près : un demi-transparent de texture n'est pas un opaque.
+fn identical(a: [u8; 4], b: [u8; 4]) -> bool {
+    a == b || (a[3] == 0 && b[3] == 0)
+}
+
+fn check_size(image: &Rgba, width: u32, height: u32) -> Result<(), String> {
+    if image.width != width || image.height != height {
+        return Err(format!("image de {}x{}, {}x{} attendu", image.width, image.height, width, height));
+    }
+    Ok(())
+}
+
+/// Le magenta est la couleur transparente de `render_texel`.
+const COLOR_KEY: [u8; 4] = [255, 0, 255, 255];
+
+/// Les pixels d'une texture : ceux qui ne changent pas gardent leur n° de couleur (une palette peut avoir deux fois la même, ou un
+/// magenta transparent), les autres prennent la couleur la plus proche.
+pub fn texel_from_image(texel: &g2d::Texel, palette: &g2d::Palette, image: &Rgba) -> Result<Vec<u8>, String> {
+    check_size(image, texel.width, texel.height)?;
+    let before = g2d::render_texel(texel, palette).map_err(|e| e.to_string())?;
+    let (format, old) = (texel.format as u8, texel.pixels());
+    let mut painted = image.data.clone();
+    if texel.opaque && palette.colors.contains(&COLOR_KEY) {
+        for pixel in painted.chunks_exact_mut(4).filter(|p| p[3] < 128) {
+            pixel.copy_from_slice(&COLOR_KEY);
+        }
+    }
+    let painted = Rgba { width: image.width, height: image.height, data: painted };
+    let mut out = encode_texture(format, &painted, &palette.colors, !texel.opaque)?;
+    keep_unchanged(format, &mut out, old, image, &before);
+    Ok(out)
+}
+
+/// Remet les n° de couleur d'origine des pixels que l'image ne change pas.
+fn keep_unchanged(format: u8, out: &mut [u8], old: &[u8], image: &Rgba, before: &Rgba) {
+    let bits = [0, 8, 2, 4, 8, 0, 8, 16][format as usize];
+    for i in 0..(image.width * image.height) as usize {
+        let (x, y) = (i as u32 % image.width, i as u32 / image.width);
+        if !identical(pixel_at(image, x, y), pixel_at(before, x, y)) {
+            continue;
+        }
+        let at = i * bits / 8;
+        if bits >= 8 {
+            out[at..at + bits / 8].copy_from_slice(&old[at..at + bits / 8]);
+        } else {
+            let mask = ((1u16 << bits) - 1) as u8;
+            let shift = (i * bits % 8) as u8;
+            out[at] = (out[at] & !(mask << shift)) | (old[at] & (mask << shift));
+        }
+    }
+}
+
+/// Le `.z` décompressé avec cette image, et le nombre de tuiles ajoutées à un fond.
+pub fn z_from_image(file: &[u8], image: &Rgba) -> Result<(Vec<u8>, usize), String> {
+    match g2d::read_z_shape(file).ok_or("image illisible")? {
+        g2d::ZShape::Sprite { width, mut tiles, palette, .. } => {
+            sheet_from_image(&mut tiles, &palette, 0, width / 8, image)?;
+            let pixels = pack_pixels(&tiles.pixels, tiles.bpp8);
+            let mut out = file.to_vec();
+            out[16..16 + pixels.len()].copy_from_slice(&pixels);
+            Ok((out, 0))
+        }
+        g2d::ZShape::Screen { mut screen, mut tiles, palette, map_at, count_at, .. } => {
+            let added = screen_from_image(&mut screen, &mut tiles, &palette, image)?;
+            let mut out = file[..map_at].to_vec();
+            out.extend(screen.entries.iter().flat_map(|e| e.to_le_bytes()));
+            debug_assert_eq!(out.len(), count_at);
+            out.extend((tiles.count() as u32).to_le_bytes());
+            out.extend(&tiles.pixels);
+            Ok((out, added))
+        }
+        g2d::ZShape::Texture { texel, palette, .. } => {
+            let pixels = texel_from_image(&texel, &palette, image)?;
+            let mut out = file.to_vec();
+            out[4..4 + pixels.len()].copy_from_slice(&pixels);
+            Ok((out, 0))
+        }
+    }
+}
+
+/// La palette d'un `.z` image, s'il en a une.
+pub fn z_palette(file: &[u8]) -> Option<g2d::Palette> {
+    match g2d::read_z_shape(file)? {
+        g2d::ZShape::Sprite { palette, .. } | g2d::ZShape::Screen { palette, .. } | g2d::ZShape::Texture { palette, .. } => (!palette.colors.is_empty()).then_some(palette),
+    }
+}
+
+/// Le `.z` décompressé avec cette palette. Une couleur qui ne change pas garde ses octets.
+pub fn z_with_palette(file: &[u8], colors: &[[u8; 4]]) -> Result<Vec<u8>, String> {
+    let (palette, at) = match g2d::read_z_shape(file).ok_or("image illisible")? {
+        g2d::ZShape::Sprite { palette, palette_at, .. } | g2d::ZShape::Screen { palette, palette_at, .. } | g2d::ZShape::Texture { palette, palette_at, .. } => (palette, palette_at),
+    };
+    let mut out = file.to_vec();
+    for (i, (old, new)) in palette.colors.iter().zip(colors).enumerate() {
+        if old[..3] != new[..3] {
+            wr16(&mut out, at + i * 2, to_bgr555(*new) as usize);
+        }
+    }
+    Ok(out)
+}
+
+/// Une image de `render_engine_bitmap` remise dans ses octets 8 bits : un pixel qui ne change pas garde son n°.
+pub fn bitmap_pixels(pixels: &[u8], before: &Rgba, palette: &g2d::Palette, image: &Rgba) -> Result<Vec<u8>, String> {
+    check_size(image, before.width, before.height)?;
+    let mut cache = HashMap::new();
+    let mut out = pixels.to_vec();
+    for (i, slot) in out.iter_mut().enumerate() {
+        let (x, y) = (i as u32 % image.width, i as u32 / image.width);
+        if y < image.height && !same(pixel_at(image, x, y), pixel_at(before, x, y)) {
+            *slot = index_for(palette, 0, true, pixel_at(image, x, y), &mut cache);
+        }
+    }
+    Ok(out)
+}
+
+/// Une image `.bmp` sans compression, avec les pixels de `image`.
+pub fn bmp_from_image(file: &[u8], image: &Rgba) -> Result<Vec<u8>, String> {
+    let before = g2d::read_bmp(file).map_err(|e| e.to_string())?;
+    check_size(image, before.width, before.height)?;
+    let (data_at, header, bits) = (rd32(file, 10), rd32(file, 14), rd16(file, 28));
+    let (width, height) = (before.width as usize, before.height as usize);
+    let up = (rd32(file, 22) as u32 as i32) > 0;
+    let colors: Vec<[u8; 4]> = file.get(14 + header..data_at).unwrap_or(&[]).chunks_exact(4).map(|c| [c[2], c[1], c[0], 255]).collect();
+    let stride = (width * bits).div_ceil(32) * 4;
+    let mut out = file.to_vec();
+    let mut cache = HashMap::new();
+    for y in 0..height {
+        let row = data_at + (if up { height - 1 - y } else { y }) * stride;
+        for x in 0..width {
+            let wanted = pixel_at(image, x as u32, y as u32);
+            if same(wanted, pixel_at(&before, x as u32, y as u32)) || row + stride > file.len() {
+                continue;
+            }
+            let opaque = [wanted[0], wanted[1], wanted[2], 255];
+            match bits {
+                24 => out[row + x * 3..row + x * 3 + 3].copy_from_slice(&[opaque[2], opaque[1], opaque[0]]),
+                8 => out[row + x] = nearest(&colors, 0, colors.len(), opaque, true, &mut cache),
+                _ => {
+                    let index = nearest(&colors, 0, colors.len(), opaque, true, &mut cache);
+                    let byte = &mut out[row + x / 2];
+                    *byte = if x % 2 == 0 { (*byte & 15) | (index << 4) } else { (*byte & 0xF0) | (index & 15) };
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// La police avec les caractères de cette image de `render_font` : l'alpha donne le tracé, la couleur ne compte pas.
+pub fn font_from_image(file: &[u8], image: &Rgba) -> Result<Vec<u8>, String> {
+    const PER_LINE: usize = 32;
+    let (b, at) = block(file, &[b"PLGC", b"CGLP"]).ok_or("police illisible")?;
+    let (width, height, cell, bpp) = (file[b] as usize, file[b + 1] as usize, rd16(file, b + 2), file[b + 6] as usize);
+    let glyphs_at = b + 8;
+    let end = (at + rd32(file, at + 4)).min(file.len());
+    if width == 0 || height == 0 || cell == 0 || bpp == 0 || bpp > 8 {
+        return Err("police illisible".into());
+    }
+    let count = (end - glyphs_at) / cell;
+    let rows = count.div_ceil(PER_LINE).max(1);
+    check_size(image, (PER_LINE * (width + 1)) as u32, (rows * (height + 1)) as u32)?;
+    let top = (1u32 << bpp) - 1;
+    let mut out = file.to_vec();
+    for g in 0..count {
+        let (ox, oy) = ((g % PER_LINE) * (width + 1), (g / PER_LINE) * (height + 1));
+        let glyph = glyphs_at + g * cell;
+        for y in 0..height {
+            for x in 0..width {
+                let bit = (y * width + x) * bpp;
+                if bit / 8 >= cell {
+                    continue;
+                }
+                let value = (pixel_at(image, (ox + x) as u32, (oy + y) as u32)[3] as u32 * top + 127) / 255;
+                let shift = (16 - bpp - bit % 8) as u32;
+                let next = if bit / 8 + 1 < cell { out[glyph + bit / 8 + 1] } else { 0 };
+                let word = ((out[glyph + bit / 8] as u32) << 8) | next as u32;
+                let word = (word & !(top << shift)) | (value << shift);
+                out[glyph + bit / 8] = (word >> 8) as u8;
+                if bit / 8 + 1 < cell {
+                    out[glyph + bit / 8 + 1] = word as u8;
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Où sont les textures d'un fichier Nitro 3D.
 pub struct Tex0 {
     pub texels: usize,
@@ -508,15 +701,18 @@ pub fn write_texture(file: &[u8], texture: &nds_nitro::nitro::Texture, palette: 
     let format = texture.params.format().0;
     let offset = texture.params.offset() as usize;
     let mut out = file.to_vec();
+    let before = nds_nitro::nds::decode_texture(texture, palette).map_err(|e| e.to_string())?;
+    let before = Rgba { width, height, data: before.0 };
     if format == 5 {
         let at = tex0.palettes + palette_at.ok_or("texture sans palette")?;
-        let before = nds_nitro::nds::decode_texture(texture, palette).map_err(|e| e.to_string())?;
-        let before = Rgba { width, height, data: before.0 };
         let pixels = encode_4x4(image, &before, &texture.data1, &texture.data2, file, at);
         out[tex0.compressed1 + offset..tex0.compressed1 + offset + pixels.len()].copy_from_slice(&pixels);
     } else {
         let colors = palette_at.map_or_else(Vec::new, |at| read_colors(file, tex0.palettes + at, palette_size(format)));
-        let pixels = encode_texture(format, image, &colors, texture.params.is_color0_transparent())?;
+        // Deux textures peuvent partager leurs pixels avec des palettes différentes : ce qui ne change pas ne bouge pas
+        let mut pixels = encode_texture(format, image, &colors, texture.params.is_color0_transparent())?;
+        let size = pixels.len();
+        keep_unchanged(format, &mut pixels, &file[tex0.texels + offset..tex0.texels + offset + size], image, &before);
         out[tex0.texels + offset..tex0.texels + offset + pixels.len()].copy_from_slice(&pixels);
     }
     Ok(out)
@@ -532,6 +728,123 @@ mod tests {
         colors[2] = [0, 255, 0, 255];
         colors[17] = [0, 0, 255, 255];
         g2d::Palette { colors }
+    }
+
+    /// Une texture 8x8 à 4 couleurs dont la 3 est le magenta transparent.
+    fn z_texture(key: u8) -> Vec<u8> {
+        let mut pixels = vec![0xE4u8; 16];
+        pixels[1] = 0xFF;
+        [&[2, key, 0, 0], &pixels[..], &[1, 0, 8, 0, 0, 0, 0, 0], &[0x9C, 0x73, 0x1F, 0, 0xE0, 3, 0x1F, 0x7C]].concat()
+    }
+
+    #[test]
+    fn z_images_come_back_identical() {
+        // Texture, image en tuiles, fond : sans changement, les mêmes octets
+        let mut sprite = vec![0, 0, 0, 0, 8, 0, 8, 0, 0, 0, 0, 0x40, 32, 0, 0, 0];
+        sprite.extend((0..32).map(|i| (i % 3) as u8 | ((i % 2) as u8) << 4));
+        sprite.extend([3, 0, 0, 0, 0, 0, 0x1F, 0, 0xE0, 3]);
+        let mut screen = vec![0u8; 4 + 512 + 4 + 2048 + 4 + 128];
+        screen[0] = 1;
+        screen[4 + 2] = 0x1F;
+        screen[520 + 2] = 1;
+        screen[520 + 2048] = 2;
+        screen[520 + 2048 + 4 + 64] = 1;
+        for file in [z_texture(0), z_texture(1), sprite, screen] {
+            let image = g2d::read_z_image(&file).unwrap();
+            assert_eq!(z_from_image(&file, &image).unwrap(), (file.clone(), 0));
+            let colors = z_palette(&file).unwrap().colors;
+            assert_eq!(z_with_palette(&file, &colors).unwrap(), file);
+        }
+    }
+
+    #[test]
+    fn a_painted_z_shows_what_was_painted() {
+        for key in [0, 1] {
+            let file = z_texture(key);
+            let mut image = g2d::read_z_image(&file).unwrap();
+            image.data[0..4].copy_from_slice(&[0, 255, 0, 255]);
+            image.data[4..8].copy_from_slice(&[0, 0, 0, 0]);
+            let (out, _) = z_from_image(&file, &image).unwrap();
+            let again = g2d::read_z_image(&out).unwrap();
+            assert_eq!(&again.data[0..4], &[0, 255, 0, 255]);
+            assert_eq!(again.data[7], 0, "transparent, cle {key}");
+            assert_eq!(again.data[8..], image.data[8..], "le reste ne bouge pas");
+        }
+    }
+
+    #[test]
+    fn a_grown_z_screen_says_its_tile_count() {
+        let mut screen = vec![0u8; 4 + 512 + 4 + 2048 + 4 + 64];
+        screen[0] = 1;
+        screen[4 + 2] = 0x1F;
+        screen[8] = 0xE0;
+        screen[9] = 3;
+        screen[520 + 2048] = 1;
+        screen[520 + 2048 + 4] = 1;
+        let mut image = g2d::read_z_image(&screen).unwrap();
+        image.data[0..4].copy_from_slice(&[0, 255, 0, 255]);
+        let (out, added) = z_from_image(&screen, &image).unwrap();
+        assert_eq!(added, 1);
+        assert_eq!(g2d::read_z_image(&out).unwrap().data, image.data);
+    }
+
+    #[test]
+    fn a_z_palette_changes_the_image() {
+        let file = z_texture(1);
+        let mut colors = z_palette(&file).unwrap().colors;
+        colors[1] = [0, 0, 255, 255];
+        let out = z_with_palette(&file, &colors).unwrap();
+        assert_eq!(z_palette(&out).unwrap().colors[1], [0, 0, 255, 255]);
+        assert_eq!(z_palette(&out).unwrap().colors[2], colors[2]);
+    }
+
+    #[test]
+    fn fonts_come_back_at_any_depth() {
+        for bpp in [1u8, 2, 3, 4] {
+            let (width, height) = (5u8, 3u8);
+            let cell = (width as usize * height as usize * bpp as usize).div_ceil(8) as u16;
+            let mut file = vec![0u8; 16];
+            file[0..4].copy_from_slice(b"RTFN");
+            file[12] = 16;
+            file[14] = 1;
+            file.extend(b"PLGC");
+            file.extend((16 + cell as u32 * 2).to_le_bytes());
+            file.extend([width, height, cell as u8, 0, 0, 0, bpp, 0]);
+            file.extend((0..cell * 2).map(|i| (i as u8).wrapping_mul(73) ^ 0x5A));
+            // Le reste de la dernière case n'est pas dessiné : on le met à 0 pour comparer
+            let (mut image, _) = g2d::render_font(&file).unwrap();
+            let out = font_from_image(&file, &image).unwrap();
+            assert_eq!(g2d::render_font(&out).unwrap().0.data, image.data, "{bpp} bits");
+            image.data[0..4].copy_from_slice(&[255; 4]);
+            let out = font_from_image(&file, &image).unwrap();
+            assert_eq!(g2d::render_font(&out).unwrap().0.data, image.data, "{bpp} bits, un pixel peint");
+        }
+    }
+
+    #[test]
+    fn bmps_come_back_in_every_depth() {
+        let make = |bits: u16, colors: &[[u8; 4]], row: &[u8]| {
+            let data_at = 54 + colors.len() * 4;
+            let mut file = vec![0u8; 54];
+            file[0..2].copy_from_slice(b"BM");
+            file[10] = data_at as u8;
+            file[14] = 40;
+            file[18] = 2;
+            file[22] = 2;
+            file[28..30].copy_from_slice(&bits.to_le_bytes());
+            file.extend(colors.iter().flatten());
+            file.extend(row);
+            file.extend(row);
+            file
+        };
+        let colors = [[0, 0, 255, 0], [0, 255, 0, 0]];
+        for file in [make(24, &[], &[1, 2, 3, 4, 5, 6, 0, 0]), make(8, &colors, &[0, 1, 0, 0]), make(4, &colors, &[0x10, 0, 0, 0])] {
+            let mut image = g2d::read_bmp(&file).unwrap();
+            assert_eq!(bmp_from_image(&file, &image).unwrap(), file);
+            image.data[0..4].copy_from_slice(&[0, 255, 0, 255]);
+            let out = bmp_from_image(&file, &image).unwrap();
+            assert_eq!(g2d::read_bmp(&out).unwrap().data, image.data);
+        }
     }
 
     #[test]

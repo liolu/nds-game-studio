@@ -9,6 +9,9 @@ use crate::tables::*;
 use crate::vx::{AUDIO_EXTRA, AudioChannel, read_aframes};
 use crate::{Info, Stream, le16, le32};
 
+mod encode;
+pub use encode::encode_like;
+
 const ZIGZAG8: [u8; 64] = [
     0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13, 6, 7, 14, 21, 28, 35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
 ];
@@ -266,6 +269,12 @@ impl Mobiclip {
             }
             pos += 1;
         }
+        self.add_matrix(mat, dst, bx, by, size, plane);
+        Ok(())
+    }
+
+    /// Ajoute au bloc la transformée inverse de ces coefficients déjà multipliés.
+    fn add_matrix(&self, mut mat: [i32; 64], dst: &mut Pic, bx: i32, by: i32, size: i32, plane: usize) {
         mat[0] = mat[0].wrapping_add(32);
         let n = size as usize;
         for y in 0..n {
@@ -283,7 +292,6 @@ impl Mobiclip {
                 *p = clip8(*p as i32 + (mat[y * n + x] >> 6));
             }
         }
-        Ok(())
     }
 
     fn add_pframe_coefficients(&self, gb: &mut Msb, dst: &mut Pic, bx: i32, by: i32, size: i32, plane: usize) -> R {
@@ -321,35 +329,7 @@ impl Mobiclip {
         match pmode {
             0 => self.fill(dst, plane, size, ax, ay, |p| p.at(p.x, p.y - 1)),
             1 => self.fill(dst, plane, size, ax, ay, |p| p.at(p.x - 1, p.y)),
-            2 => {
-                // `top` et `left` peuvent être le bloc lui-même au bord de l'image : on relit à chaque fois
-                let top = at(ax, (ay - 1).max(0));
-                let left = at((ax - 1).max(0), ay);
-                let bottommost = dst[plane][at((ax - 1).max(0), ay + size - 1)] as i32;
-                let rightmost = dst[plane][at(ax + size - 1, (ay - 1).max(0))] as i32;
-                let avg = (bottommost + rightmost + 1) / 2 + 2 * gb.se().clamp(-(1 << 16), 1 << 16);
-                let r6 = adjust(avg - bottommost, size);
-                let r9 = adjust(avg - rightmost, size);
-                let shift = if adjust(size, size) == 8 { 3 } else { 2 };
-                let mut arr1 = [0i32; 16];
-                let mut arr2 = [0i32; 16];
-                for x in 0..size {
-                    let value = dst[plane][top + x as usize] as i32;
-                    arr1[x as usize] = adjust(((bottommost - value) * (1 << shift)) + r6 * (x + 1), size);
-                }
-                for y in 0..size {
-                    let value = dst[plane][left + (y * stride) as usize] as i32;
-                    arr2[y as usize] = adjust(((rightmost - value) * (1 << shift)) + r9 * (y + 1), size);
-                }
-                for y in 0..size {
-                    for x in 0..size {
-                        let t = dst[plane][top + x as usize] as i32;
-                        let l = dst[plane][left + (y * stride) as usize] as i32;
-                        let v = (t + l + ((arr1[x as usize] * (y + 1) + arr2[y as usize] * (x + 1)) >> (2 * shift)) + 1) / 2;
-                        dst[plane][at(ax + x, ay + y)] = v as u8;
-                    }
-                }
-            }
+            2 => self.predict_plane(dst, ax, ay, size, plane, gb.se().clamp(-(1 << 16), 1 << 16)),
             3 => {
                 let sum_left = |d: &Pic| (0..size).map(|y| d[plane][at(ax - 1, ay + y)] as i32).sum::<i32>();
                 let sum_top = |d: &Pic| (0..size).map(|x| d[plane][at(ax + x, ay - 1)] as i32).sum::<i32>();
@@ -379,6 +359,39 @@ impl Mobiclip {
             self.add_coefficients(gb, dst, ax, ay, size, plane)?;
         }
         Ok(())
+    }
+
+    /// La prédiction en plan : `delta` est lu dans le fichier, ou choisi par l'encodeur.
+    fn predict_plane(&self, dst: &mut Pic, ax: i32, ay: i32, size: i32, plane: usize, delta: i32) {
+        let stride = self.stride(plane);
+        let at = |x: i32, y: i32| (y * stride + x) as usize;
+        // `top` et `left` peuvent être le bloc lui-même au bord de l'image : on relit à chaque fois
+        let top = at(ax, (ay - 1).max(0));
+        let left = at((ax - 1).max(0), ay);
+        let bottommost = dst[plane][at((ax - 1).max(0), ay + size - 1)] as i32;
+        let rightmost = dst[plane][at(ax + size - 1, (ay - 1).max(0))] as i32;
+        let avg = (bottommost + rightmost + 1) / 2 + 2 * delta;
+        let r6 = adjust(avg - bottommost, size);
+        let r9 = adjust(avg - rightmost, size);
+        let shift = if adjust(size, size) == 8 { 3 } else { 2 };
+        let mut arr1 = [0i32; 16];
+        let mut arr2 = [0i32; 16];
+        for x in 0..size {
+            let value = dst[plane][top + x as usize] as i32;
+            arr1[x as usize] = adjust(((bottommost - value) * (1 << shift)) + r6 * (x + 1), size);
+        }
+        for y in 0..size {
+            let value = dst[plane][left + (y * stride) as usize] as i32;
+            arr2[y as usize] = adjust(((rightmost - value) * (1 << shift)) + r9 * (y + 1), size);
+        }
+        for y in 0..size {
+            for x in 0..size {
+                let t = dst[plane][top + x as usize] as i32;
+                let l = dst[plane][left + (y * stride) as usize] as i32;
+                let v = (t + l + ((arr1[x as usize] * (y + 1) + arr2[y as usize] * (x + 1)) >> (2 * shift)) + 1) / 2;
+                dst[plane][at(ax + x, ay + y)] = v as u8;
+            }
+        }
     }
 
     fn get_prediction(&mut self, gb: &mut Msb, x: i32, y: i32, size: i32) -> i32 {
@@ -454,7 +467,7 @@ impl Mobiclip {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn predict_motion(&mut self, gb: &mut Msb, dst: &mut Pic, mut width: i32, mut height: i32, index: i32, offsetm: usize, mut offsetx: i32, mut offsety: i32) -> R {
+    fn predict_motion(&mut self, gb: &mut Msb, dst: &mut Pic, mut width: i32, mut height: i32, index: i32, offsetm: usize, offsetx: i32, offsety: i32) -> R {
         if index > 5 {
             let adjx = if index == 8 { 0 } else { width / 2 };
             let adjy = if index == 8 { height / 2 } else { 0 };
@@ -488,6 +501,12 @@ impl Mobiclip {
             return Err("vecteur");
         }
         self.motion[offsetm] = (mx, my);
+        self.motion_copy(source, dst, width, height, mx, my, offsetx, offsety)
+    }
+
+    /// Copie un bloc de l'image `source` à ce vecteur (en demi-pixels), dans les trois plans.
+    #[allow(clippy::too_many_arguments)]
+    fn motion_copy(&self, source: usize, dst: &mut Pic, mut width: i32, mut height: i32, mut mx: i32, mut my: i32, mut offsetx: i32, mut offsety: i32) -> R {
         let (mut fwidth, mut fheight) = (self.w, self.h);
         for plane in 0..3 {
             if plane == 1 {
@@ -788,11 +807,13 @@ impl Mods {
                 }
             }
             Audio::Pcm => {
+                // Après l'image, comme les autres : un paquet est aligné sur 4 octets, la fin peut en garder 2 de plus
+                let start = consumed + if key && blocks > 0 { 4 } else { 0 };
                 let len = blocks * self.nch * 512;
-                if len > size {
+                if start + len > size {
                     return Err("son : hors du paquet");
                 }
-                for block in chunk[size - len..].chunks_exact(self.nch * 512) {
+                for block in chunk[start..start + len].chunks_exact(self.nch * 512) {
                     let start = pcm.len();
                     pcm.resize(start + 256 * self.nch, 0.0);
                     for c in 0..self.nch {

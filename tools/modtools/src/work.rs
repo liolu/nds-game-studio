@@ -4,11 +4,11 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 
-use nds_nitro::{adx, decompress_any, g2d, model3d, narc, romarc, sadl, sdat, Kind, Rgba};
+use nds_nitro::{adx, decompress_any, g2d, gx_mesh, model3d, narc, romarc, sadl, sdat, Kind, Rgba};
 use serde::{Deserialize, Serialize};
 
 use crate::asset_scan::{self, Decoded, Entry};
-use crate::container::{self, rd32};
+use crate::container::{self, rd32, wr32};
 use crate::i18n::t;
 use crate::{compress, images, media, model, sound, text};
 
@@ -40,6 +40,17 @@ enum Recipe {
     Texel { palette: Option<String> },
     BsTexture,
     PaletteTiles { width: u32 },
+    /// Une vidéo VX, MODS ou Bink, réécrite depuis ce que FFmpeg sait lire.
+    Video,
+    /// Un `.z` de Tom and Jerry : image, fond ou texture.
+    ZImage,
+    ZPalette,
+    Font,
+    Bitmap,
+    EngineBitmap { palette: Option<String> },
+    LangText,
+    /// Un maillage en commandes GX : `GEOM`, `MESH`, ou `.z` du monde.
+    GxModel,
     /// Pour regarder ou réutiliser : le chemin du retour n'existe pas encore pour ce format.
     ExportOnly,
 }
@@ -171,6 +182,18 @@ impl Game {
         Ok(())
     }
 
+    /// Un fichier sous toutes ses compressions.
+    fn unpacked(&self, index: usize) -> Result<Vec<u8>, String> {
+        Ok(asset_scan::fully_unpacked(self.current(index)?))
+    }
+
+    /// Reprend toutes les compressions du fichier d'origine.
+    fn set_unpacked(&mut self, index: usize, new: &[u8]) -> Result<(), String> {
+        let packed = compress::same_layers(&asset_scan::read_entry(&self.entries[index])?, new)?;
+        self.edited.insert(index, packed);
+        Ok(())
+    }
+
     fn palette(&self, path: Option<&str>, tiles: Option<&g2d::Tiles>) -> Result<g2d::Palette, String> {
         let Some(path) = path else {
             // Comme l'aperçu sans palette : des gris
@@ -198,6 +221,14 @@ impl Game {
 
 fn path_of(game_entries: &[Entry], list: &[usize], at: usize) -> Option<String> {
     list.get(at).map(|&i| game_entries[i].path.clone())
+}
+
+/// La palette d'une image ` PMB`, comme l'aperçu : sans palette, des gris sur 256 niveaux.
+fn bitmap_palette(game: &Game, path: Option<&str>) -> Result<g2d::Palette, String> {
+    match path {
+        Some(_) => game.palette(path, None),
+        None => Ok(g2d::Palette { colors: (0..=255).map(|i| [i, i, i, 255]).collect() }),
+    }
 }
 
 // --------------------------------------------------------------------------------------------
@@ -323,6 +354,19 @@ fn export_model(writer: &mut Writer, game: &Game, sel: usize, base: &str, bytes:
     Ok(())
 }
 
+/// Les images des matériaux d'un modèle, pour le regarder : la vraie texture est un fichier à part. Rend le chemin de chacune pour le `.mtl`.
+fn export_materials(writer: &mut Writer, entry: &Entry, base: &str, built: &model3d::ModelOut) -> Result<Vec<Option<String>>, String> {
+    let mut textures = Vec::new();
+    for (m, material) in built.materials.iter().enumerate() {
+        let picture = material.texture.as_ref().map(|image| (format!("{base}.apercu.{m}.png"), image));
+        textures.push(picture.as_ref().map(|(path, _)| path.rsplit('/').next().unwrap_or(path).to_string()));
+        if let Some((path, image)) = picture {
+            writer.image(path, entry, Recipe::ExportOnly, || Ok(image.clone()))?;
+        }
+    }
+    Ok(textures)
+}
+
 fn export_entry(writer: &mut Writer, game: &Game, sel: usize) -> Result<(), String> {
     let entry = &game.entries[sel];
     let base = base_name(entry);
@@ -410,15 +454,16 @@ fn export_entry(writer: &mut Writer, game: &Game, sel: usize) -> Result<(), Stri
             if let Some(parent) = target.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
             }
+            let recipe = Recipe::Video;
             let short = format!("{base}.mp4");
             if writer.previous.contains_key(&short) {
-                writer.put(&short, entry, Recipe::ExportOnly, || Ok(Vec::new()))?;
+                writer.put(&short, entry, recipe, || Ok(Vec::new()))?;
                 return Ok(());
             }
             for made in media::video_to_files(bytes.clone(), &target)? {
                 let bytes = std::fs::read(&made).map_err(|e| e.to_string())?;
                 let name = made.strip_prefix(&writer.root).map_or(short.clone(), |p| p.to_string_lossy().replace('\\', "/"));
-                writer.items.push(Item { file: name, hash: fingerprint(&bytes), source: entry.path.clone(), recipe: Recipe::ExportOnly });
+                writer.items.push(Item { file: name, hash: fingerprint(&bytes), source: entry.path.clone(), recipe: recipe.clone() });
             }
             Ok(())
         }
@@ -440,29 +485,48 @@ fn export_entry(writer: &mut Writer, game: &Game, sel: usize) -> Result<(), Stri
             let width = if tiles.count() % 40 == 0 && tiles.count() % 32 != 0 { 40 } else { 32 };
             writer.image(format!("{base}.png"), entry, Recipe::PaletteTiles { width }, || Ok(g2d::render_tiles(&tiles, &palette, 0, width)))
         }
-        // Lisibles dans la fenêtre Assets, sans chemin du retour pour l'instant : l'aperçu, et le fichier du jeu à côté
+        Kind::Messages if bytes.starts_with(b"GNAL") => match text::gnal_to_text(&bytes) {
+            Some(lines) => writer.put(&format!("{base}.txt"), entry, Recipe::LangText, || Ok(lines.into_bytes())),
+            None => raw(writer, Recipe::Raw),
+        },
         Kind::ZImage | Kind::Font | Kind::Bitmap | Kind::EngineBitmap | Kind::RawTexture | Kind::TextureRef | Kind::JCells | Kind::JLayout | Kind::EngineGeometry | Kind::EngineMesh | Kind::Messages => {
-            raw(writer, Recipe::Raw)?;
             let mut c = asset_scan::choices_for(&game.entries, sel);
-            match asset_scan::decode(&game.entries, sel, &mut c) {
-                Ok(Decoded::Image { rgba, .. }) => writer.image(format!("{base}.apercu.png"), entry, Recipe::ExportOnly, || Ok(rgba)),
-                Ok(Decoded::Model { model: built, .. }) => {
-                    let mtl = format!("{base}.apercu.mtl");
-                    let mtl_short = mtl.rsplit('/').next().unwrap_or(&mtl).to_string();
-                    let mut textures = Vec::new();
-                    for (m, material) in built.materials.iter().enumerate() {
-                        let picture = material.texture.as_ref().map(|image| (format!("{base}.apercu.{m}.png"), image));
-                        textures.push(picture.as_ref().map(|(path, _)| path.rsplit('/').next().unwrap_or(path).to_string()));
-                        if let Some((path, image)) = picture {
-                            writer.image(path, entry, Recipe::ExportOnly, || Ok(image.clone()))?;
-                        }
+            match (entry.kind, asset_scan::decode(&game.entries, sel, &mut c)) {
+                // Sous `mesh/`, ce qui ressemble à une image est une donnée de collision
+                (Kind::ZImage, Ok(Decoded::Image { rgba, .. })) if !entry.path.contains("/mesh/") => {
+                    if let Some(palette) = images::z_palette(&asset_scan::fully_unpacked(bytes.clone())) {
+                        writer.image(format!("{base}.palette.png"), entry, Recipe::ZPalette, || Ok(images::palette_image(&palette)))?;
                     }
-                    let (obj, material_file) = model::write_obj(&built, &mtl_short, &textures);
-                    writer.put(&format!("{base}.apercu.obj"), entry, Recipe::ExportOnly, || Ok(obj.into_bytes()))?;
+                    writer.image(format!("{base}.png"), entry, Recipe::ZImage, || Ok(rgba))
+                }
+                (Kind::Font, Ok(Decoded::Image { rgba, .. })) => writer.image(format!("{base}.png"), entry, Recipe::Font, || Ok(rgba)),
+                (Kind::Bitmap, Ok(Decoded::Image { rgba, .. })) => writer.image(format!("{base}.png"), entry, Recipe::Bitmap, || Ok(rgba)),
+                (Kind::EngineBitmap, Ok(Decoded::Image { rgba, .. })) => writer.image(format!("{base}.png"), entry, Recipe::EngineBitmap { palette: palette_path(&c) }, || Ok(rgba)),
+                (Kind::ZImage | Kind::EngineGeometry | Kind::EngineMesh, Ok(Decoded::Model { model: built, .. })) => {
+                    let (obj, mtl) = (format!("{base}.obj"), format!("{base}.mtl"));
+                    let mtl_short = mtl.rsplit('/').next().unwrap_or(&mtl).to_string();
+                    let textures = export_materials(writer, entry, &base, &built)?;
+                    let (text, material_file) = model::write_obj(&built, &mtl_short, &textures);
+                    writer.put(&obj, entry, Recipe::GxModel, || Ok(text.into_bytes()))?;
                     writer.put(&mtl, entry, Recipe::ExportOnly, || Ok(material_file.into_bytes()))
                 }
-                Ok(Decoded::Text { lines, .. }) => writer.put(&format!("{base}.apercu.txt"), entry, Recipe::ExportOnly, || Ok(lines.join("\r\n").into_bytes())),
-                _ => Ok(()),
+                // Sans chemin du retour pour l'instant : l'aperçu, et le fichier du jeu à côté
+                (_, decoded) => {
+                    raw(writer, Recipe::Raw)?;
+                    match decoded {
+                        Ok(Decoded::Image { rgba, .. }) => writer.image(format!("{base}.apercu.png"), entry, Recipe::ExportOnly, || Ok(rgba)),
+                        Ok(Decoded::Model { model: built, .. }) => {
+                            let mtl = format!("{base}.apercu.mtl");
+                            let mtl_short = mtl.rsplit('/').next().unwrap_or(&mtl).to_string();
+                            let textures = export_materials(writer, entry, &base, &built)?;
+                            let (obj, material_file) = model::write_obj(&built, &mtl_short, &textures);
+                            writer.put(&format!("{base}.apercu.obj"), entry, Recipe::ExportOnly, || Ok(obj.into_bytes()))?;
+                            writer.put(&mtl, entry, Recipe::ExportOnly, || Ok(material_file.into_bytes()))
+                        }
+                        Ok(Decoded::Text { lines, .. }) => writer.put(&format!("{base}.apercu.txt"), entry, Recipe::ExportOnly, || Ok(lines.join("\r\n").into_bytes())),
+                        _ => Ok(()),
+                    }
+                }
             }
         }
         _ => raw(writer, Recipe::Raw),
@@ -482,8 +546,8 @@ fn read_sound_file(bytes: &[u8]) -> Result<sadl::Sound, String> {
 /// Le fichier d'explications, dans la langue du launcher.
 fn readme() -> String {
     t!(
-        "MODDING THIS GAME\r\n\r\nEdit the files in the '{FILES}' folder, then press 'Apply my changes' in the launcher.\r\nYour rom is never modified: the launcher builds a copy, and one button brings the originals back.\r\n\r\nImages .png        GIMP: keep the size. Colors come from the game's palette; edit the .palette.png file for new colors.\r\nModels .obj        Blender, Godot: moving vertices and UVs works; keep the same triangles and the part_NNN names.\r\nSounds .wav .mp3   Audacity: any length for music and sound effects; sadl and ADX keep their length.\r\nTexts .txt         one line per message; keep the {{1A:...}} commands.\r\nVideos .mp4 .ogv   to watch and reuse (Godot only reads .ogv). A video cannot go back into the game yet.\r\n.apercu files      to watch and reuse: edit the native file beside them instead.\r\nOther files        the game's own format: they come back as they are.\r\n\r\nExpert: a file in the game's format placed in '{DROP_INS}' at its path in the rom is used as it is.\r\n",
-        "MODDER CE JEU\r\n\r\nModifiez les fichiers du dossier '{FILES}', puis cliquez sur 'Appliquer mes changements' dans le launcher.\r\nVotre rom n'est jamais modifiee : le launcher fabrique une copie, et un bouton remet les originaux.\r\n\r\nImages .png        GIMP : garder la taille. Les couleurs viennent de la palette du jeu ; modifier le fichier .palette.png pour de nouvelles couleurs.\r\nModeles .obj       Blender, Godot : bouger les sommets et les UV marche ; garder les memes triangles et les noms part_NNN.\r\nSons .wav .mp3     Audacity : toute duree pour la musique et les effets ; sadl et ADX gardent leur duree.\r\nTextes .txt        une ligne par message ; garder les commandes {{1A:...}}.\r\nVideos .mp4 .ogv   pour regarder et reutiliser (Godot ne lit que .ogv). Une video ne peut pas encore revenir dans le jeu.\r\nFichiers .apercu   pour regarder et reutiliser : modifier plutot le fichier du jeu a cote.\r\nAutres fichiers    le format du jeu : ils reviennent tels quels.\r\n\r\nExpert : un fichier au format du jeu pose dans '{DROP_INS}' a son chemin dans la rom est utilise tel quel.\r\n"
+        "MODDING THIS GAME\r\n\r\nEdit the files in the '{FILES}' folder, then press 'Apply my changes' in the launcher.\r\nYour rom is never modified: the launcher builds a copy, and one button brings the originals back.\r\n\r\nImages .png        GIMP: keep the size. Colors come from the game's palette; edit the .palette.png file for new colors.\r\nFonts .png         GIMP: keep the size. Only the transparency of each pixel counts, not its color.\r\nModels .obj        Blender, Godot: moving vertices and UVs works; keep the same triangles and the part_NNN names.\r\nSounds .wav .mp3   Audacity: any length for music and sound effects; sadl and ADX keep their length.\r\nTexts .txt         one line per message; keep the {{1A:...}} commands and the \\n.\r\nVideos .mp4 .ogv   they come back: same size and speed are restored, the size the game allows is kept, images may lose detail.\r\n.apercu files      to watch and reuse: edit the file they come from instead.\r\nOther files        the game's own format: they come back as they are.\r\n\r\nExpert: a file in the game's format placed in '{DROP_INS}' at its path in the rom is used as it is.\r\n",
+        "MODDER CE JEU\r\n\r\nModifiez les fichiers du dossier '{FILES}', puis cliquez sur 'Appliquer mes changements' dans le launcher.\r\nVotre rom n'est jamais modifiee : le launcher fabrique une copie, et un bouton remet les originaux.\r\n\r\nImages .png        GIMP : garder la taille. Les couleurs viennent de la palette du jeu ; modifier le fichier .palette.png pour de nouvelles couleurs.\r\nPolices .png       GIMP : garder la taille. Seule la transparence de chaque pixel compte, pas sa couleur.\r\nModeles .obj       Blender, Godot : bouger les sommets et les UV marche ; garder les memes triangles et les noms part_NNN.\r\nSons .wav .mp3     Audacity : toute duree pour la musique et les effets ; sadl et ADX gardent leur duree.\r\nTextes .txt        une ligne par message ; garder les commandes {{1A:...}} et les \\n.\r\nVideos .mp4 .ogv   elles reviennent : taille et cadence remises, taille permise par le jeu respectee, l'image peut perdre des details.\r\nFichiers .apercu   pour regarder et reutiliser : modifier plutot le fichier dont ils viennent.\r\nAutres fichiers    le format du jeu : ils reviennent tels quels.\r\n\r\nExpert : un fichier au format du jeu pose dans '{DROP_INS}' a son chemin dans la rom est utilise tel quel.\r\n"
     )
 }
 
@@ -631,12 +695,8 @@ fn apply(game: &mut Game, item: &Item, path: &Path, warnings: &mut Vec<String>) 
         Recipe::Texel { palette } => {
             let bytes = game.current(source)?;
             let texel = g2d::read_texel(&bytes).map_err(|e| e.to_string())?;
-            let colors = game.palette(palette.as_deref(), None)?.colors;
-            let image = read_png(path)?;
-            if image.width != texel.width || image.height != texel.height {
-                return Err(format!("image de {}x{}, {}x{} attendu", image.width, image.height, texel.width, texel.height));
-            }
-            let pixels = images::encode_texture(texel.format as u8, &image, &colors, true)?;
+            let colors = game.palette(palette.as_deref(), None)?;
+            let pixels = images::texel_from_image(&texel, &colors, &read_png(path)?)?;
             let mut out = bytes.clone();
             let size = rd32(&bytes, 4).min(pixels.len());
             out[8..8 + size].copy_from_slice(&pixels[..size]);
@@ -645,11 +705,7 @@ fn apply(game: &mut Game, item: &Item, path: &Path, warnings: &mut Vec<String>) 
         Recipe::BsTexture => {
             let bytes = game.plain(source)?;
             let (texel, palette) = g2d::read_bstga(&bytes).map_err(|e| e.to_string())?;
-            let image = read_png(path)?;
-            if image.width != texel.width || image.height != texel.height {
-                return Err(format!("image de {}x{}, {}x{} attendu", image.width, image.height, texel.width, texel.height));
-            }
-            let pixels = images::encode_texture(texel.format as u8, &image, &palette.colors, true)?;
+            let pixels = images::texel_from_image(&texel, &palette, &read_png(path)?)?;
             let (at, size) = (rd32(&bytes, 20), rd32(&bytes, 24).min(pixels.len()));
             let mut out = bytes.clone();
             out[at..at + size].copy_from_slice(&pixels[..size]);
@@ -664,9 +720,140 @@ fn apply(game: &mut Game, item: &Item, path: &Path, warnings: &mut Vec<String>) 
             out.extend(images::write_tiles(b"", &tiles)?);
             game.set_plain(source, out)?;
         }
+        Recipe::ZImage => {
+            let (out, added) = images::z_from_image(&game.unpacked(source)?, &read_png(path)?)?;
+            if added > 0 {
+                warnings.push(t!("{}: {added} new tiles: check in game that they fit in video memory", "{} : {added} nouvelles tuiles : verifier en jeu qu'elles tiennent en memoire video", item.file));
+            }
+            game.set_unpacked(source, &out)?;
+        }
+        Recipe::ZPalette => {
+            let bytes = game.unpacked(source)?;
+            let count = images::z_palette(&bytes).ok_or("palette illisible")?.colors.len();
+            let colors = images::colors_from_image(&read_png(path)?, count)?;
+            game.set_unpacked(source, &images::z_with_palette(&bytes, &colors)?)?;
+        }
+        Recipe::Font => {
+            let out = images::font_from_image(&game.current(source)?, &read_png(path)?)?;
+            game.edited.insert(source, out);
+        }
+        Recipe::Bitmap => {
+            let out = images::bmp_from_image(&game.current(source)?, &read_png(path)?)?;
+            game.edited.insert(source, out);
+        }
+        Recipe::EngineBitmap { palette } => {
+            let bytes = game.current(source)?;
+            let colors = bitmap_palette(game, palette.as_deref())?;
+            let before = g2d::render_engine_bitmap(&bytes, &colors).map_err(|e| e.to_string())?;
+            let pixels = decompress_any(bytes.get(8..).ok_or("image coupee")?).ok_or("image PMB non compressee")?;
+            let new = images::bitmap_pixels(&pixels, &before, &colors, &read_png(path)?)?;
+            game.edited.insert(source, bitmap_with(&bytes, &new)?);
+        }
+        Recipe::LangText => {
+            let lines = std::fs::read(path).map_err(|e| e.to_string())?;
+            let lines = String::from_utf8_lossy(&lines);
+            let (out, lossy) = text::text_to_gnal(&game.current(source)?, lines.trim_start_matches('\u{FEFF}'))?;
+            if lossy {
+                warnings.push(t!("{}: some characters do not exist in this game's encoding", "{} : des caracteres n'existent pas dans l'encodage de ce jeu", item.file));
+            }
+            game.edited.insert(source, out);
+        }
+        Recipe::GxModel => {
+            if apply_gx_model(game, source, path)? {
+                warnings.push(t!("{}: some vertices are too far from the center for the DS and were brought back", "{} : des sommets sont trop loin du centre pour la DS et ont ete ramenes", item.file));
+            }
+        }
+        Recipe::Video => {
+            let (out, written) = media::video_to_game(&game.current(source)?, path)?;
+            if written.worst_level >= 5 {
+                warnings.push(t!("{}: some images were simplified to fit the size the game allows", "{} : des images ont ete simplifiees pour tenir dans la taille permise par le jeu", item.file));
+            }
+            game.edited.insert(source, out);
+        }
         Recipe::ExportOnly => {}
     }
     Ok(())
+}
+
+/// Une image ` PMB` avec ces pixels. Après ses données compressées (leur taille est à 4), le fichier nomme sa palette : ça reste.
+fn bitmap_with(file: &[u8], pixels: &[u8]) -> Result<Vec<u8>, String> {
+    let end = (8 + rd32(file, 4)).min(file.len());
+    let new = compress::same_method(file.get(8..end).ok_or("image coupee")?, pixels)?;
+    let mut out = file[..8].to_vec();
+    wr32(&mut out, 4, new.len());
+    out.extend(new);
+    out.extend(&file[end..]);
+    Ok(out)
+}
+
+/// La taille d'une texture comme la voit `read_commands` : 1 sans texture, les coordonnées restent alors en pixels.
+fn texture_size(built: &model3d::ModelOut, part: &model3d::Part) -> (f64, f64) {
+    built.materials.get(part.material).and_then(|m| m.texture.as_ref()).map_or((1.0, 1.0), |t| (t.width.max(1) as f64, t.height.max(1) as f64))
+}
+
+/// Un `GEOM` avec cette nouvelle liste de commandes.
+fn geometry_with(file: &[u8], list: &[u8]) -> Vec<u8> {
+    let mut out = file[..4].to_vec();
+    out.extend((list.len() as u32).to_le_bytes());
+    out.extend(list);
+    out.extend(file.get(8 + rd32(file, 4)..).unwrap_or(&[]));
+    out
+}
+
+/// Un `GEOM`, un `MESH` (ses morceaux sont des `GEOM`) ou un maillage du monde en `.z`, avec les sommets de l'OBJ. `true` si des sommets
+/// sortent de ce que la DS sait écrire.
+fn apply_gx_model(game: &mut Game, source: usize, path: &Path) -> Result<bool, String> {
+    let mut choices = asset_scan::choices_for(&game.entries, source);
+    let Decoded::Model { model: built, .. } = asset_scan::decode(&game.entries, source, &mut choices)? else { return Err("modele illisible".into()) };
+    let changes = model::gx_changes(&built, &std::fs::read_to_string(path).map_err(|e| e.to_string())?)?;
+    let same = |at: [f32; 3]| at.map(f64::from);
+    let mut warned = false;
+    match game.entries[source].kind {
+        Kind::EngineGeometry | Kind::EngineMesh => {
+            let files = if game.entries[source].kind == Kind::EngineMesh { asset_scan::mesh_geometries(&game.entries, source) } else { vec![source] };
+            if files.len() != built.parts.len() {
+                return Err(format!("{} morceaux, {} fichiers de geometrie", built.parts.len(), files.len()));
+            }
+            for ((file, part), new) in files.into_iter().zip(&built.parts).zip(&changes) {
+                let bytes = game.current(file)?;
+                let list = bytes.get(8..8 + rd32(&bytes, 4)).unwrap_or_else(|| bytes.get(8..).unwrap_or(&[]));
+                if let Some(list) = model::rewrite_gx(list, new, texture_size(&built, part), same, &mut warned)? {
+                    game.edited.insert(file, geometry_with(&bytes, &list));
+                }
+            }
+        }
+        _ => {
+            let mut bytes = game.unpacked(source)?;
+            let (scale, parts) = gx_mesh::world_parts(&bytes).ok_or("maillage illisible")?;
+            let drawn: Vec<(usize, &gx_mesh::WorldPart)> = parts.iter().enumerate().filter(|(_, p)| gx_mesh::draws_triangles(&bytes[p.list..p.list + p.size])).collect();
+            if drawn.len() != built.parts.len() {
+                return Err(format!("{} morceaux, {} attendus", drawn.len(), built.parts.len()));
+            }
+            // Du dernier au premier : une liste qui grandit ne décale que ce qui la suit
+            let mut lists = Vec::new();
+            for (((index, piece), part), new) in drawn.iter().zip(&built.parts).zip(&changes) {
+                let to_local = |at: [f32; 3]| [0, 1, 2].map(|axis| (at[axis] / scale - piece.center[axis]) as f64);
+                if let Some(list) = model::rewrite_gx(&bytes[piece.list..piece.list + piece.size], new, texture_size(&built, part), to_local, &mut warned)? {
+                    lists.push((*index, list));
+                }
+            }
+            for (index, list) in lists.into_iter().rev() {
+                let piece = &parts[index];
+                let growth = list.len() as i64 - piece.size as i64;
+                wr32(&mut bytes, piece.base + 0x18, list.len());
+                bytes.splice(piece.list..piece.list + piece.size, list);
+                for other in 0..parts.len() {
+                    let at = gx_mesh::WORLD_TABLE_AT + other * 4;
+                    if parts[other].base > piece.base {
+                        let moved = (rd32(&bytes, at) as i64 + growth) as usize;
+                        wr32(&mut bytes, at, moved);
+                    }
+                }
+            }
+            game.set_unpacked(source, &bytes)?;
+        }
+    }
+    Ok(warned)
 }
 
 /// Les fichiers de la rom, une fois chaque fichier modifié remis dans ce qui le contient.
@@ -759,14 +946,16 @@ pub fn import(rom_path: &Path, dir: &Path) -> Result<(), String> {
         let path = root.join(&item.file);
         let Ok(bytes) = std::fs::read(&path) else { continue };
         // Essai de toute la chaine : tout est reimporte sans avoir change, et la rom produite doit se reexporter a l'identique
-        if fingerprint(&bytes) != item.hash || std::env::var_os("NDSGS_MOD_TEST_ALL").is_some() {
+        // Une vidéo se réencode avec des pertes : hors de cet essai, qui veut une rom identique
+        let test_all = std::env::var_os("NDSGS_MOD_TEST_ALL").is_some() && !matches!(item.recipe, Recipe::Video);
+        if fingerprint(&bytes) != item.hash || test_all {
             let time = std::fs::metadata(&path).and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
             changed.push((time, item));
         }
     }
     changed.sort_by_key(|(time, _)| *time);
     // Les palettes d'abord : une image et sa palette modifiées ensemble vont avec la nouvelle palette
-    changed.sort_by_key(|(_, item)| !matches!(item.recipe, Recipe::Palette { .. }));
+    changed.sort_by_key(|(_, item)| !matches!(item.recipe, Recipe::Palette { .. } | Recipe::ZPalette));
     println!("{}", t!("{} changed files.", "{} fichiers modifies.", changed.len()));
     let mut report = Report::default();
     let mut game = Game::new(rom_path);
@@ -848,6 +1037,20 @@ mod tests {
         }
         println!("up {scale} parts {} far {far} worst {worst} box {:?} {:?}", built[0].parts.len(), built[0].min, built[0].max);
         assert!(worst < 0.01 * scale as f32 + 0.01, "ecart {worst}");
+    }
+
+    #[test]
+    fn a_pmb_keeps_the_name_of_its_palette() {
+        let stream = compress::lz10(&[1u8; 256]).unwrap();
+        let mut file = b" PMB".to_vec();
+        file.extend((stream.len() as u32).to_le_bytes());
+        file.extend(&stream);
+        file.extend(b"   pal0");
+        let out = bitmap_with(&file, &[2u8; 256]).unwrap();
+        assert!(out.ends_with(b"   pal0"));
+        let size = rd32(&out, 4);
+        assert_eq!(decompress_any(&out[8..8 + size]).unwrap(), [2u8; 256]);
+        assert_eq!(&out[8 + size..], b"   pal0");
     }
 
     #[test]

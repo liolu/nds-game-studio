@@ -761,6 +761,10 @@ impl<'a> Texel<'a> {
     pub fn new(format: u32, width: u32, height: u32, data: &'a [u8]) -> Self {
         Texel { format, width, height, data, opaque: false }
     }
+
+    pub fn pixels(&self) -> &'a [u8] {
+        self.data
+    }
 }
 
 /// Une texture `.bstga` (déjà décompressée) : format de texture de la DS, puis à 16 largeur et hauteur (u16), à 20
@@ -849,23 +853,33 @@ pub fn read_palette_tiles(file: &[u8]) -> Option<(Palette, Tiles)> {
     Some((raw_palette(&file[..size]), Tiles { bpp8, linear: false, pixels, width: None, height: None, attrs: Vec::new() }))
 }
 
-/// Une image de `.z` : voir `read_z_image`.
-fn read_z_sprite(file: &[u8]) -> Option<Rgba> {
+/// Le contenu décompressé d'un `.z` de Tom and Jerry, quand c'est une image : voir `read_z_shape`.
+pub enum ZShape<'a> {
+    /// Des tuiles, `width` pixels de large.
+    Sprite { width: u32, tiles: Tiles, palette: Palette, palette_at: usize },
+    /// Un fond : les entrées sont à `map_at`, le nombre de tuiles puis les tuiles à `count_at`.
+    Screen { screen: Screen, tiles: Tiles, palette: Palette, map_at: usize, count_at: usize, palette_at: usize },
+    Texture { texel: Texel<'a>, palette: Palette, palette_at: usize },
+}
+
+/// Une image de `.z` : voir `read_z_shape`.
+fn read_z_sprite(file: &[u8]) -> Option<ZShape<'_>> {
     let (width, height) = (u16_at(file, 4).ok()? as u32, u16_at(file, 6).ok()? as u32);
     let size = u32_at(file, 12).ok()? as usize;
     let data = file.get(16..16 + size)?;
     if width == 0 || height == 0 || width > 1024 || height > 1024 || width % 8 != 0 {
         return None;
     }
-    let palette = raw_palette(file.get(16 + size + 4..)?);
+    let palette_at = 16 + size + 4;
+    let palette = raw_palette(file.get(palette_at..)?);
     let bpp8 = size as u32 * 8 / (width * height) >= 8;
     let pixels = if bpp8 { data.to_vec() } else { data.iter().flat_map(|p| [p & 15, p >> 4]).collect() };
     let tiles = Tiles { bpp8, linear: false, pixels, width: None, height: None, attrs: Vec::new() };
-    Some(render_tiles(&tiles, &palette, 0, width / 8))
+    Some(ZShape::Sprite { width, tiles, palette, palette_at })
 }
 
-/// Le fond d'un `.z` : voir `read_z_image`.
-fn read_z_screen(file: &[u8]) -> Option<Rgba> {
+/// Le fond d'un `.z` : voir `read_z_shape`.
+fn read_z_screen(file: &[u8]) -> Option<ZShape<'_>> {
     const SIZE_AT: usize = 4 + 512;
     const MAP_AT: usize = SIZE_AT + 4;
     // Un fond de 256x256 ne montre que l'écran de la DS, 192 lignes
@@ -883,17 +897,17 @@ fn read_z_screen(file: &[u8]) -> Option<Rgba> {
     let palette = raw_palette(file.get(4..4 + 512)?);
     let entries = file.get(MAP_AT..tiles_at - 4)?.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
     let tiles = Tiles { bpp8: true, linear: false, pixels: file[tiles_at..].to_vec(), width: None, height: None, attrs: Vec::new() };
-    Some(render_screen(&Screen { width: width as u32 * 8, height: shown, entries }, &tiles, &palette))
+    Some(ZShape::Screen { screen: Screen { width: width as u32 * 8, height: shown, entries }, tiles, palette, map_at: MAP_AT, count_at: tiles_at - 4, palette_at: 4 })
 }
 
-/// Le contenu décompressé d'un `.z` de Tom and Jerry. Trois formes :
+/// Trois formes :
 /// - image : 0 ou 1, largeur et hauteur (u16), attributs, taille, pixels en tuiles, puis un u32 et sa palette ;
 /// - écran : 1, 256 couleurs, taille du fond (u32, comme le registre de la DS : 0 = 256x256, 1 = 512x256, 2 = 256x512,
 ///   3 = 512x512), entrées d'écran, nombre de tuiles (u32), tuiles de 64 octets ;
 /// - texture : format de texture de la DS (u8), 1 si la couleur 0 est transparente (u8), tailles (u8 : 8 << n), pixels,
 ///   puis 1 (u16), taille de la palette (u16), 0 (u32), palette.
 /// `None` pour le reste (polices, maillages, palettes seules...).
-pub fn read_z_image(file: &[u8]) -> Option<Rgba> {
+pub fn read_z_shape(file: &[u8]) -> Option<ZShape<'_>> {
     let first = u32_at(file, 0).ok()?;
     match first {
         0 => read_z_sprite(file),
@@ -908,14 +922,24 @@ pub fn read_z_image(file: &[u8]) -> Option<Rgba> {
             let bits = [0, 8, 2, 4, 8, 0, 8, 16][format as usize];
             let size = (width * height) as usize * bits / 8;
             let data = file.get(4..4 + size)?;
+            let palette_at = 4 + size + 8;
             let palette = if format == 7 {
                 Palette { colors: Vec::new() }
             } else {
                 let palette_size = u16_at(file, 4 + size + 2).ok()? as usize;
-                raw_palette(file.get(4 + size + 8..4 + size + 8 + palette_size)?)
+                raw_palette(file.get(palette_at..palette_at + palette_size)?)
             };
-            render_texel(&Texel { opaque: key == 0, ..Texel::new(format, width, height, data) }, &palette).ok()
+            Some(ZShape::Texture { texel: Texel { opaque: key == 0, ..Texel::new(format, width, height, data) }, palette, palette_at })
         }
+    }
+}
+
+/// L'image d'un `.z` décompressé : voir `read_z_shape`.
+pub fn read_z_image(file: &[u8]) -> Option<Rgba> {
+    match read_z_shape(file)? {
+        ZShape::Sprite { width, tiles, palette, .. } => Some(render_tiles(&tiles, &palette, 0, width / 8)),
+        ZShape::Screen { screen, tiles, palette, .. } => Some(render_screen(&screen, &tiles, &palette)),
+        ZShape::Texture { texel, palette, .. } => render_texel(&texel, &palette).ok(),
     }
 }
 

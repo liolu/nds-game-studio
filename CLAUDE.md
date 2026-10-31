@@ -23,6 +23,7 @@
   essai sans fenetre : `cargo run -p nds-nitro --example probe -- sortie.png <fichier> [palette/tuiles...]`.
 - `crates/video` (nds-video, LGPL 2.1+ : portage de FFmpeg et mobipeg, garde sa licence) : videos VX, MODS, Bink 1, image et son ; `engine/src/video.rs` (`VideoPlayer`) les joue dans une image Bevy ;
   essai sans fenetre : `cargo run -p nds-video --release --example vcheck -- <fichier> [dossier de sortie] [n images]`.
+  `vx::encode_like`, `mobiclip::encode_like` et `bink::encode_like` reecrivent une video (image et son) pour l'outil de mod ; aucun jeu a videos ne demarre en natif : la controler avec `crates/video/tools/vx_arm_check.py`, `mods_arm_check.py` ou `bink_arm_check.py`, qui passent le fichier dans le code ARM du jeu sous Unicorn. Le decodeur Rust seul ne suffit pas : le code du jeu lit l'ancienne image hors des blocs decodes et calcule sur 32 bits.
 - `app` (nds-game-studio) : le binaire. Plus de jeux de demo : les jeux sont les roms de l'utilisateur, joues par decompilation + runtime (pas d'emulation). Un module natif s'enregistre avec `add_ds_game` et le `game_code` de sa rom.
 - `native` : runtime nitro-pc (C 32 bits) et traduction ARM vers C, voir `native/README.md` ; `native_game` (moteur) genere le module chez le joueur depuis sa rom, le lance et affiche ses ecrans. Les modules contiennent le code du jeu : jamais commites ni publies. Apres un changement dans `native/`, augmenter `TOOLCHAIN` (`native/tools/export_recipes.py`).
 - `tools/` : common / installer / updater / launcher (repris de SpaceSpore).

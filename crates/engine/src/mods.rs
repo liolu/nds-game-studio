@@ -265,7 +265,7 @@ pub fn report_lines(code: &str) -> Vec<String> {
     let Some(report) = report(code) else { return Vec::new() };
     let mut lines = vec![t!("Last import: {} files changed, {} errors, {} notes", "Dernier import : {} fichiers changes, {} erreurs, {} remarques", report.applied.len(), report.errors.len(), report.warnings.len())];
     if !report.export_only.is_empty() {
-        lines.push(t!("{} files cannot go back into the game yet (videos, previews): first one: {}", "{} fichiers ne peuvent pas encore revenir dans le jeu (videos, apercus) : le premier : {}", report.export_only.len(), report.export_only[0]));
+        lines.push(t!("{} files cannot go back into the game yet (previews): first one: {}", "{} fichiers ne peuvent pas encore revenir dans le jeu (apercus) : le premier : {}", report.export_only.len(), report.export_only[0]));
     }
     lines.extend(report.errors.iter().chain(&report.warnings).take(SHOWN).cloned());
     lines

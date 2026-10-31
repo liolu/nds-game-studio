@@ -188,9 +188,99 @@ pub fn text_to_bmg(file: &[u8], text: &str) -> Result<(Vec<u8>, bool), String> {
     Ok((out, lossy))
 }
 
+/// Les textes d'un `GNAL`, chacun (position de sa taille, ses octets).
+fn gnal_texts(file: &[u8]) -> Option<Vec<(usize, &[u8])>> {
+    let mut at = 8;
+    (0..rd32(file, 4))
+        .map(|_| {
+            let size = file.get(at + 8..at + 12).map(|_| rd32(file, at + 8))?;
+            let text = file.get(at + 12..at + 12 + size)?;
+            let found = (at + 8, text);
+            at += 12 + size;
+            Some(found)
+        })
+        .collect()
+}
+
+/// Un fichier `GNAL` (nombre de textes, puis pour chacun deux nombres, sa taille, ses octets en Windows-1252), une ligne par texte. Ce
+/// qui ne s'écrit pas dans une ligne passe par `\\n`, `\\r`, `\\0`.
+pub fn gnal_to_text(file: &[u8]) -> Option<String> {
+    let mut out = String::new();
+    for (_, text) in gnal_texts(file)? {
+        for c in encoding_rs::WINDOWS_1252.decode_without_bom_handling(text).0.chars() {
+            match c {
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\0' => out.push_str("\\0"),
+                '\\' => out.push_str("\\\\"),
+                c => out.push(c),
+            }
+        }
+        out.push_str("\r\n");
+    }
+    Some(out)
+}
+
+/// Le fichier `GNAL` avec ces textes. Rend aussi `true` si des caractères n'existent pas en Windows-1252.
+pub fn text_to_gnal(file: &[u8], text: &str) -> Result<(Vec<u8>, bool), String> {
+    let texts = gnal_texts(file).ok_or("GNAL illisible")?;
+    let lines: Vec<&str> = text.split("\r\n").flat_map(|line| line.split('\n')).collect();
+    let lines = &lines[..lines.len().saturating_sub(usize::from(lines.last() == Some(&"")))];
+    if lines.len() != texts.len() {
+        return Err(format!("{} lignes, {} attendues : garder une ligne par texte", lines.len(), texts.len()));
+    }
+    let mut out = file[..8].to_vec();
+    let mut lossy = false;
+    let mut end = 8;
+    for (n, ((size_at, old), line)) in texts.iter().zip(lines).enumerate() {
+        let mut plain = String::new();
+        let mut chars = line.chars();
+        while let Some(c) = chars.next() {
+            plain.push(match c {
+                '\\' => match chars.next() {
+                    Some('n') => '\n',
+                    Some('r') => '\r',
+                    Some('0') => '\0',
+                    Some('\\') => '\\',
+                    other => return Err(format!("ligne {} : \\{} inconnu", n + 1, other.map_or(String::new(), |c| c.to_string()))),
+                },
+                c => c,
+            });
+        }
+        let (bytes, _, bad) = encoding_rs::WINDOWS_1252.encode(&plain);
+        lossy |= bad;
+        out.extend(&file[*size_at - 8..*size_at]);
+        out.extend((bytes.len() as u32).to_le_bytes());
+        out.extend(bytes.iter());
+        end = *size_at + 4 + old.len();
+    }
+    out.extend(&file[end..]);
+    Ok((out, lossy))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gnal_texts_can_change_size() {
+        let mut file = b"GNAL".to_vec();
+        file.extend(2u32.to_le_bytes());
+        for (id, text) in [(7u32, &b"a\xE9\\b\n\0"[..]), (8, b"")] {
+            file.extend(id.to_le_bytes());
+            file.extend(1u32.to_le_bytes());
+            file.extend((text.len() as u32).to_le_bytes());
+            file.extend(text);
+        }
+        file.extend([1, 2, 3, 4]);
+        let text = gnal_to_text(&file).unwrap();
+        assert_eq!(text, "a\u{E9}\\\\b\\n\\0\r\n\r\n");
+        assert_eq!(text_to_gnal(&file, &text).unwrap(), (file.clone(), false));
+        let (out, _) = text_to_gnal(&file, "plus long que l'autre\r\nb\r\n").unwrap();
+        assert_eq!(gnal_to_text(&out).unwrap(), "plus long que l'autre\r\nb\r\n");
+        assert_eq!(&out[out.len() - 4..], [1, 2, 3, 4], "ce qui suit les textes reste");
+        assert!(text_to_gnal(&file, "une seule\r\n").is_err());
+    }
 
     fn bmg(encoding: u8, messages: &[&[u8]]) -> Vec<u8> {
         let mut file = b"MESGbmg1".to_vec();

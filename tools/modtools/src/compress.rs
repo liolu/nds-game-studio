@@ -1,6 +1,8 @@
 //! Les compressions du BIOS de la DS, dans le sens inverse de `nds_nitro::decompress_any` : un fichier modifié
 //! reprend la compression de l'original, car le jeu appelle souvent la routine d'une seule sorte.
 
+use nds_nitro::decompress_any;
+
 const MIN_MATCH: usize = 3;
 const WINDOW: usize = 4096;
 /// Essais par position : au-delà, on gagne peu et les gros fichiers deviennent lents.
@@ -259,6 +261,111 @@ pub fn game_coder(data: &[u8]) -> Result<Vec<u8>, String> {
     Ok(bits.finish())
 }
 
+/// Un noeud de l'arbre de Huffman : une feuille (un symbole), ou deux enfants.
+enum HuffNode {
+    Leaf(u8),
+    Pair(usize, usize),
+}
+
+/// L'arbre de ces fréquences : (noeuds, racine). Il a toujours deux feuilles au moins, le BIOS n'en lit pas moins.
+fn huffman_tree(counts: &[usize]) -> (Vec<HuffNode>, usize) {
+    let mut nodes: Vec<HuffNode> = Vec::new();
+    let mut open: Vec<(usize, usize)> = Vec::new();
+    for (symbol, count) in counts.iter().enumerate() {
+        if *count > 0 {
+            nodes.push(HuffNode::Leaf(symbol as u8));
+            open.push((*count, nodes.len() - 1));
+        }
+    }
+    while open.len() < 2 {
+        let symbol = (0..counts.len()).find(|s| counts[*s] == 0).unwrap_or(0);
+        nodes.push(HuffNode::Leaf(symbol as u8));
+        open.push((0, nodes.len() - 1));
+    }
+    while open.len() > 1 {
+        // Du plus lourd au plus léger : les deux derniers se rejoignent
+        open.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+        let (Some(a), Some(b)) = (open.pop(), open.pop()) else { break };
+        nodes.push(HuffNode::Pair(a.1, b.1));
+        open.push((a.0 + b.0, nodes.len() - 1));
+    }
+    let root = nodes.len() - 1;
+    (nodes, root)
+}
+
+/// La table de l'arbre telle que le BIOS la lit : sa taille, la racine, puis les paires d'enfants. Un noeud dit où sont ses enfants par
+/// un décalage de 6 bits, soit 64 paires au plus devant lui : on range d'abord les plus petits sous-arbres, et un noeud dont le temps
+/// presse passe devant. `None` si l'arbre n'y tient pas.
+fn huffman_table(nodes: &[HuffNode], root: usize) -> Option<Vec<u8>> {
+    const REACH: usize = 64;
+    fn weight(nodes: &[HuffNode], node: usize, sizes: &mut Vec<usize>) -> usize {
+        if let HuffNode::Pair(a, b) = nodes[node] {
+            sizes[node] = 1 + weight(nodes, a, sizes) + weight(nodes, b, sizes);
+        }
+        sizes[node]
+    }
+    let mut sizes = vec![0; nodes.len()];
+    let pairs = weight(nodes, root, &mut sizes);
+    // Où poser les enfants de chaque noeud en attente : (noeud, position de son octet, dernière paire possible)
+    let mut pending = vec![(root, 1usize, REACH - 1)];
+    let mut table = vec![0u8; 2 + pairs * 2];
+    for slot in 0..pairs {
+        let late = pending.iter().enumerate().any(|(i, p)| p.2 < slot + i + 1);
+        let choice = if late { 0 } else { (0..pending.len()).min_by_key(|&i| sizes[pending[i].0])? };
+        let (node, at, last) = pending.remove(choice);
+        if slot > last {
+            return None;
+        }
+        let HuffNode::Pair(left, right) = nodes[node] else { return None };
+        let first = 2 + slot * 2;
+        table[at] = (slot + 1 - at / 2 - 1) as u8;
+        for (child, leaf_flag, place) in [(left, 0x80u8, first), (right, 0x40u8, first + 1)] {
+            match nodes[child] {
+                HuffNode::Leaf(symbol) => {
+                    table[place] = symbol;
+                    table[at] |= leaf_flag;
+                }
+                HuffNode::Pair(..) => pending.push((child, place, slot + REACH)),
+            }
+        }
+    }
+    table.resize(table.len().next_multiple_of(4), 0);
+    table[0] = (table.len() / 2 - 1) as u8;
+    Some(table)
+}
+
+/// Huffman du BIOS, sortes 0x24 (par 4 bits, le bas de l'octet d'abord) et 0x28 (par octets).
+pub fn huffman(data: &[u8], kind: u8) -> Result<Vec<u8>, String> {
+    let symbols: Vec<u8> = if kind == 0x24 { data.iter().flat_map(|b| [b & 15, b >> 4]).collect() } else { data.to_vec() };
+    let mut counts = vec![0usize; if kind == 0x24 { 16 } else { 256 }];
+    for symbol in &symbols {
+        counts[*symbol as usize] += 1;
+    }
+    let (nodes, root) = huffman_tree(&counts);
+    let table = huffman_table(&nodes, root).ok_or("arbre de Huffman trop large pour la DS")?;
+    let mut codes = vec![Vec::new(); counts.len()];
+    let mut walk = vec![(root, Vec::new())];
+    while let Some((node, code)) = walk.pop() {
+        match nodes[node] {
+            HuffNode::Leaf(symbol) => codes[symbol as usize] = code,
+            HuffNode::Pair(left, right) => {
+                let with = |bit: u32| code.iter().copied().chain([bit]).collect::<Vec<u32>>();
+                walk.push((left, with(0)));
+                walk.push((right, with(1)));
+            }
+        }
+    }
+    let mut out = header(kind, data.len())?;
+    out.extend(table);
+    let mut bits = BitWriter { out, word: 0, used: 0 };
+    for symbol in symbols {
+        for bit in &codes[symbol as usize] {
+            bits.put(*bit, 1);
+        }
+    }
+    Ok(bits.finish())
+}
+
 /// `new` compressé comme l'est `original`. Un fichier qui n'était pas compressé reste tel quel.
 pub fn like(original: &[u8], new: &[u8]) -> Result<Vec<u8>, String> {
     if nds_nitro::unpack(original.to_vec()) == original {
@@ -279,14 +386,73 @@ pub fn same_method(original: &[u8], new: &[u8]) -> Result<Vec<u8>, String> {
             pad4(&mut out);
             Ok(out)
         }
-        other => Err(format!("compression {other:#x} (Huffman) : reecriture pas encore geree")),
+        0x24 | 0x28 => huffman(new, original[0]),
+        other => Err(format!("compression {other:#x} inconnue")),
     }
+}
+
+/// `new` repassé dans toutes les compressions de `original`, de la plus profonde à la première, comme `fully_unpacked` les retire.
+pub fn same_layers(original: &[u8], new: &[u8]) -> Result<Vec<u8>, String> {
+    fn pack(original: &[u8], new: &[u8], left: usize) -> Result<Vec<u8>, String> {
+        match decompress_any(original).filter(|_| left > 0) {
+            Some(inner) => same_method(original, &pack(&inner, new, left - 1)?),
+            None => Ok(new.to_vec()),
+        }
+    }
+    pack(original, new, crate::asset_scan::MAX_LAYERS)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nds_nitro::decompress_any;
+
+    #[test]
+    fn huffman_comes_back_identical() {
+        let random = |n: usize, seed: u32| -> Vec<u8> { (0..n as u32).map(|i| (i.wrapping_add(seed).wrapping_mul(2654435761).rotate_left(13).wrapping_mul(40503) >> 20) as u8).collect() };
+        // Toutes les feuilles à la même profondeur (l'arbre le plus large), une pente (le plus profond), peu de symboles, un seul
+        let flat: Vec<u8> = (0..=255u8).cycle().take(4096).collect();
+        let steep: Vec<u8> = (0..24u32).flat_map(|s| vec![s as u8; 1usize << s.min(14)]).collect();
+        let cases = [sample(), flat, steep, random(5000, 1), random(300, 7), b"abababab".to_vec(), vec![42; 100], vec![1]];
+        for data in cases {
+            for kind in [0x24, 0x28] {
+                let packed = huffman(&data, kind).unwrap();
+                assert_eq!(packed[0], kind);
+                assert_eq!(packed.len() % 4, 0);
+                assert_eq!((packed[4] as usize + 1) * 2 % 4, 0, "les bits commencent sur un mot");
+                assert_eq!(decompress_any(&packed).as_deref(), Some(&data[..]), "sorte {kind:#x}, {} octets", data.len());
+            }
+        }
+    }
+
+    #[test]
+    fn huffman_fits_any_tree_shape() {
+        // Des fréquences très différentes d'un essai à l'autre : les enfants doivent toujours tenir dans les 6 bits
+        let mut seed = 12345u32;
+        for _ in 0..300 {
+            let mut counts = vec![0usize; 256];
+            for count in counts.iter_mut() {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                let shift = seed >> 28;
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                *count = ((seed >> 16) as usize >> shift) + 1;
+            }
+            let (nodes, root) = huffman_tree(&counts);
+            assert!(huffman_table(&nodes, root).is_some());
+        }
+    }
+
+    #[test]
+    fn layers_are_put_back_in_the_same_order() {
+        let data = sample();
+        let inner = lz10(&data).unwrap();
+        let outer = huffman(&inner, 0x28).unwrap();
+        let changed = [&data[..100], &[9, 9, 9, 9], &data[104..]].concat();
+        let packed = same_layers(&outer, &changed).unwrap();
+        assert_eq!(packed[0], 0x28);
+        let middle = decompress_any(&packed).unwrap();
+        assert_eq!(middle[0], 0x10);
+        assert_eq!(decompress_any(&middle).unwrap(), changed);
+    }
 
     fn sample() -> Vec<u8> {
         let mut data: Vec<u8> = b"RGCN motif motif motif ".iter().copied().cycle().take(5000).collect();

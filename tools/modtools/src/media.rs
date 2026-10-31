@@ -1,12 +1,12 @@
-//! FFmpeg, livré à côté de l'outil : MP3, MP4 et OGV, et lecture de tout son à réimporter. Sans lui, PNG, OBJ, WAV et TXT
-//! marchent quand même.
+//! FFmpeg, livré à côté de l'outil : MP3, MP4 et OGV, et lecture de tout son et de toute vidéo à réimporter. Sans lui, PNG, OBJ, WAV
+//! et TXT marchent quand même.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::OnceLock;
 
-use nds_video::Video;
+use nds_video::{bink, mobiclip, vx, Video};
 
 use crate::sound;
 
@@ -145,12 +145,106 @@ pub fn video_to_files(bytes: Vec<u8>, base: &Path) -> Result<Vec<PathBuf>, Strin
         made.push(out);
         Ok(())
     };
-    let result = encode("mp4", &["-c:v", "copy"], &["-c:a", "aac", "-shortest"]);
+    let result = encode("mp4", &["-c:v", "copy"], &["-c:a", "aac"]);
     if result.is_ok() && has_encoder("libtheora") {
-        let audio: &[&str] = if has_encoder("libvorbis") { &["-c:a", "libvorbis", "-shortest"] } else { &["-an"] };
+        let audio: &[&str] = if has_encoder("libvorbis") { &["-c:a", "libvorbis"] } else { &["-an"] };
         let _ = encode("ogv", &["-c:v", "libtheora", "-q:v", "7"], audio);
     }
     let _ = std::fs::remove_file(&silent);
     let _ = std::fs::remove_file(&wav_path);
     result.map(|_| made)
+}
+
+/// Les images d'une vidéo quelconque, une à une, ramenées à cette taille et cette cadence.
+struct Images {
+    child: Child,
+    stdout: ChildStdout,
+    size: usize,
+    done: bool,
+}
+
+impl Iterator for Images {
+    type Item = Result<Vec<u8>, String>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        let mut image = vec![0; self.size];
+        if self.stdout.read_exact(&mut image).is_ok() {
+            return Some(Ok(image));
+        }
+        self.done = true;
+        match self.child.wait() {
+            Ok(status) if !status.success() => Some(Err(format!("FFmpeg : {status}"))),
+            Err(e) => Some(Err(e.to_string())),
+            Ok(_) => None,
+        }
+    }
+}
+
+impl Drop for Images {
+    fn drop(&mut self) {
+        // Une erreur à l'écriture laisse FFmpeg en plein travail
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn read_images(path: &Path, width: u32, height: u32, fps: f32) -> Result<Images, String> {
+    let mut command = command().ok_or("FFmpeg absent")?;
+    let (size, fps) = (format!("{width}x{height}"), format!("{}", fps.max(1.0)));
+    command.arg("-i").arg(path).args(["-an", "-s", &size, "-r", &fps, "-pix_fmt", "rgba", "-f", "rawvideo", "-"]);
+    let mut child = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|e| e.to_string())?;
+    let stdout = child.stdout.take().ok_or("FFmpeg sans sortie")?;
+    Ok(Images { child, stdout, size: width as usize * height as usize * 4, done: false })
+}
+
+/// Le même son, à la compression du MP4 et au décalage près ? On compare chaque seconde : changer un passage suffit à réécrire le son.
+fn same_sound(old: &[i16], new: &[i16], channels: usize, rate: usize) -> bool {
+    const PIECE: usize = 4096;
+    const QUIET: f64 = 300.0 * 300.0;
+    let mono = |sound: &[i16]| -> Vec<f32> { sound.chunks_exact(channels.max(1)).map(|s| s.iter().map(|v| *v as f32).sum::<f32>() / channels.max(1) as f32).collect() };
+    let (old, new) = (mono(old), mono(new));
+    if old.len().abs_diff(new.len()) > rate / 4 {
+        return false;
+    }
+    let energy = |piece: &[f32]| piece.iter().map(|v| (*v as f64).powi(2)).sum::<f64>() / piece.len().max(1) as f64;
+    let correlation = |a: &[f32], b: &[f32]| {
+        let cross: f64 = a.iter().zip(b).map(|(x, y)| *x as f64 * *y as f64).sum();
+        cross / (a.iter().map(|x| (*x as f64).powi(2)).sum::<f64>() * b.iter().map(|y| (*y as f64).powi(2)).sum::<f64>()).sqrt().max(1.0)
+    };
+    let starts: Vec<usize> = (0..old.len().saturating_sub(PIECE)).step_by(rate.max(PIECE)).collect();
+    // Le MP4 décale le son de quelques millisecondes : le décalage se lit là où le son est le plus fort
+    let Some(&loudest) = starts.iter().max_by(|a, b| energy(&old[**a..**a + PIECE]).total_cmp(&energy(&old[**b..**b + PIECE]))) else { return old.len() == new.len() };
+    let shifted = |at: usize, lag: isize| new.get((at as isize + lag).max(0) as usize..((at as isize + lag).max(0) as usize + PIECE).min(new.len())).unwrap_or(&[]);
+    let lag = (-2048isize..=2048).max_by(|a, b| correlation(&old[loudest..loudest + PIECE], shifted(loudest, *a)).total_cmp(&correlation(&old[loudest..loudest + PIECE], shifted(loudest, *b)))).unwrap_or(0);
+    starts.iter().all(|&at| {
+        let (before, after) = (&old[at..at + PIECE], shifted(at, lag));
+        if energy(before) < QUIET {
+            return energy(after) < QUIET * 16.0;
+        }
+        // Baisser le volume ne change pas la corrélation : la force doit rester aussi la même, à 2 dB près
+        let ratio = energy(after) / energy(before).max(1.0);
+        after.len() == PIECE && correlation(before, after) > 0.8 && (0.63..1.6).contains(&ratio)
+    })
+}
+
+/// Une vidéo modifiée (tout ce que FFmpeg lit), au format du jeu : VX, MODS ou Bink, selon l'original. Le son de l'original reste s'il n'a pas changé.
+pub fn video_to_game(original: &[u8], path: &Path) -> Result<(Vec<u8>, vx::Written), String> {
+    let mut video = Video::open(original.to_vec())?;
+    let info = video.info().clone();
+    let mut old = Vec::new();
+    while video.advance(&mut old) {}
+    let old: Vec<i16> = old.iter().map(|s| (s.clamp(-1.0, 1.0) * 32767.0) as i16).collect();
+    // Un fichier sans son garde celui de l'original
+    let new = if info.channels > 0 { read_sound(path, info.sample_rate, info.channels).ok().filter(|s| !s.is_empty()) } else { None };
+    let sound = new.filter(|new| !same_sound(&old, new, info.channels as usize, info.sample_rate as usize));
+    let images = read_images(path, info.width, info.height, info.fps)?;
+    match original.get(..3) {
+        Some(b"VXD") => vx::encode_like(original, images, sound.as_deref()),
+        Some(b"MOD") => mobiclip::encode_like(original, images, sound.as_deref()),
+        Some(b"BIK") => bink::encode_like(original, images, sound.as_deref()),
+        _ => Err("ce format de video ne peut pas revenir dans le jeu".into()),
+    }
 }

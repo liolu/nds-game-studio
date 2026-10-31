@@ -127,8 +127,9 @@ pub(crate) fn huffman(src: &[u8], size: usize) -> Option<Vec<u8>> {
             }
         }
     }
+    // Trop court pour ce qu'il annonce : pas du Huffman, une palette peut commencer par cet octet
     out.truncate(size);
-    Some(out)
+    (out.len() == size).then_some(out)
 }
 
 /// Bits du codeur du jeu : des mots de 32 bits, le bit de poids fort d'abord.
