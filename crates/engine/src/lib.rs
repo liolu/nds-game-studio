@@ -24,6 +24,7 @@ pub mod launcher;
 pub mod library;
 pub mod link;
 pub mod logfile;
+pub mod mod_packs;
 pub mod mods;
 pub mod native_game;
 pub mod options;

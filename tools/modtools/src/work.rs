@@ -13,6 +13,8 @@ use crate::i18n::t;
 use crate::{compress, images, media, model, sound, text};
 
 const FILES: &str = "fichiers";
+const PACKS: &str = "paquets";
+const PACK_STATE: &str = "paquets.json";
 const DROP_INS: &str = "remplacements";
 const MANIFEST: &str = "manifest.json";
 pub const MODDED_ROM: &str = "jeu-modifie.nds";
@@ -67,6 +69,9 @@ struct Item {
 struct Manifest {
     code: String,
     items: Vec<Item>,
+    /// Tout le jeu a été exporté, et pas un seul fichier à la demande.
+    #[serde(default)]
+    complete: bool,
 }
 
 /// Ce que le launcher montre après un import.
@@ -142,6 +147,20 @@ fn png_bytes(image: &Rgba) -> Result<Vec<u8>, String> {
 fn read_png(path: &Path) -> Result<Rgba, String> {
     let image = image::open(path).map_err(|e| e.to_string())?.into_rgba8();
     Ok(Rgba { width: image.width(), height: image.height(), data: image.into_raw() })
+}
+
+/// Une image à la taille que le jeu attend : une autre taille est mise à l'échelle, et c'est signalé.
+fn read_png_sized(path: &Path, width: u32, height: u32, file: &str, warnings: &mut Vec<String>) -> Result<Rgba, String> {
+    let picture = read_png(path)?;
+    if picture.width == width && picture.height == height {
+        return Ok(picture);
+    }
+    warnings.push(t!("{file}: image of {}x{} resized to {width}x{height}, the size the game expects", "{file} : image de {}x{} mise a {width}x{height}, la taille que le jeu attend", picture.width, picture.height));
+    let source = image::RgbaImage::from_raw(picture.width, picture.height, picture.data).ok_or("image illisible")?;
+    // En réduisant, un bon filtre ; en agrandissant, des pixels nets
+    let filter = if width < source.width() { image::imageops::FilterType::Lanczos3 } else { image::imageops::FilterType::Nearest };
+    let resized = image::imageops::resize(&source, width, height, filter);
+    Ok(Rgba { width, height, data: resized.into_raw() })
 }
 
 /// Le contenu de la rom vu par les recettes : les fichiers d'origine, et ceux qui ont déjà changé pendant cet import.
@@ -546,8 +565,8 @@ fn read_sound_file(bytes: &[u8]) -> Result<sadl::Sound, String> {
 /// Le fichier d'explications, dans la langue du launcher.
 fn readme() -> String {
     t!(
-        "MODDING THIS GAME\r\n\r\nEdit the files in the '{FILES}' folder, then press 'Apply my changes' in the launcher.\r\nYour rom is never modified: the launcher builds a copy, and one button brings the originals back.\r\n\r\nImages .png        GIMP: keep the size. Colors come from the game's palette; edit the .palette.png file for new colors.\r\nFonts .png         GIMP: keep the size. Only the transparency of each pixel counts, not its color.\r\nModels .obj        Blender, Godot: moving vertices and UVs works; keep the same triangles and the part_NNN names.\r\nSounds .wav .mp3   Audacity: any length for music and sound effects; sadl and ADX keep their length.\r\nTexts .txt         one line per message; keep the {{1A:...}} commands and the \\n.\r\nVideos .mp4 .ogv   they come back: same size and speed are restored, the size the game allows is kept, images may lose detail.\r\n.apercu files      to watch and reuse: edit the file they come from instead.\r\nOther files        the game's own format: they come back as they are.\r\n\r\nExpert: a file in the game's format placed in '{DROP_INS}' at its path in the rom is used as it is.\r\n",
-        "MODDER CE JEU\r\n\r\nModifiez les fichiers du dossier '{FILES}', puis cliquez sur 'Appliquer mes changements' dans le launcher.\r\nVotre rom n'est jamais modifiee : le launcher fabrique une copie, et un bouton remet les originaux.\r\n\r\nImages .png        GIMP : garder la taille. Les couleurs viennent de la palette du jeu ; modifier le fichier .palette.png pour de nouvelles couleurs.\r\nPolices .png       GIMP : garder la taille. Seule la transparence de chaque pixel compte, pas sa couleur.\r\nModeles .obj       Blender, Godot : bouger les sommets et les UV marche ; garder les memes triangles et les noms part_NNN.\r\nSons .wav .mp3     Audacity : toute duree pour la musique et les effets ; sadl et ADX gardent leur duree.\r\nTextes .txt        une ligne par message ; garder les commandes {{1A:...}} et les \\n.\r\nVideos .mp4 .ogv   elles reviennent : taille et cadence remises, taille permise par le jeu respectee, l'image peut perdre des details.\r\nFichiers .apercu   pour regarder et reutiliser : modifier plutot le fichier dont ils viennent.\r\nAutres fichiers    le format du jeu : ils reviennent tels quels.\r\n\r\nExpert : un fichier au format du jeu pose dans '{DROP_INS}' a son chemin dans la rom est utilise tel quel.\r\n"
+        "MODDING THIS GAME\r\n\r\nEdit the files in the '{FILES}' folder, then press 'Apply my changes' in the launcher.\r\nYour rom is never modified: the launcher builds a copy, and one button brings the originals back.\r\n\r\nImages .png        GIMP: any size, brought back to the game's size. Colors are the game's; a very different texture gets its own when nothing shares them. Edit the .palette.png file for others.\r\nFonts .png         GIMP: keep the size. Only the transparency of each pixel counts, not its color.\r\nModels .obj        Blender, Godot: moving vertices and UVs works; keep the same triangles and the part_NNN names.\r\nSounds .wav .mp3   Audacity: any length for music and sound effects; sadl and ADX keep their length.\r\nTexts .txt         one line per message; keep the {{1A:...}} commands and the \\n.\r\nVideos .mp4 .ogv   they come back: same size and speed are restored, the size the game allows is kept, images may lose detail.\r\n.apercu files      to watch and reuse: edit the file they come from instead.\r\nOther files        the game's own format: they come back as they are.\r\n\r\nSharing: zip your changed files with the same paths as in '{FILES}'. Anyone can add the .zip or your repository's link in the Modding tab. A file nds-mod.json gives its name: {{\"format\": 1, \"id\": \"my-mod\", \"name\": \"My mod\", \"version\": \"1.0\", \"author\": \"...\", \"games\": [\"AL7E\"]}}.\r\n\r\nYou can also put an exported file in '{DROP_INS}' at the same path as in '{FILES}'. Expert: a file in the game's format placed there at its path in the rom is used as it is.\r\n",
+        "MODDER CE JEU\r\n\r\nModifiez les fichiers du dossier '{FILES}', puis cliquez sur 'Appliquer mes changements' dans le launcher.\r\nVotre rom n'est jamais modifiee : le launcher fabrique une copie, et un bouton remet les originaux.\r\n\r\nImages .png        GIMP : toute taille, ramenee a celle du jeu. Les couleurs sont celles du jeu ; une texture tres differente recoit les siennes si rien ne les partage. Sinon, modifier le fichier .palette.png.\r\nPolices .png       GIMP : garder la taille. Seule la transparence de chaque pixel compte, pas sa couleur.\r\nModeles .obj       Blender, Godot : bouger les sommets et les UV marche ; garder les memes triangles et les noms part_NNN.\r\nSons .wav .mp3     Audacity : toute duree pour la musique et les effets ; sadl et ADX gardent leur duree.\r\nTextes .txt        une ligne par message ; garder les commandes {{1A:...}} et les \\n.\r\nVideos .mp4 .ogv   elles reviennent : taille et cadence remises, taille permise par le jeu respectee, l'image peut perdre des details.\r\nFichiers .apercu   pour regarder et reutiliser : modifier plutot le fichier dont ils viennent.\r\nAutres fichiers    le format du jeu : ils reviennent tels quels.\r\n\r\nPartager : zippez vos fichiers modifies avec les memes chemins que dans '{FILES}'. N'importe qui peut ajouter le .zip ou le lien de votre depot dans l'onglet Moding. Un fichier nds-mod.json donne son nom : {{\"format\": 1, \"id\": \"mon-mod\", \"name\": \"Mon mod\", \"version\": \"1.0\", \"author\": \"...\", \"games\": [\"AL7E\"]}}.\r\n\r\nVous pouvez aussi mettre un fichier exporte dans '{DROP_INS}', au meme chemin que dans '{FILES}'. Expert : un fichier au format du jeu pose la a son chemin dans la rom est utilise tel quel.\r\n"
     )
 }
 
@@ -593,7 +612,7 @@ pub fn export(rom: &Path, dir: &Path, only: Option<&str>) -> Result<(), String> 
     let seen: HashSet<String> = writer.items.iter().map(|i| i.file.clone()).collect();
     let mut items = writer.items;
     items.extend(old.items.iter().filter(|i| !seen.contains(&i.file)).cloned());
-    let manifest = Manifest { code, items };
+    let manifest = Manifest { code, items, complete: old.complete || only.is_none() };
     write_atomic(&dir.join(MANIFEST), &serde_json::to_vec(&manifest).map_err(|e| e.to_string())?)?;
     println!("{}", t!("Done: {} files in {FILES}, {} of yours kept, {failed} kept in the game's format.", "Termine : {} fichiers dans {FILES}, {} des votres gardes, {failed} gardes au format du jeu.", manifest.items.len(), writer.kept));
     Ok(())
@@ -603,7 +622,7 @@ pub fn export(rom: &Path, dir: &Path, only: Option<&str>) -> Result<(), String> 
 //  Import
 // --------------------------------------------------------------------------------------------
 
-fn apply(game: &mut Game, item: &Item, path: &Path, warnings: &mut Vec<String>) -> Result<(), String> {
+fn apply(game: &mut Game, item: &Item, path: &Path, shared: &HashMap<(String, Option<usize>), usize>, warnings: &mut Vec<String>) -> Result<(), String> {
     let source = game.at(&item.source)?;
     match &item.recipe {
         Recipe::Raw => game.edited.insert(source, std::fs::read(path).map_err(|e| e.to_string())?).map(|_| ()).unwrap_or(()),
@@ -616,7 +635,9 @@ fn apply(game: &mut Game, item: &Item, path: &Path, warnings: &mut Vec<String>) 
             let probe = palette.as_deref().map(|p| game.palette(Some(p), None)).transpose()?;
             let mut tiles = game.tiles(&item.source, probe.as_ref())?;
             let palette = game.palette(palette.as_deref(), Some(&tiles))?;
-            images::sheet_from_image(&mut tiles, &palette, *bank, *width, &read_png(path)?)?;
+            let rows = (tiles.count() as u32).div_ceil((*width).max(1)).max(1);
+            let picture = read_png_sized(path, *width * 8, rows * 8, &item.file, warnings)?;
+            images::sheet_from_image(&mut tiles, &palette, *bank, *width, &picture)?;
             game.store_tiles(&item.source, &tiles)?;
         }
         Recipe::Screen { tiles: tiles_file, palette } => {
@@ -625,7 +646,8 @@ fn apply(game: &mut Game, item: &Item, path: &Path, warnings: &mut Vec<String>) 
             let palette = game.palette(palette.as_deref(), Some(&tiles))?;
             let bytes = game.plain(source)?;
             let mut screen = if game.entries[source].kind == Kind::RawScreen { g2d::raw_screen(&bytes) } else { g2d::read_screen(&bytes).map_err(|e| e.to_string())? };
-            let added = images::screen_from_image(&mut screen, &mut tiles, &palette, &read_png(path)?)?;
+            let picture = read_png_sized(path, screen.width, screen.height, &item.file, warnings)?;
+            let added = images::screen_from_image(&mut screen, &mut tiles, &palette, &picture)?;
             if added > 0 {
                 warnings.push(t!("{}: {added} new tiles: check in game that they fit in video memory", "{} : {added} nouvelles tuiles : verifier en jeu qu'elles tiennent en memoire video", item.file));
             }
@@ -637,14 +659,26 @@ fn apply(game: &mut Game, item: &Item, path: &Path, warnings: &mut Vec<String>) 
             let cells = g2d::read_cells(&game.current(source)?).map_err(|e| e.to_string())?;
             let mut tiles = game.tiles(tiles_file, None)?;
             let palette = game.palette(palette.as_deref(), Some(&tiles))?;
-            images::cell_from_image(&cells, *index, &mut tiles, &palette, &read_png(path)?)?;
+            let shown = g2d::render_cell(&cells, *index, &tiles, &palette);
+            let picture = read_png_sized(path, shown.width, shown.height, &item.file, warnings)?;
+            images::cell_from_image(&cells, *index, &mut tiles, &palette, &picture)?;
             game.store_tiles(tiles_file, &tiles)?;
         }
         Recipe::Texture { index, palette } => {
+            // Sa palette n'est à elle que si aucune autre texture du fichier ne s'en sert, et si son fichier ne sert pas de textures à un modèle ailleurs
+            let own_palette = shared.get(&(item.source.clone(), *palette)).is_none_or(|n| *n <= 1) && palette.is_some();
             let bytes = game.current(source)?;
             let cont = model3d::read(&bytes).map_err(|e| e.to_string())?;
             let texture = cont.textures.get(*index).ok_or("texture absente")?;
-            let out = images::write_texture(&bytes, texture, palette.and_then(|p| cont.palettes.get(p)), &read_png(path)?)?;
+            let (width, height) = texture.params.dim();
+            let picture = read_png_sized(path, width, height, &item.file, warnings)?;
+            let chosen = palette.and_then(|p| cont.palettes.get(p));
+            // Jusqu'à la palette suivante, ou la fin du bloc
+            let room = chosen.map_or(0, |own| cont.palettes.iter().map(|p| p.off as usize).filter(|off| *off > own.off as usize).min().unwrap_or(own.pal_block.len()).saturating_sub(own.off as usize));
+            let (out, approximate) = images::write_texture(&bytes, texture, chosen, room, &picture, own_palette)?;
+            if approximate {
+                warnings.push(t!("{}: this texture shares its colors or is compressed: the closest colors of the game were used", "{} : cette texture partage ses couleurs ou est compressee : les couleurs les plus proches du jeu ont ete prises", item.file));
+            }
             game.edited.insert(source, out);
         }
         Recipe::Model { index, textures } => {
@@ -696,7 +730,8 @@ fn apply(game: &mut Game, item: &Item, path: &Path, warnings: &mut Vec<String>) 
             let bytes = game.current(source)?;
             let texel = g2d::read_texel(&bytes).map_err(|e| e.to_string())?;
             let colors = game.palette(palette.as_deref(), None)?;
-            let pixels = images::texel_from_image(&texel, &colors, &read_png(path)?)?;
+            let picture = read_png_sized(path, texel.width, texel.height, &item.file, warnings)?;
+            let pixels = images::texel_from_image(&texel, &colors, &picture)?;
             let mut out = bytes.clone();
             let size = rd32(&bytes, 4).min(pixels.len());
             out[8..8 + size].copy_from_slice(&pixels[..size]);
@@ -705,7 +740,8 @@ fn apply(game: &mut Game, item: &Item, path: &Path, warnings: &mut Vec<String>) 
         Recipe::BsTexture => {
             let bytes = game.plain(source)?;
             let (texel, palette) = g2d::read_bstga(&bytes).map_err(|e| e.to_string())?;
-            let pixels = images::texel_from_image(&texel, &palette, &read_png(path)?)?;
+            let picture = read_png_sized(path, texel.width, texel.height, &item.file, warnings)?;
+            let pixels = images::texel_from_image(&texel, &palette, &picture)?;
             let (at, size) = (rd32(&bytes, 20), rd32(&bytes, 24).min(pixels.len()));
             let mut out = bytes.clone();
             out[at..at + size].copy_from_slice(&pixels[..size]);
@@ -714,7 +750,9 @@ fn apply(game: &mut Game, item: &Item, path: &Path, warnings: &mut Vec<String>) 
         Recipe::PaletteTiles { width } => {
             let bytes = game.plain(source)?;
             let (palette, mut tiles) = g2d::read_palette_tiles(&bytes).ok_or("planche illisible")?;
-            images::sheet_from_image(&mut tiles, &palette, 0, *width, &read_png(path)?)?;
+            let rows = (tiles.count() as u32).div_ceil((*width).max(1)).max(1);
+            let picture = read_png_sized(path, *width * 8, rows * 8, &item.file, warnings)?;
+            images::sheet_from_image(&mut tiles, &palette, 0, *width, &picture)?;
             let header = if tiles.bpp8 { 512 } else { 32 };
             let mut out = bytes[..header].to_vec();
             out.extend(images::write_tiles(b"", &tiles)?);
@@ -933,7 +971,39 @@ fn drop_ins(root: &Path, at: &Path, out: &mut BTreeMap<String, Vec<u8>>) -> Resu
     Ok(())
 }
 
+/// Le fichier exporté que désigne un chemin venu d'un mod : le même, ou le même sous un dossier en plus (une archive a souvent un dossier autour).
+fn exported_path<'a>(path: &'a str, exported: &HashSet<&str>) -> Option<&'a str> {
+    let mut rest = path;
+    loop {
+        if exported.contains(rest) {
+            return Some(rest);
+        }
+        rest = rest.split_once('/')?.1;
+    }
+}
+
+/// Les dossiers des mods actifs, dans l'ordre : le dernier passe avant les autres.
+fn enabled_packs(dir: &Path) -> Vec<PathBuf> {
+    #[derive(Deserialize)]
+    struct Entry {
+        id: String,
+        enabled: bool,
+    }
+    #[derive(Deserialize)]
+    struct State {
+        packs: Vec<Entry>,
+    }
+    let Some(state) = std::fs::read(dir.join(PACK_STATE)).ok().and_then(|bytes| serde_json::from_slice::<State>(&bytes).ok()) else { return Vec::new() };
+    state.packs.into_iter().filter(|p| p.enabled).map(|p| dir.join(PACKS).join(p.id)).filter(|p| p.is_dir()).collect()
+}
+
 pub fn import(rom_path: &Path, dir: &Path) -> Result<(), String> {
+    let packs = enabled_packs(dir);
+    // Un mod donne ses fichiers par leur chemin à l'export : il faut donc l'export entier
+    if !packs.is_empty() && !load_manifest(dir).complete {
+        println!("{}", t!("First export of the game, to place the mods...", "Premier export du jeu, pour placer les mods..."));
+        export(rom_path, dir, None)?;
+    }
     let manifest = load_manifest(dir);
     let rom = std::fs::read(rom_path).map_err(|e| e.to_string())?;
     if !manifest.code.is_empty() && manifest.code != game_code(&rom) {
@@ -941,33 +1011,70 @@ pub fn import(rom_path: &Path, dir: &Path) -> Result<(), String> {
     }
     let root = dir.join(FILES);
     // Du plus ancien au plus récent : d'un WAV et d'un MP3 du même son, le dernier modifié gagne
-    let mut changed: Vec<(std::time::SystemTime, &Item)> = Vec::new();
+    let exported: HashSet<&str> = manifest.items.iter().map(|i| i.file.as_str()).collect();
+    // Ce que les mods remplacent parmi les fichiers exportés, et le reste : au format du jeu, ou inconnu
+    let mut from_packs: HashMap<String, PathBuf> = HashMap::new();
+    let mut pack_natives = BTreeMap::new();
+    let mut report = Report::default();
+    for pack in &packs {
+        let name = pack.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned());
+        for sub in [FILES, DROP_INS] {
+            let folder = pack.join(sub);
+            let mut listed = BTreeMap::new();
+            drop_ins(&folder, &folder, &mut listed)?;
+            for (path, bytes) in listed {
+                match exported_path(&path, &exported) {
+                    Some(file) => {
+                        from_packs.insert(file.to_string(), folder.join(&path));
+                    }
+                    None if sub == DROP_INS => {
+                        pack_natives.insert(path, bytes);
+                    }
+                    None => report.errors.push(t!("Mod {name}: {path} matches no file of this game", "Mod {name} : {path} ne correspond a aucun fichier de ce jeu")),
+                }
+            }
+        }
+    }
+    let mut changed: Vec<(std::time::SystemTime, &Item, PathBuf)> = Vec::new();
+    let drops = dir.join(DROP_INS);
     for item in &manifest.items {
-        let path = root.join(&item.file);
+        // Un fichier exporté posé dans `remplacements`, au même chemin, passe avant celui de `fichiers`
+        let dropped = drops.join(&item.file);
+        let path = if dropped.is_file() { dropped } else { root.join(&item.file) };
+        // Vos changements passent avant les mods, et le dernier mod avant les autres
+        let personal = std::fs::read(&path).is_ok_and(|bytes| fingerprint(&bytes) != item.hash);
+        let path = match from_packs.get(&item.file).filter(|_| !personal) {
+            Some(pack_file) => pack_file.clone(),
+            None => path,
+        };
         let Ok(bytes) = std::fs::read(&path) else { continue };
         // Essai de toute la chaine : tout est reimporte sans avoir change, et la rom produite doit se reexporter a l'identique
         // Une vidéo se réencode avec des pertes : hors de cet essai, qui veut une rom identique
         let test_all = std::env::var_os("NDSGS_MOD_TEST_ALL").is_some() && !matches!(item.recipe, Recipe::Video);
         if fingerprint(&bytes) != item.hash || test_all {
             let time = std::fs::metadata(&path).and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
-            changed.push((time, item));
+            changed.push((time, item, path));
         }
     }
-    changed.sort_by_key(|(time, _)| *time);
+    changed.sort_by_key(|(time, _, _)| *time);
     // Les palettes d'abord : une image et sa palette modifiées ensemble vont avec la nouvelle palette
-    changed.sort_by_key(|(_, item)| !matches!(item.recipe, Recipe::Palette { .. } | Recipe::ZPalette));
+    changed.sort_by_key(|(_, item, _)| !matches!(item.recipe, Recipe::Palette { .. } | Recipe::ZPalette));
+    let mut shared: HashMap<(String, Option<usize>), usize> = HashMap::new();
+    for item in &manifest.items {
+        if let Recipe::Texture { palette, .. } = item.recipe {
+            *shared.entry((item.source.clone(), palette)).or_default() += 1;
+        }
+    }
     println!("{}", t!("{} changed files.", "{} fichiers modifies.", changed.len()));
-    let mut report = Report::default();
     let mut game = Game::new(rom_path);
-    for (_, item) in &changed {
+    for (_, item, path) in &changed {
         if matches!(item.recipe, Recipe::ExportOnly) {
             report.export_only.push(item.file.clone());
             continue;
         }
         println!("{}", t!("Import: {}", "Import : {}", item.file));
-        let path = root.join(&item.file);
         let mut warnings = Vec::new();
-        let result = catch_unwind(AssertUnwindSafe(|| apply(&mut game, item, &path, &mut warnings))).unwrap_or_else(|_| Err("fichier inattendu".into()));
+        let result = catch_unwind(AssertUnwindSafe(|| apply(&mut game, item, path, &shared, &mut warnings))).unwrap_or_else(|_| Err("fichier inattendu".into()));
         report.warnings.extend(warnings);
         match result {
             Ok(()) => report.applied.push(item.file.clone()),
@@ -975,8 +1082,17 @@ pub fn import(rom_path: &Path, dir: &Path) -> Result<(), String> {
         }
     }
     let mut files = pack(&game, &rom).inspect_err(|e| report.errors.push(e.clone())).unwrap_or_default();
-    let mut hand_placed = BTreeMap::new();
-    drop_ins(&dir.join(DROP_INS), &dir.join(DROP_INS), &mut hand_placed)?;
+    let mut hand_placed = pack_natives;
+    drop_ins(&drops, &drops, &mut hand_placed)?;
+    // Les fichiers exportés posés là sont déjà traités ; le reste doit être un fichier de la rom, au format du jeu
+    hand_placed.retain(|path, _| {
+        let known = exported.contains(path.as_str());
+        let in_rom = game.entries.iter().any(|e| e.member.is_none() && e.rom_index.is_none() && e.path.eq_ignore_ascii_case(path));
+        if !known && !in_rom {
+            report.errors.push(t!("{DROP_INS}/{path}: unknown file. Put it at the same path as in '{FILES}', or at its path in the rom.", "{DROP_INS}/{path} : fichier inconnu. Le mettre au meme chemin que dans '{FILES}', ou a son chemin dans la rom."));
+        }
+        !known && in_rom
+    });
     report.applied.extend(hand_placed.keys().map(|k| format!("{DROP_INS}/{k}")));
     files.extend(hand_placed);
     let target = dir.join(MODDED_ROM);
@@ -1051,6 +1167,14 @@ mod tests {
         let size = rd32(&out, 4);
         assert_eq!(decompress_any(&out[8..8 + size]).unwrap(), [2u8; 256]);
         assert_eq!(&out[8 + size..], b"   pal0");
+    }
+
+    #[test]
+    fn a_mods_path_is_found_even_under_an_extra_folder() {
+        let exported = HashSet::from(["rom.bin/1.png", "a/b.wav"]);
+        assert_eq!(exported_path("rom.bin/1.png", &exported), Some("rom.bin/1.png"));
+        assert_eq!(exported_path("mon mod/rom.bin/1.png", &exported), Some("rom.bin/1.png"));
+        assert_eq!(exported_path("autre/1.png", &exported), None);
     }
 
     #[test]

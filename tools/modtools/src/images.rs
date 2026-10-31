@@ -690,8 +690,59 @@ pub fn find_tex0(file: &[u8]) -> Option<Tex0> {
     })
 }
 
-/// Remet une texture modifiée dans le fichier ; `palette_at` = position de sa palette dans le bloc des palettes.
-pub fn write_texture(file: &[u8], texture: &nds_nitro::nitro::Texture, palette: Option<&nds_nitro::nitro::Palette>, image: &Rgba) -> Result<Vec<u8>, String> {
+/// Écart moyen (au carré, pondéré) au-delà duquel une image ne ressemble plus aux couleurs de sa palette.
+const FAR_FROM_PALETTE: i64 = 400;
+
+/// L'image est-elle loin de cette palette : une nouvelle image, et non une retouche ?
+fn far_from(image: &Rgba, colors: &[[u8; 4]]) -> bool {
+    let mut cache = HashMap::<[u8; 4], i64>::new();
+    let (mut total, mut count) = (0i64, 0i64);
+    for pixel in image.data.chunks_exact(4).filter(|p| p[3] >= 128) {
+        let key = [pixel[0], pixel[1], pixel[2], 255];
+        total += *cache.entry(key).or_insert_with(|| colors.iter().map(|c| distance(*c, key) as i64).min().unwrap_or(0));
+        count += 1;
+    }
+    count > 0 && total / count > FAR_FROM_PALETTE
+}
+
+/// `count` couleurs qui représentent l'image, par coupes médianes.
+pub fn make_palette(image: &Rgba, count: usize) -> Vec<[u8; 4]> {
+    let mut seen: Vec<[u8; 3]> = image.data.chunks_exact(4).filter(|p| p[3] >= 128).map(|p| [p[0], p[1], p[2]]).collect();
+    if seen.is_empty() {
+        return Vec::new();
+    }
+    let mut boxes: Vec<Vec<[u8; 3]>> = vec![std::mem::take(&mut seen)];
+    let spread = |list: &[[u8; 3]], axis: usize| {
+        let (low, high) = list.iter().fold((255u8, 0u8), |(l, h), c| (l.min(c[axis]), h.max(c[axis])));
+        high - low
+    };
+    while boxes.len() < count {
+        let widest = |list: &[[u8; 3]]| (0..3).map(|axis| spread(list, axis) as usize).max().unwrap_or(0) * list.len();
+        let Some(at) = (0..boxes.len()).max_by_key(|i| widest(&boxes[*i])) else { break };
+        if boxes[at].len() < 2 || widest(&boxes[at]) == 0 {
+            break;
+        }
+        let mut chosen = boxes.swap_remove(at);
+        let axis = (0..3).max_by_key(|a| spread(&chosen, *a)).unwrap_or(0);
+        chosen.sort_unstable_by_key(|c| c[axis]);
+        let upper = chosen.split_off(chosen.len() / 2);
+        boxes.push(chosen);
+        boxes.push(upper);
+    }
+    boxes
+        .iter()
+        .map(|list| {
+            let mean = |axis: usize| (list.iter().map(|c| c[axis] as u32).sum::<u32>() / list.len() as u32) as u8;
+            [mean(0), mean(1), mean(2), 255]
+        })
+        .collect()
+}
+
+/// Remet une texture modifiée dans le fichier ; `palette_at` = position de sa palette dans le bloc des palettes. Avec `own_palette`, la
+/// texture est seule à se servir de sa palette : une image toute différente en reçoit une faite pour elle. Rend `true` si elle reste
+/// loin de sa palette (elle est partagée, ou la compression 4x4 ne permet pas de la changer) : ses couleurs seront approchées.
+/// `palette_room` : octets disponibles avant la palette suivante ; une palette peut avoir moins de couleurs que son format n'en permet.
+pub fn write_texture(file: &[u8], texture: &nds_nitro::nitro::Texture, palette: Option<&nds_nitro::nitro::Palette>, palette_room: usize, image: &Rgba, own_palette: bool) -> Result<(Vec<u8>, bool), String> {
     let palette_at = palette.map(|p| p.off as usize);
     let (width, height) = texture.params.dim();
     if image.width != width || image.height != height {
@@ -701,21 +752,45 @@ pub fn write_texture(file: &[u8], texture: &nds_nitro::nitro::Texture, palette: 
     let format = texture.params.format().0;
     let offset = texture.params.offset() as usize;
     let mut out = file.to_vec();
+    let mut approximate = false;
     let before = nds_nitro::nds::decode_texture(texture, palette).map_err(|e| e.to_string())?;
     let before = Rgba { width, height, data: before.0 };
     if format == 5 {
         let at = tex0.palettes + palette_at.ok_or("texture sans palette")?;
+        approximate = far_from(image, &read_colors(file, at, 4));
         let pixels = encode_4x4(image, &before, &texture.data1, &texture.data2, file, at);
         out[tex0.compressed1 + offset..tex0.compressed1 + offset + pixels.len()].copy_from_slice(&pixels);
     } else {
-        let colors = palette_at.map_or_else(Vec::new, |at| read_colors(file, tex0.palettes + at, palette_size(format)));
-        // Deux textures peuvent partager leurs pixels avec des palettes différentes : ce qui ne change pas ne bouge pas
+        let count = palette_size(format).min(palette_room / 2);
+        let mut colors = palette_at.map_or_else(Vec::new, |at| read_colors(file, tex0.palettes + at, count));
+        let mut new_palette = false;
+        if let (Some(at), false) = (palette_at, colors.is_empty()) {
+            if far_from(image, &colors) {
+                if own_palette && colors.len() >= 2 {
+                    // La couleur 0 reste le transparent quand elle l'est
+                    let first = usize::from(format != 1 && format != 6 && texture.params.is_color0_transparent());
+                    let made = make_palette(image, colors.len() - first);
+                    for (i, color) in made.iter().enumerate() {
+                        colors[i + first] = *color;
+                        wr16(&mut out, tex0.palettes + at + (i + first) * 2, to_bgr555(*color) as usize);
+                    }
+                    colors = read_colors(&out, tex0.palettes + at, colors.len());
+                    new_palette = true;
+                } else {
+                    approximate = true;
+                }
+            }
+        }
         let mut pixels = encode_texture(format, image, &colors, texture.params.is_color0_transparent())?;
-        let size = pixels.len();
-        keep_unchanged(format, &mut pixels, &file[tex0.texels + offset..tex0.texels + offset + size], image, &before);
+        // Deux textures peuvent partager leurs pixels avec des palettes différentes : ce qui ne change pas ne bouge pas.
+        // Avec une palette refaite, les anciens n° ne veulent plus rien dire
+        if !new_palette {
+            let size = pixels.len();
+            keep_unchanged(format, &mut pixels, &file[tex0.texels + offset..tex0.texels + offset + size], image, &before);
+        }
         out[tex0.texels + offset..tex0.texels + offset + pixels.len()].copy_from_slice(&pixels);
     }
-    Ok(out)
+    Ok((out, approximate))
 }
 
 #[cfg(test)]
@@ -979,6 +1054,19 @@ mod tests {
             let c = (v << 3) | (v >> 2);
             assert_eq!(to_bgr555([c, 0, 0, 255]), v as u16);
         }
+    }
+
+    #[test]
+    fn a_new_image_gets_colors_made_for_it() {
+        let data: Vec<u8> = [[250, 10, 10, 255], [10, 250, 10, 255], [10, 10, 250, 255], [240, 240, 10, 255]].concat();
+        let image = Rgba { width: 4, height: 1, data };
+        let colors = make_palette(&image, 4);
+        assert_eq!(colors.len(), 4);
+        for wanted in image.data.chunks_exact(4) {
+            assert!(colors.iter().any(|c| c[..3] == wanted[..3]), "{wanted:?}");
+        }
+        assert!(far_from(&image, &[[0, 0, 0, 255]]));
+        assert!(!far_from(&image, &colors));
     }
 
     #[test]

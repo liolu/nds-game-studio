@@ -141,6 +141,8 @@ struct Launcher {
     imported: Arc<Mutex<Vec<Result<Imported, String>>>>,
     /// Premier clic sur « Retirer ce jeu ».
     confirm_remove: Option<f64>,
+    /// Le lien d'un mod en train d'être tapé (onglet Moding).
+    mod_link: Option<String>,
 }
 
 /// Couleurs d'un bouton : `Look` donne celles au repos et au survol.
@@ -219,7 +221,7 @@ impl Plugin for LauncherPlugin {
         app.init_resource::<Launcher>()
             .add_systems(Startup, setup)
             .add_systems(OnEnter(StudioState::Menu), spawn_launcher.before(crate::studio::auto_start))
-            .add_systems(Update, (take_drops, poll_copies, poll_disk, back_key, type_folder_name, expire_confirm, log_clicks, rebuild, show_status).chain().run_if(in_state(StudioState::Menu)))
+            .add_systems(Update, (take_drops, poll_copies, poll_disk, back_key, type_folder_name, type_mod_link, expire_confirm, log_clicks, rebuild, show_status).chain().run_if(in_state(StudioState::Menu)))
             .add_systems(Update, (activity_visibility, activity_now, activity_decomp, activity_history, note_update, poll_mods).run_if(in_state(StudioState::Menu)))
             .add_systems(Update, (wheel, looks, view_choice_looks, lang_choice_looks, version_text, redo_on_language))
             .init_resource::<UpdateOffer>()
@@ -553,8 +555,16 @@ fn take_drops(mut drops: MessageReader<FileDragAndDrop>, mut lau: ResMut<Launche
             FileDragAndDrop::HoveredFile { .. } => true,
             FileDragAndDrop::HoveredFileCanceled { .. } => false,
             FileDragAndDrop::DroppedFile { path_buf, .. } => {
-                start_copy(&mut lau, path_buf.clone());
-                say(&mut lau, &time, tr("Copying the rom...", "Copie de la rom..."));
+                // Sur la page Moding d'un jeu, ce qu'on dépose est un mod
+                let modding = lau.tab == Tab::Modding && lau.open.is_some();
+                let game = lau.open.as_ref().and_then(|file| lau.roms.iter().find(|r| r.info.file == *file)).map(|r| (r.info.code.clone(), r.info.path.clone()));
+                match game.filter(|_| modding) {
+                    Some((code, rom)) => crate::mod_packs::add_path(&code, &rom, path_buf),
+                    None => {
+                        start_copy(&mut lau, path_buf.clone());
+                        say(&mut lau, &time, tr("Copying the rom...", "Copie de la rom..."));
+                    }
+                }
                 false
             }
         };
@@ -611,7 +621,7 @@ fn poll_disk(mut lau: ResMut<Launcher>, mut images: ResMut<Assets<Image>>, time:
 
 fn back_key(keys: Res<ButtonInput<KeyCode>>, mut lau: ResMut<Launcher>, screens: Res<DsScreens>, windows: Query<&Window>) {
     let focused = windows.get(screens.main_window()).is_ok_and(|w| w.focused);
-    if !focused || !keys.just_pressed(KeyCode::Escape) || lau.naming.is_some() {
+    if !focused || !keys.just_pressed(KeyCode::Escape) || lau.naming.is_some() || lau.mod_link.is_some() {
         return;
     }
     if lau.open.is_some() {
@@ -653,6 +663,47 @@ fn type_folder_name(mut typed: MessageReader<KeyboardInput>, mut lau: ResMut<Lau
         }
         lau.dirty = true;
     }
+}
+
+/// Le lien d'un mod : Entrée l'installe, Échap annule, Ctrl+V colle.
+fn type_mod_link(mut typed: MessageReader<KeyboardInput>, mut lau: ResMut<Launcher>, keys: Res<ButtonInput<KeyCode>>, mut clipboard: ResMut<bevy::clipboard::Clipboard>, screens: Res<DsScreens>) {
+    let main = screens.main_window();
+    let command = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight, KeyCode::SuperLeft, KeyCode::SuperRight]);
+    for key in typed.read() {
+        if lau.mod_link.is_none() || key.window != main || !key.state.is_pressed() {
+            continue;
+        }
+        match &key.logical_key {
+            Key::Enter => send_mod_link(&mut lau),
+            Key::Escape => lau.mod_link = None,
+            Key::Backspace => {
+                if let Some(link) = &mut lau.mod_link {
+                    link.pop();
+                }
+            }
+            Key::Character(letter) if command && letter.eq_ignore_ascii_case("v") => {
+                if let (Some(Ok(text)), Some(link)) = (clipboard.fetch_text().poll_result(), &mut lau.mod_link) {
+                    link.push_str(text.trim());
+                }
+            }
+            _ if command => {}
+            _ => {
+                if let (Some(text), Some(link)) = (&key.text, &mut lau.mod_link) {
+                    link.extend(text.chars().filter(|c| !c.is_control()));
+                }
+            }
+        }
+        lau.dirty = true;
+    }
+}
+
+fn send_mod_link(lau: &mut Launcher) {
+    let Some(link) = lau.mod_link.take().filter(|l| !l.trim().is_empty()) else { return };
+    let game = lau.open.as_ref().and_then(|file| lau.roms.iter().find(|r| r.info.file == *file)).map(|r| (r.info.code.clone(), r.info.path.clone()));
+    if let Some((code, _)) = game {
+        crate::mod_packs::find(&code, &link);
+    }
+    lau.dirty = true;
 }
 
 fn create_named_folder(lau: &mut Launcher, images: &mut Assets<Image>, time: &Time<Real>) {
@@ -1294,7 +1345,7 @@ fn spawn_game(main: &mut ChildSpawnerCommands, lau: &Launcher, rom: &Rom, regist
         let beside = COVER + 20.0;
         let (top, rest): (Top, Rest) = match lau.tab {
             Tab::Play => play_tab(rom, registry),
-            Tab::Modding => modding_tab(rom),
+            Tab::Modding => modding_tab(rom, registry, lau.mod_link.clone()),
             Tab::Description => description_tab(rom),
             Tab::Settings => settings_tab(lau, rom, registry),
         };
@@ -1319,6 +1370,17 @@ fn native_game(registry: &GameRegistry, code: &str) -> Option<String> {
     registry.specs().find(|s| !s.game_code.is_empty() && s.game_code.eq_ignore_ascii_case(code)).map(|s| s.id.clone())
 }
 
+/// Lance le jeu avec cette rom, sans changer la version choisie dans l'onglet Moding.
+fn play_version_button(parent: &mut ChildSpawnerCommands, font: &Fonts, label: &str, id: String, rom: PathBuf) {
+    button(parent, Node { align_self: AlignSelf::FlexStart, ..button_node() }, ITEM, ITEM_HOVER)
+        .observe(move |_: On<Activate>, mut commands: Commands| {
+            commands.insert_resource(ActiveRom(rom.clone()));
+            commands.insert_resource(ActiveGame(Some(id.clone())));
+            commands.set_state(StudioState::Playing);
+        })
+        .with_child(text(font, label.to_string(), 15.0, TEXT));
+}
+
 fn play_tab(rom: &Rom, registry: &GameRegistry) -> (Top, Rest) {
     let native = native_game(registry, &rom.info.code);
     let experimental = native.is_some() && crate::native_game::is_experimental(&rom.info.code);
@@ -1326,6 +1388,7 @@ fn play_tab(rom: &Rom, registry: &GameRegistry) -> (Top, Rest) {
     let code_for_state = code.clone();
     let state = crate::native_game::preparation(&code);
     let path = rom.info.path.clone();
+    let original = path.clone();
     let summary = format!("{}  -  {}  -  {}", rom.info.code, rom.info.region(), format_size(rom.info.size));
     (
         Box::new(move |t, font| {
@@ -1355,6 +1418,13 @@ fn play_tab(rom: &Rom, registry: &GameRegistry) -> (Top, Rest) {
                 _ => tr("Play", "Jouer"),
             };
             play.with_child(text(font, label, 22.0, if usable { TEXT } else { DIM }));
+            if let (Some(id), true) = (native.clone(), matches!(state, Preparation::Ready)) {
+                if crate::mods::is_on(&code_for_state) {
+                    play_version_button(t, font, tr("Play the original version", "Jouer a la version originale"), id, original.clone());
+                } else if crate::mods::has_modded_rom(&code_for_state) {
+                    play_version_button(t, font, tr("Play the modded version", "Jouer a la version modee"), id, crate::mods::modded_rom(&code_for_state));
+                }
+            }
             match &state {
                 Preparation::Running(message) if !message.is_empty() => {
                     t.spawn(text(font, t!("{message} You can keep using the launcher.", "{message} Vous pouvez continuer a utiliser le launcher."), 15.0, DIM));
@@ -1397,7 +1467,7 @@ fn play_tab(rom: &Rom, registry: &GameRegistry) -> (Top, Rest) {
 }
 
 /// L'option « outils de mod » : à télécharger, puis exporter, modifier, appliquer, et revenir aux originaux quand on veut.
-fn spawn_mods(r: &mut ChildSpawnerCommands, font: &Fonts, code: &str, rom: &Path) {
+fn spawn_mods(r: &mut ChildSpawnerCommands, font: &Fonts, code: &str, rom: &Path, native: Option<&str>) {
     use crate::mods;
     let wide = |r: &mut ChildSpawnerCommands| {
         r.spawn(Node { height: px(2), margin: UiRect::vertical(px(10)), flex_shrink: 0.0, ..default() }).insert(BackgroundColor(BORDER));
@@ -1458,6 +1528,12 @@ fn spawn_mods(r: &mut ChildSpawnerCommands, font: &Fonts, code: &str, rom: &Path
             });
         }
     }
+    // La copie reste jouable sans l'outil
+    if mods::has_modded_rom(code) && !running {
+        if let (Some(id), crate::native_game::Preparation::Ready) = (native, crate::native_game::preparation(code)) {
+            play_version_button(r, font, tr("Play the modded version", "Jouer a la version modee"), id.to_string(), mods::modded_rom(code));
+        }
+    }
     let (lines, error) = mods::lines_for(code);
     if let Some(e) = error {
         r.spawn(text(font, e, 15.0, BAD));
@@ -1480,6 +1556,156 @@ fn spawn_mods(r: &mut ChildSpawnerCommands, font: &Fonts, code: &str, rom: &Path
     }
 }
 
+/// Les mods venus d'ailleurs : un fichier, un dossier ou un lien, et la liste de ceux qui sont installés.
+fn spawn_mod_packs(r: &mut ChildSpawnerCommands, font: &Fonts, code: &str, rom: &Path, link: Option<String>) {
+    use crate::mod_packs;
+    r.spawn((Node { height: px(2), margin: UiRect::vertical(px(10)), flex_shrink: 0.0, ..default() }, BackgroundColor(BORDER)));
+    r.spawn(text(font, tr("Mods from elsewhere", "Mods venus d'ailleurs"), 18.0, TEXT));
+    r.spawn(text(font, tr("A .zip, .7z, .rar or .tar.gz file, a folder, or a link: drop it here, or use the buttons. A mod only holds game files: nothing is run on your computer.", "Un fichier .zip, .7z, .rar ou .tar.gz, un dossier ou un lien : deposez-le ici, ou utilisez les boutons. Un mod ne contient que des fichiers de jeu : rien n'est execute sur votre ordinateur."), 15.0, DIM));
+    r.spawn(Node { flex_direction: FlexDirection::Row, flex_wrap: FlexWrap::Wrap, column_gap: px(8), row_gap: px(8), ..default() }).with_children(|row| {
+        for (folder, label) in [(false, tr("Add a file", "Ajouter un fichier")), (true, tr("Add a folder", "Ajouter un dossier"))] {
+            let (code, rom) = (code.to_string(), rom.to_path_buf());
+            button(row, button_node(), ITEM, ITEM_HOVER)
+                .observe(move |_: On<Activate>| {
+                    let (code, rom) = (code.clone(), rom.clone());
+                    // Le dialogue bloque jusqu'à sa fermeture ; sur macOS, rfd l'ouvre de lui-même sur le fil principal
+                    std::thread::spawn(move || {
+                        let dialog = rfd::FileDialog::new().set_title(tr("Add a mod", "Ajouter un mod"));
+                        let picked = if folder { dialog.pick_folder() } else { dialog.add_filter(tr("Mods", "Mods"), &crate::mod_packs::ARCHIVES).pick_file() };
+                        if let Some(path) = picked {
+                            crate::mod_packs::add_path(&code, &rom, &path);
+                        }
+                    });
+                })
+                .with_child(text(font, label, 15.0, TEXT));
+        }
+    });
+    r.spawn(Node { flex_direction: FlexDirection::Row, flex_wrap: FlexWrap::Wrap, column_gap: px(8), row_gap: px(8), align_items: AlignItems::Center, ..default() }).with_children(|row| {
+        let shown = match &link {
+            Some(link) => format!("{link}_"),
+            None => tr("Click here, then type or paste a link (https://github.com/author/mods)", "Cliquez ici, puis tapez ou collez un lien (https://github.com/auteur/mods)").to_string(),
+        };
+        let (normal, hover) = if link.is_some() { (ITEM_ON, ITEM_ON) } else { (ITEM, ITEM_HOVER) };
+        button(row, Node { flex_grow: 1.0, min_width: px(320), ..button_node() }, normal, hover)
+            .observe(|_: On<Activate>, mut lau: ResMut<Launcher>| {
+                if lau.mod_link.is_none() {
+                    lau.mod_link = Some(String::new());
+                    lau.dirty = true;
+                }
+            })
+            .with_child(text(font, shown, 15.0, if link.is_some() { TEXT } else { DIM }));
+        button(row, button_node(), PLAY, PLAY_HOVER)
+            .observe(|_: On<Activate>, mut lau: ResMut<Launcher>| send_mod_link(&mut lau))
+            .with_child(text(font, tr("Find mods", "Trouver les mods"), 15.0, TEXT));
+    });
+    let saved = mod_packs::saved_links(code);
+    if !saved.is_empty() {
+        r.spawn(Node { flex_direction: FlexDirection::Row, flex_wrap: FlexWrap::Wrap, column_gap: px(8), row_gap: px(6), align_items: AlignItems::Center, ..default() }).with_children(|row| {
+            row.spawn(text(font, tr("Added from before:", "Deja ajoutes :"), 14.0, DIM));
+            for link in saved {
+                let (code, target) = (code.to_string(), link.clone());
+                button(row, button_node(), ITEM, ITEM_HOVER)
+                    .observe(move |_: On<Activate>, mut lau: ResMut<Launcher>| {
+                        crate::mod_packs::find(&code, &target);
+                        lau.dirty = true;
+                    })
+                    .with_child(text(font, link, 14.0, TEXT));
+            }
+            let code = code.to_string();
+            button(row, button_node(), ITEM, ITEM_HOVER)
+                .observe(move |_: On<Activate>, mut lau: ResMut<Launcher>| {
+                    crate::mod_packs::check_updates(&code);
+                    lau.dirty = true;
+                })
+                .with_child(text(font, tr("Check for updates", "Chercher les mises a jour"), 14.0, TEXT));
+        });
+    }
+    if let Some(preview) = mod_packs::preview(code) {
+        r.spawn((Node { flex_direction: FlexDirection::Column, row_gap: px(8), padding: UiRect::all(px(12)), flex_shrink: 0.0, border: UiRect::all(px(2)), border_radius: BorderRadius::all(px(6)), ..default() }, BorderColor::all(ITEM_ON), BackgroundColor(SIDEBAR))).with_children(|panel| {
+            panel.spawn(Node { flex_direction: FlexDirection::Row, column_gap: px(12), align_items: AlignItems::Center, justify_content: JustifyContent::SpaceBetween, ..default() }).with_children(|head| {
+                let from = if preview.tag.is_empty() { t!("From {}", "Depuis {}", preview.source) } else { t!("From {} (release {})", "Depuis {} (release {})", preview.source, preview.tag) };
+                head.spawn(text(font, from, 15.0, TEXT));
+                let code = code.to_string();
+                button(head, button_node(), ITEM, ITEM_HOVER)
+                    .observe(move |_: On<Activate>, mut lau: ResMut<Launcher>| {
+                        crate::mod_packs::close_preview(&code);
+                        lau.dirty = true;
+                    })
+                    .with_child(text(font, tr("Close", "Fermer"), 14.0, TEXT));
+            });
+            for found in preview.mods {
+                let fits = found.refused.is_none();
+                panel.spawn(Node { flex_direction: FlexDirection::Row, column_gap: px(12), align_items: AlignItems::Center, justify_content: JustifyContent::SpaceBetween, ..default() }).with_children(|row| {
+                    row.spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(2), flex_shrink: 1.0, ..default() }).with_children(|about| {
+                        let by = if found.author.is_empty() { String::new() } else { t!(" by {}", " par {}", found.author) };
+                        about.spawn(text(font, format!("{} {}{by}", found.name, found.version), 15.0, if fits { TEXT } else { DIM }));
+                        if !found.description.is_empty() {
+                            about.spawn(text(font, found.description.clone(), 14.0, DIM));
+                        }
+                        if let Some(reason) = &found.refused {
+                            about.spawn(text(font, reason.clone(), 14.0, GOLD));
+                        }
+                    });
+                    if fits {
+                        let label = match &found.installed {
+                            None => tr("Install", "Installer").to_string(),
+                            Some(old) if *old == found.version => tr("Reinstall", "Reinstaller").to_string(),
+                            Some(_) => t!("Update to {}", "Mettre a jour : {}", found.version),
+                        };
+                        let (code, rom, id) = (code.to_string(), rom.to_path_buf(), found.id.clone());
+                        button(row, Node { flex_shrink: 0.0, ..button_node() }, PLAY, PLAY_HOVER)
+                            .observe(move |_: On<Activate>, mut lau: ResMut<Launcher>| {
+                                crate::mod_packs::install_found(&code, &rom, &id);
+                                lau.dirty = true;
+                            })
+                            .with_child(text(font, label, 14.0, TEXT));
+                    }
+                });
+            }
+        });
+    }
+    for pack in mod_packs::list(code) {
+        r.spawn((Node { flex_direction: FlexDirection::Column, row_gap: px(4), padding: UiRect::all(px(10)), flex_shrink: 0.0, border_radius: BorderRadius::all(px(6)), ..default() }, BackgroundColor(SIDEBAR))).with_children(|row| {
+            let by = if pack.author.is_empty() { String::new() } else { t!(" by {}", " par {}", pack.author) };
+            row.spawn(text(font, format!("{} {}{by}", pack.name, pack.version), 15.0, TEXT));
+            if !pack.description.is_empty() {
+                row.spawn(text(font, pack.description.clone(), 14.0, DIM));
+            }
+            row.spawn(Node { flex_direction: FlexDirection::Row, flex_wrap: FlexWrap::Wrap, column_gap: px(8), row_gap: px(6), ..default() }).with_children(|actions| {
+                let (code_on, rom_on, id_on, enabled) = (code.to_string(), rom.to_path_buf(), pack.id.clone(), pack.enabled);
+                let (normal, hover) = if enabled { (ITEM_ON, ITEM_ON) } else { (ITEM, ITEM_HOVER) };
+                button(actions, button_node(), normal, hover)
+                    .observe(move |_: On<Activate>, mut lau: ResMut<Launcher>| {
+                        if !crate::mods::running() {
+                            crate::mod_packs::set_enabled(&code_on, &rom_on, &id_on, !enabled);
+                            lau.dirty = true;
+                        }
+                    })
+                    .with_child(text(font, if enabled { tr("On", "Actif") } else { tr("Off", "Inactif") }, 14.0, TEXT));
+                // Une mise à jour trouvée s'installe depuis la liste du lien
+                if let Some(version) = mod_packs::update_for(code, &pack.id).filter(|_| !pack.source.is_empty()) {
+                    let (code_up, source) = (code.to_string(), pack.source.clone());
+                    button(actions, button_node(), PLAY, PLAY_HOVER)
+                        .observe(move |_: On<Activate>, mut lau: ResMut<Launcher>| {
+                            crate::mod_packs::find(&code_up, &source);
+                            lau.dirty = true;
+                        })
+                        .with_child(text(font, t!("Update to {version}", "Mettre a jour : {version}"), 14.0, TEXT));
+                }
+                let (code_out, rom_out, id_out) = (code.to_string(), rom.to_path_buf(), pack.id.clone());
+                button(actions, button_node(), ITEM, ITEM_HOVER)
+                    .observe(move |_: On<Activate>, mut lau: ResMut<Launcher>| {
+                        if !crate::mods::running() {
+                            crate::mod_packs::remove(&code_out, &rom_out, &id_out);
+                            lau.dirty = true;
+                        }
+                    })
+                    .with_child(text(font, tr("Remove", "Retirer"), 14.0, TEXT));
+            });
+        });
+    }
+}
+
 /// Refait la page d'un jeu quand le travail de l'outil de mod avance.
 fn poll_mods(mut lau: ResMut<Launcher>, mut seen: Local<u64>) {
     let now = crate::mods::revision();
@@ -1491,9 +1717,10 @@ fn poll_mods(mut lau: ResMut<Launcher>, mut seen: Local<u64>) {
     }
 }
 
-fn modding_tab(rom: &Rom) -> (Top, Rest) {
+fn modding_tab(rom: &Rom, registry: &GameRegistry, link: Option<String>) -> (Top, Rest) {
     let file = rom.info.file.clone();
     let (code, path) = (rom.info.code.clone(), rom.info.path.clone());
+    let native = native_game(registry, &code);
     (
         Box::new(move |t, font| {
             button(t, Node { align_self: AlignSelf::FlexStart, ..button_node() }, ITEM, ITEM_HOVER)
@@ -1508,7 +1735,8 @@ fn modding_tab(rom: &Rom) -> (Top, Rest) {
         Box::new(move |r, font| {
             r.spawn(text(font, tr("Assets: the game's 3D models and images, with their path in the rom.", "Assets : modeles 3D et images du jeu, avec leur chemin dans la rom."), 15.0, DIM));
             r.spawn(text(font, tr("Code: the game's sources, rebuilt and restarted every time you save.", "Code : les sources du jeu, recompilees et relancees a chaque enregistrement."), 15.0, DIM));
-            spawn_mods(r, font, &code, &path);
+            spawn_mods(r, font, &code, &path, native.as_deref());
+            spawn_mod_packs(r, font, &code, &path, link);
         }),
     )
 }

@@ -2,6 +2,7 @@
 //! capture et ferme.
 //! `cargo run --release -p nds-engine --example native_check -- <code> <rom> <capture.png> <secondes> [enter@s] [touch@s] [f8@s]`
 //! `click=texte@s` active le bouton qui porte ce texte (le dernier s'il y en a plusieurs) ; une capture par fenetre.
+//! `drop=chemin@s` depose un fichier ou un dossier sur la fenetre ; `type=texte@s` tape ce texte au clavier.
 //! (avec `NDSGS_NATIVE_MUTE=1` et `NDSGS_NATIVE_DIR`)
 
 use bevy::prelude::*;
@@ -17,6 +18,35 @@ struct Check {
     touch_at: Vec<f32>,
     f8_at: Option<f32>,
     clicks: Vec<(String, f32, bool)>,
+    drops: Vec<(String, f32, bool)>,
+    typed: Vec<(String, f32, bool)>,
+}
+
+/// Les fichiers deposes et les touches passent par les memes messages que les vrais.
+fn drops_and_keys(time: Res<Time>, mut check: ResMut<Check>, windows: Query<Entity, With<Window>>, mut drops: MessageWriter<bevy::window::FileDragAndDrop>, mut keys: MessageWriter<bevy::input::keyboard::KeyboardInput>) {
+    let now = time.elapsed_secs();
+    let Some(window) = windows.iter().next() else { return };
+    for (path, at, done) in &mut check.drops {
+        if !*done && now >= *at {
+            *done = true;
+            drops.write(bevy::window::FileDragAndDrop::DroppedFile { window, path_buf: path.as_str().into() });
+        }
+    }
+    for (text, at, done) in &mut check.typed {
+        if !*done && now >= *at {
+            *done = true;
+            for c in text.chars() {
+                keys.write(bevy::input::keyboard::KeyboardInput {
+                    key_code: KeyCode::KeyA,
+                    logical_key: bevy::input::keyboard::Key::Character(c.to_string().into()),
+                    state: bevy::input::ButtonState::Pressed,
+                    text: Some(c.to_string().into()),
+                    repeat: false,
+                    window,
+                });
+            }
+        }
+    }
 }
 
 fn clicks(
@@ -48,7 +78,8 @@ fn no_focus(mut windows: Query<&mut Window, Added<Window>>) {
         window.focused = false;
         // Hors de l'ecran : l'essai ne gene pas le joueur
         window.position = WindowPosition::At(IVec2::new(-4000, 100));
-        window.resolution.set(1280.0, 800.0);
+        let height = std::env::var("NDSGS_CHECK_HEIGHT").ok().and_then(|h| h.parse().ok()).unwrap_or(800.0);
+        window.resolution.set(1280.0, height);
     }
 }
 
@@ -119,8 +150,10 @@ fn main() {
             touch_at: args.iter().filter_map(|a| a.strip_prefix("touch@")?.parse().ok()).collect(),
             f8_at: time_of("f8@"),
             clicks: args.iter().filter_map(|a| a.strip_prefix("click=")).filter_map(|a| a.rsplit_once('@')).filter_map(|(t, s)| Some((t.to_string(), s.parse().ok()?, false))).collect(),
+            drops: args.iter().filter_map(|a| a.strip_prefix("drop=")).filter_map(|a| a.rsplit_once('@')).filter_map(|(t, s)| Some((t.to_string(), s.parse().ok()?, false))).collect(),
+            typed: args.iter().filter_map(|a| a.strip_prefix("type=")).filter_map(|a| a.rsplit_once('@')).filter_map(|(t, s)| Some((t.to_string(), s.parse().ok()?, false))).collect(),
         })
         .add_systems(PreUpdate, simulate.after(bevy::input::InputSystems))
-        .add_systems(Update, (no_focus, capture, clicks))
+        .add_systems(Update, (no_focus, capture, clicks, drops_and_keys))
         .run();
 }
