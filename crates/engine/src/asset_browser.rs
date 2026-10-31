@@ -1833,11 +1833,9 @@ fn show_preview_text(mut b: ResMut<AssetBrowser>, mut texts: Query<(&mut Text, &
     text.0 = b.text_lines.iter().skip(b.text_scroll).take(TEXT_ROWS).cloned().collect::<Vec<_>>().join("\n");
 }
 
-/// Police à chasse fixe avec le japonais, pour les textes des jeux.
+/// Police à chasse fixe avec le japonais, pour les textes des jeux (macOS : le japonais d'abord, sans chasse fixe).
 fn preview_font(fonts: &mut Assets<Font>) -> Option<Handle<Font>> {
-    let windir = std::env::var_os("WINDIR").map(std::path::PathBuf::from).unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"));
-    let bytes = std::fs::read(windir.join("Fonts").join("msgothic.ttc")).ok()?;
-    Some(fonts.add(Font::from_bytes(bytes)))
+    crate::launcher::system_font(fonts, &["msgothic.ttc"], &[crate::launcher::ARIAL_UNICODE, "Menlo.ttc"])
 }
 
 fn to_image(rgba: &Rgba, sampler: ImageSampler) -> Image {

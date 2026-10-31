@@ -116,6 +116,9 @@ pub fn native_dir() -> PathBuf {
     exe.parent().unwrap_or(Path::new(".")).join("native")
 }
 
+/// Le runtime et les modules sont des programmes Windows : ailleurs, rien à générer.
+const CAN_GENERATE: bool = cfg!(windows);
+
 /// Les jeux que le launcher sait générer et la version de la boîte à outils (`native/tools/export_recipes.py`).
 const INDEX: &str = include_str!("../../../native/games/index.json");
 const TOOLCHAIN_URL: &str = "https://github.com/liolu/nds-game-studio/releases/download/native-toolchain";
@@ -153,6 +156,11 @@ pub fn game_state(code: &str) -> Option<GameState> {
 fn index() -> &'static Index {
     static PARSED: OnceLock<Index> = OnceLock::new();
     PARSED.get_or_init(|| serde_json::from_str(INDEX).expect("native/games/index.json"))
+}
+
+/// Ce jeu a un module natif, mais pas sur ce système.
+pub fn windows_only(code: &str) -> bool {
+    !CAN_GENERATE && index().games.contains_key(code)
 }
 
 /// Ce jeu se lance mais n'a pas été essayé jusqu'en jeu, ou ne marche pas encore.
@@ -212,7 +220,7 @@ pub fn overview<'a>(codes: impl Iterator<Item = &'a str>, all: bool) -> Overview
         match preparation(code) {
             Preparation::Ready => result.ready += 1,
             Preparation::Failed(_) => result.failed += 1,
-            Preparation::NotStarted if index().games.get(code).is_some_and(|g| all || g.status == "ok") => result.waiting += 1,
+            Preparation::NotStarted if CAN_GENERATE && index().games.get(code).is_some_and(|g| all || g.status == "ok") => result.waiting += 1,
             _ => {}
         }
     }
@@ -291,6 +299,9 @@ pub fn forget(code: &str) {
 /// Prépare le prochain jeu sans module : un seul à la fois, pour laisser le PC tranquille. Sans `all`, seulement ceux
 /// qui marchent ; les expérimentaux attendent qu'on les demande.
 pub fn prepare_next<'a>(roms: impl Iterator<Item = (&'a str, &'a Path)>, all: bool) {
+    if !CAN_GENERATE {
+        return;
+    }
     let running = JOBS.lock().unwrap().as_ref().is_some_and(|j| j.values().any(|job| job.lock().unwrap().result.is_none()));
     if running {
         return;
@@ -415,8 +426,13 @@ pub struct NativeGamesPlugin;
 
 impl Plugin for NativeGamesPlugin {
     fn build(&self, app: &mut App) {
-        // Le runtime et les modules sont des programmes Windows
-        let mut codes: std::collections::BTreeSet<String> = if cfg!(windows) { index().games.keys().cloned().collect() } else { Default::default() };
+        if !CAN_GENERATE {
+            // Les outils Windows et les essais laissés par les versions qui tentaient de préparer les jeux ici
+            let data = crate::save::data_dir();
+            let _ = std::fs::remove_dir_all(data.join("native-toolchain"));
+            let _ = std::fs::remove_dir_all(data.join("native"));
+        }
+        let mut codes: std::collections::BTreeSet<String> = if CAN_GENERATE { index().games.keys().cloned().collect() } else { Default::default() };
         for entry in std::fs::read_dir(native_dir()).into_iter().flatten().flatten() {
             let path = entry.path();
             let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");

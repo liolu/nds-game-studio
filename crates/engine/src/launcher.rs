@@ -230,10 +230,13 @@ impl Plugin for LauncherPlugin {
 fn setup(mut lau: ResMut<Launcher>, mut images: ResMut<Assets<Image>>, mut fonts: ResMut<Assets<Font>>) {
     lau.prefs = LibraryPrefs::load();
     lau.star = images.add(star_image());
-    lau.font = Fonts { latin: system_font(&mut fonts, &["segoeui.ttf"]), japanese: system_font(&mut fonts, &["YuGothR.ttc", "meiryo.ttc", "msgothic.ttc"]) };
+    lau.font = Fonts {
+        latin: system_font(&mut fonts, &["segoeui.ttf"], &["Supplemental/Arial.ttf", "Helvetica.ttc"]),
+        japanese: system_font(&mut fonts, &["YuGothR.ttc", "meiryo.ttc", "msgothic.ttc"], &[ARIAL_UNICODE, "ヒラギノ角ゴシック W3.ttc"]),
+    };
 }
 
-/// Polices de Windows (accents et japonais des titres de jeux) ; ailleurs, celle de Bevy.
+/// Polices du système (accents, ™ et japonais des titres de jeux) ; sans elles, celle de Bevy.
 #[derive(Clone, Default)]
 struct Fonts {
     latin: Option<Handle<Font>>,
@@ -248,9 +251,17 @@ impl Fonts {
     }
 }
 
-fn system_font(fonts: &mut Assets<Font>, names: &[&str]) -> Option<Handle<Font>> {
-    let windir = std::env::var_os("WINDIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
-    let bytes = names.iter().find_map(|name| std::fs::read(windir.join("Fonts").join(name)).ok())?;
+/// Police de macOS qui a aussi le japonais.
+pub(crate) const ARIAL_UNICODE: &str = "Supplemental/Arial Unicode.ttf";
+
+/// La première police trouvée : ces noms-là sous Windows, ceux-là sous macOS.
+pub(crate) fn system_font(fonts: &mut Assets<Font>, windows: &[&str], macos: &[&str]) -> Option<Handle<Font>> {
+    let (dir, names) = if cfg!(target_os = "macos") {
+        (PathBuf::from("/System/Library/Fonts"), macos)
+    } else {
+        (std::env::var_os("WINDIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Windows")).join("Fonts"), windows)
+    };
+    let bytes = names.iter().find_map(|name| std::fs::read(dir.join(name)).ok())?;
     Some(fonts.add(Font::from_bytes(bytes)))
 }
 
@@ -1353,7 +1364,12 @@ fn play_tab(rom: &Rom, registry: &GameRegistry) -> (Top, Rest) {
                 _ => {}
             }
             if native.is_none() {
-                t.spawn(text(font, tr("Not playable yet: this game has no native module.", "Pas encore jouable : ce jeu n'a pas de module natif."), 15.0, DIM));
+                let reason = if crate::native_game::windows_only(&code_for_state) {
+                    tr("Not playable on this system yet: native games only run on Windows for now.", "Pas encore jouable sur ce systeme : les jeux natifs ne tournent que sous Windows pour l'instant.")
+                } else {
+                    tr("Not playable yet: this game has no native module.", "Pas encore jouable : ce jeu n'a pas de module natif.")
+                };
+                t.spawn(text(font, reason, 15.0, DIM));
             }
             if let Some(game) = crate::native_game::game_state(&code_for_state) {
                 let percent = |v: Option<f32>| v.map_or_else(|| "?".to_string(), |v| format!("{v:.1} %"));

@@ -1,7 +1,7 @@
 //! Outils de développement : voir le code du jeu (F5) et changer le jeu en changeant le code.
 //!
 //! - **F5** ouvre (ou ferme) la fenêtre « Code » : un éditeur des fichiers du jeu en cours (ou du
-//!   studio dans le menu), avec l'état de la compilation et ses erreurs. **Ctrl+S** enregistre ; un
+//!   studio dans le menu), avec l'état de la compilation et ses erreurs. **Ctrl+S** (Cmd+S sur macOS) enregistre ; un
 //!   fichier changé par un autre éditeur est relu s'il n'a pas de modification en cours.
 //! - **Rechargement** : quand un fichier du jeu ou du moteur est enregistré, le studio recompile en
 //!   arrière-plan. Si ça compile, il se relance tout seul sur le même jeu, avec les fenêtres à la
@@ -472,9 +472,7 @@ fn files_for(root: &Path, game: Option<&str>) -> Vec<PathBuf> {
 }
 
 fn monospace_font(fonts: &mut Assets<Font>) -> Option<Handle<Font>> {
-    let windir = std::env::var_os("WINDIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
-    let bytes = std::fs::read(windir.join("Fonts").join("consola.ttf")).ok()?;
-    Some(fonts.add(Font::from_bytes(bytes)))
+    crate::launcher::system_font(fonts, &["consola.ttf"], &["Menlo.ttc", "Monaco.ttf"])
 }
 
 fn toggle_code_window(
@@ -654,8 +652,8 @@ fn refresh_code_window(
     let line = match &build {
         BuildState::Building => t!("{file}   |   Rebuilding...", "{file}   |   Recompilation en cours..."),
         BuildState::Failed(_) => t!("{file}   |   Build error (the game keeps running the old code)", "{file}   |   Erreur de compilation (le jeu continue avec l'ancien code)"),
-        _ if view.dirty => t!("{file}   |   Modified: Ctrl+S to save (the studio rebuilds and restarts)", "{file}   |   Modifie : Ctrl+S pour enregistrer (le studio recompile et se relance)"),
-        _ => t!("{file}   |   Ctrl+S saves: the studio rebuilds and restarts by itself", "{file}   |   Ctrl+S enregistre : le studio recompile et se relance tout seul"),
+        _ if view.dirty => t!("{file}   |   Modified: {SAVE_KEY} to save (the studio rebuilds and restarts)", "{file}   |   Modifie : {SAVE_KEY} pour enregistrer (le studio recompile et se relance)"),
+        _ => t!("{file}   |   {SAVE_KEY} saves: the studio rebuilds and restarts by itself", "{file}   |   {SAVE_KEY} enregistre : le studio recompile et se relance tout seul"),
     };
     if let Ok(mut s) = status.single_mut()
         && s.0 != line
@@ -670,6 +668,9 @@ fn refresh_code_window(
         }
     }
 }
+
+/// Touche d'enregistrement, comme les raccourcis du champ de texte de Bevy.
+const SAVE_KEY: &str = if cfg!(target_os = "macos") { "Cmd+S" } else { "Ctrl+S" };
 
 /// Modifications en cours, Ctrl+S, et le clavier rendu au jeu quand on quitte la fenêtre du code.
 fn edit_code(
@@ -693,9 +694,9 @@ fn edit_code(
     if !window.focused && typing_in_editor(Some(&focus), &editor_marks) {
         focus.clear();
     }
-    let ctrl = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
+    let command = keys.any_pressed(if cfg!(target_os = "macos") { [KeyCode::SuperLeft, KeyCode::SuperRight] } else { [KeyCode::ControlLeft, KeyCode::ControlRight] });
     if window.focused
-        && ctrl
+        && command
         && keys.just_pressed(KeyCode::KeyS)
         && let (Some((path, _)), Ok(editable)) = (view.loaded.clone(), editors.single())
     {

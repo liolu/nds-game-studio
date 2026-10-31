@@ -124,15 +124,23 @@ jobs:
           MACOSX_DEPLOYMENT_TARGET: '11.0'
         run: |
           for t in aarch64-apple-darwin x86_64-apple-darwin; do
-            cargo build --release --target $t -p nds-game-studio -p nds-game-studio-updater -p nds-game-studio-launcher -p nds-game-studio-installer
+            cargo build --release --target $t -p nds-game-studio -p nds-game-studio-updater -p nds-game-studio-launcher -p nds-game-studio-installer -p nds-game-studio-app
           done
           mkdir -p target/universal
-          for bin in nds-game-studio nds-game-studio-updater nds-game-studio-launcher nds-game-studio-installer; do
+          for bin in nds-game-studio nds-game-studio-updater nds-game-studio-launcher nds-game-studio-installer nds-game-studio-app; do
             lipo -create \
               target/aarch64-apple-darwin/release/$bin \
               target/x86_64-apple-darwin/release/$bin \
               -output target/universal/$bin
           done
+
+      # Sans effet sur la publication tant qu'ils n'ont pas fait leurs preuves sur macOS
+      - name: Test (macOS)
+        if: matrix.platform == 'macos'
+        continue-on-error: true
+        env:
+          MACOSX_DEPLOYMENT_TARGET: '11.0'
+        run: cargo test --release --target aarch64-apple-darwin --lib --tests -p nds-engine -p nds-nitro -p nds-video -p ndsgs-common
 
       - name: Package (macOS)
         if: matrix.platform == 'macos'
@@ -165,10 +173,11 @@ jobs:
           cp target/universal/nds-game-studio target/universal/nds-game-studio-updater target/universal/nds-game-studio-launcher "$dir/"
           # NdsGameStudio.app : double-clic dans le Finder -> lance le launcher (sans Terminal)
           make_app "$dir/NdsGameStudio.app" NdsGameStudio io.github.liolu.nds-game-studio
-          printf '#!/bin/bash\ncd "$(dirname "$0")/../../.."\nexec ./nds-game-studio-launcher\n' > "$dir/NdsGameStudio.app/Contents/MacOS/NdsGameStudio"
+          cp target/universal/nds-game-studio-app "$dir/NdsGameStudio.app/Contents/MacOS/NdsGameStudio"
           chmod +x "$dir"/nds-game-studio* "$dir/NdsGameStudio.app/Contents/MacOS/NdsGameStudio"
           # Signature ad-hoc : obligatoire pour exécuter sur Apple Silicon
           for f in "$dir"/nds-game-studio*; do codesign --force --sign - "$f"; done
+          codesign --force --deep --sign - "$dir/NdsGameStudio.app"
           zip -ry "dist/$dir.zip" "$dir"
 
           # Installeur : "Nds Game Studio Installer.app"
