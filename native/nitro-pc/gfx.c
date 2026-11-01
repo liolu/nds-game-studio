@@ -660,6 +660,7 @@ static void render_thread(void *arg) {
         u32 pow = *(const u16 *)(snap.io + 0x304);
         u32 *sa = (pow >> 15) ? back_top : back_bottom, *sb = (pow >> 15) ? back_bottom : back_top;
         engine_output(&a, 0, k, w, h, margin, sa, color3d);
+        nds_fp_crosshair(sa, w, h, k, FRAME_STRIDE);
         engine_output(&b, 1, k, w, h, margin, sb, color3d);
         present_flip(w, h, snap.frame);
         worker_busy = 0;

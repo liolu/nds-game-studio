@@ -3,7 +3,7 @@
 #include "nitro.h"
 
 typedef struct { s32 m[16]; } Mtx;
-typedef struct { float x, y, z, w, r, g, b, s, t; u32 id; } Vtx;
+typedef struct { float x, y, z, w, r, g, b, s, t; u32 id; int slot; } Vtx;
 typedef struct { Vtx v[10]; int n; u32 attr, tex, pal; int translucent; float ysort; Vtx src[4]; int src_n; u32 id; } Poly;
 
 /* --interpolate, le mod 60 images/s : sans lui, rien de ce qu'il demande n'est calcule */
@@ -82,13 +82,35 @@ static inline u32 c5(u32 c, int shift) { return (c >> shift) & 31; }
 
 static void emit_poly(const Vtx *in, int n);
 
+/* --first-person : 0 = rien, 1 = polygones caches, 2 = seuls les bras restent, 3 = petit modele, place comme les bras s'il est dans la main (voir first_person.c) */
+int nds_fp_mode;
+static int cur_slot;
+
 static void vertex(void) {
     s32 x = cur_v[0], y = cur_v[1], z = cur_v[2];
     Vtx o;
+    o.slot = cur_slot;
+    float view[3];
+    int held = 0;
+    if (nds_fp_mode >= 2) {
+        for (int i = 0; i < 3; i++)
+            view[i] = ((s64)x * pos.m[i] + (s64)y * pos.m[4 + i] + (s64)z * pos.m[8 + i] + (s64)4096 * pos.m[12 + i]) / (4096.0f * 4096.0f);
+        held = nds_fp_mode == 2 || nds_fp_in_hand(view);
+    }
+    if (held) {
+        /* les bras suivent la camera : passage par l'espace de la vue, sans sa pente, et en bas de l'image */
+        nds_fp_hold_arms(view);
+        float v[3] = {view[0] * 4096.0f, view[1] * 4096.0f, view[2] * 4096.0f};
+        o.x = (v[0] * proj.m[0] + v[1] * proj.m[4] + v[2] * proj.m[8] + 4096.0f * proj.m[12]) / (4096.0f * 4096.0f);
+        o.y = (v[0] * proj.m[1] + v[1] * proj.m[5] + v[2] * proj.m[9] + 4096.0f * proj.m[13]) / (4096.0f * 4096.0f);
+        o.z = (v[0] * proj.m[2] + v[1] * proj.m[6] + v[2] * proj.m[10] + 4096.0f * proj.m[14]) / (4096.0f * 4096.0f);
+        o.w = (v[0] * proj.m[3] + v[1] * proj.m[7] + v[2] * proj.m[11] + 4096.0f * proj.m[15]) / (4096.0f * 4096.0f);
+    } else {
     o.x = ((s64)x * clip.m[0] + (s64)y * clip.m[4] + (s64)z * clip.m[8] + (s64)4096 * clip.m[12]) / (4096.0f * 4096.0f);
     o.y = ((s64)x * clip.m[1] + (s64)y * clip.m[5] + (s64)z * clip.m[9] + (s64)4096 * clip.m[13]) / (4096.0f * 4096.0f);
     o.z = ((s64)x * clip.m[2] + (s64)y * clip.m[6] + (s64)z * clip.m[10] + (s64)4096 * clip.m[14]) / (4096.0f * 4096.0f);
     o.w = ((s64)x * clip.m[3] + (s64)y * clip.m[7] + (s64)z * clip.m[11] + (s64)4096 * clip.m[15]) / (4096.0f * 4096.0f);
+    }
     o.r = (float)c5(cur_color, 0);
     o.g = (float)c5(cur_color, 5);
     o.b = (float)c5(cur_color, 10);
@@ -183,6 +205,11 @@ static int clip_poly(Vtx *a, int n) {
 
 static void emit_poly(const Vtx *in, int n) {
     Vtx a[12];
+    if (nds_fp_mode == 1) return;
+    if (nds_fp_mode == 2) {
+        for (int i = 0; i < n; i++)
+            if (!nds_fp_arm_slot(in[i].slot)) return;
+    }
     int na = n;
     for (int i = 0; i < n; i++) a[i] = in[i];
     if (prim == 2) {
@@ -298,7 +325,7 @@ static void exec(u32 cmd, const u32 *p) {
     case 0x14:
         if (mtx_mode == 0) proj = proj_stack[0];
         else if (mtx_mode == 3) tex = tex_stack[0];
-        else { pos = pos_stack[p[0] & 31]; vec = vec_stack[p[0] & 31]; }
+        else { pos = pos_stack[p[0] & 31]; vec = vec_stack[p[0] & 31]; cur_slot = p[0] & 31; }
         if (mtx_mode != 3) update_clip();
         break;
     case 0x15: { Mtx m; m_id(&m); load_cur(&m); break; }

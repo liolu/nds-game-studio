@@ -87,6 +87,12 @@ u32 io_cycles(void);
 void irq_deliver(void);
 void dma_vblank(void);
 
+/* first_person.c */
+void nds_fp_hold_arms(float *view);
+int nds_fp_in_hand(const float *view);
+int nds_fp_arm_slot(int slot);
+void nds_fp_crosshair(u32 *screen, int w, int h, int k, int stride);
+
 /* gx3d.c */
 void gx_write(u32 reg, u32 value);
 void gx_fifo_word(u32 value);

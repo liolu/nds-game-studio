@@ -166,7 +166,7 @@ def game_patches(code):
 
 
 # Toujours definies : les autres jeux gardent 0, et le runtime sait que la fonction n'existe pas pour eux
-PATCH_VALUES = ["nds_fp_camera", "nds_fp_players", "nds_fp_index", "nds_fp_matrix", "nds_fp_yaw", "nds_net_screens", "nds_net_menu_screen"]
+PATCH_VALUES = ["nds_fp_camera", "nds_fp_players", "nds_fp_index", "nds_fp_matrix", "nds_fp_yaw", "nds_fp_heading_a", "nds_fp_heading_b", "nds_fp_render_obj", "nds_fp_arm_slots", "nds_net_screens", "nds_net_menu_screen", "nds_intro_menu_screen", "nds_intro_menu_arg", "nds_intro_back_screen"]
 
 
 def has_asm(text):
@@ -326,6 +326,7 @@ def main():
     lifter.debug_pc = a.instrument
     lifter.sizes = {addr: game.functions[addr][1] for addr in by_addr}
     lifter.hooks = {int(addr, 16): fn for addr, fn in patches.get("hooks", {}).items()}
+    lifter.exit_hooks = {int(addr, 16): fn for addr, fn in patches.get("exit_hooks", {}).items()}
     # plusieurs passes : les fonctions qui renvoient des drapeaux se decouvrent chez leurs appelants
     for _ in range(4):
         before = len(lifter.flag_funcs) + len(lifter.gosub_funcs)

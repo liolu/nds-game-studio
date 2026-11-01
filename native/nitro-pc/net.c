@@ -243,8 +243,22 @@ static void menu_shortcut(void) {
     was_down = down;
 }
 
+/* --skip-intro : des que le jeu a ouvert son premier ecran, on passe aux deux ecrans du menu, comme a la fin de l'intro */
+extern const u32 nds_intro_menu_screen, nds_intro_menu_arg, nds_intro_back_screen;
+
+static void skip_intro(void) {
+    static int state = -1;
+    if (state < 0) state = nds_open_screen && nds_intro_menu_screen && nds_arg("--skip-intro", 0) ? 1 : 0;
+    if (!state || !REG32(nds_net_screens)) return;
+    state = 0;
+    typedef void (*Open)(u32, u32, u32, u32, u32, u32);
+    ((Open)nds_open_screen)(nds_net_screens, nds_intro_menu_screen, 0, nds_intro_menu_arg, 0, 0);
+    ((Open)nds_open_screen)(nds_net_screens, nds_intro_back_screen, 1, 0, 0, 0);
+}
+
 /* appele par irq_deliver, comme l'interruption de la FIFO du processeur ARM7 sur la console */
 void net_irq(void) {
+    skip_intro();
     menu_shortcut();
     if (!ready) return;
     net_pump();

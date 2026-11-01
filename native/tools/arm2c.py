@@ -112,6 +112,7 @@ class Lifter:
         self.arm.detail = self.th.detail = True
         self.new_subs = {}
         self.hooks = {}  # adresse -> fonction du runtime appelee a l'entree, avec r0
+        self.exit_hooks = {}  # adresse -> fonction du runtime appelee a chaque sortie
         self.unhandled = []
         self.flag_funcs = set()  # fonctions dont l'appelant lit les drapeaux au retour
         self.flag_pass = True
@@ -666,6 +667,9 @@ class Lifter:
         body = "\n".join(head) + "\n" + text + "\n  " + RET + "\n}\n"
         if name in self.flag_funcs:
             body = body.replace(RET, "{ SAVEF(); " + RET + " }")
+        if entry in self.exit_hooks:
+            fn = self.exit_hooks[entry]
+            body = body.replace(RET, "{ extern void %s(void); %s(); %s }" % (fn, fn, RET))
         return body
 
     def frame_words(self, out):
