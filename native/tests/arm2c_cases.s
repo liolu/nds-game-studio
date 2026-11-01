@@ -181,3 +181,12 @@ t_thumb:                    @ Thumb, sous-routine interne ; x -> 4x+9
     adds r0, #3
     bx lr
     .size t_thumb, .-t_thumb
+
+    .arm
+    .org 0x400
+    .globl t_args14
+t_args14:                   @ arguments de pile au-dela du 6e (formatage a la printf) : r0 = 14e argument, r1 = 11e
+    ldr r0, [sp, #36]
+    ldr r1, [sp, #24]
+    bx lr
+    .size t_args14, .-t_args14

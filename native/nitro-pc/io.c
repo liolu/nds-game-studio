@@ -65,7 +65,8 @@ static void dma_run(int i) {
     {
         extern u32 nds_watch, nds_pc, nds_r[6];
         u32 span = n * step;
-        if (dst <= nds_watch && nds_watch < dst + span)
+        /* pas les copies vides de MI_StopDma (src = dst = 0) : le log lirait l'adresse 0 */
+        if (src >= 0x01FF0000u && dst <= nds_watch && nds_watch < dst + span)
             nds_log("dma%d %x -> %x, %u mots de %d, cnt=%x arm=%x image %u, source: %8x %8x %8x %8x", i, src, dst, n, step, cnt, nds_pc, nds_frame, REG32(src), REG32(src + 4), REG32(src + 8), REG32(src + 12));
     }
 #endif

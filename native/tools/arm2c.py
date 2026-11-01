@@ -1,7 +1,7 @@
 """Traduit une fonction ARM/Thumb du binaire DS en C natif (pas d'emulation : le C est compile en x86).
 
 Sert aux fonctions qui n'ont pas de C : assembleur du SDK, fonctions pas encore matchees.
-Chaque fonction devient u64 nom(r0, r1, r2, r3, s0..s5) : les arguments de pile passent en s0.., le retour en r0:r1.
+Chaque fonction devient u64 nom(r0, r1, r2, r3, a0..a9) : les arguments de pile passent en a0.., le retour en r0:r1.
 Les adresses de donnees restent numeriques : la memoire du jeu est a nds_mem + adresse DS (DS() du PRELUDE ; 0 sur Windows 32 bits).
 La pile C de chaque fonction est dans cette memoire (piles des threads dans la fenetre) : sp = HOST2DS(&stack_[n]).
 Les pointeurs de code restent des adresses DS (bit Thumb compris), comme dans la rom : un appel indirect passe par
@@ -27,7 +27,7 @@ LOGIC = {"and", "orr", "eor", "bic", "mov", "mvn", "tst", "teq"}
 ARITH = {"add", "adc", "sub", "sbc", "rsb", "rsc", "cmp", "cmn"}
 FLAGGED = LOGIC | ARITH | {"mul", "mla", "umull", "smull", "umlal", "smlal", "lsl", "lsr", "asr", "ror", "neg", "rrx"}
 SHIFT_ALIAS = {"lsl": "LSL", "lsr": "LSR", "asr": "ASR", "ror": "ROR"}
-STACK_ARGS = 6
+STACK_ARGS = 10  # mots de pile passes a chaque appel ; AL7E en lit jusqu'a 9 (fonctions de formatage a la printf)
 RET = "return ((u64)r1<<32)|r0;"
 GOSUB_TAG = 0xFFF00000  # lr des sous-routines internes : jamais une adresse de retour reelle, different de MAGIC_LR
 
@@ -90,8 +90,9 @@ static inline s32 SAT32(s64 v) { return v > 0x7FFFFFFFLL ? 0x7FFFFFFF : v < -0x8
     v = ((~(_a ^ _b) & (_a ^ res)) >> 31); n = res >> 31; z = res == 0; } while (0)
 #define SUBF(a, b, ci) ADDF((a), ~(u32)(b), (ci))
 #define NZ(x) (n = (u32)(x) >> 31, z = (u32)(x) == 0)
-#define CALLF(f) do { u64 _t = ((u64 (*)())(f))(r0, r1, r2, r3, P32(sp), P32(sp + 4), P32(sp + 8), P32(sp + 12), P32(sp + 16), P32(sp + 20)); r0 = (u32)_t; r1 = (u32)(_t >> 32); } while (0)
+#define CALLF(f) do { u64 _t = ((u64 (*)())(f))(r0, r1, r2, r3, @STACK@); r0 = (u32)_t; r1 = (u32)(_t >> 32); } while (0)
 """
+PRELUDE = PRELUDE.replace("@STACK@", ", ".join("P32(sp + %d)" % (4 * k) for k in range(STACK_ARGS)))
 
 
 def reg_name(i):
@@ -650,12 +651,12 @@ class Lifter:
             if label not in text and a in out:
                 marker = "  " + out[a][0]
                 text = text.replace(marker, label + "\n" + marker, 1)
-        args = ", ".join(["u32 r0", "u32 r1", "u32 r2", "u32 r3"] + ["u32 s%d" % i for i in range(STACK_ARGS)])
+        args = ", ".join(["u32 r0", "u32 r1", "u32 r2", "u32 r3"] + ["u32 a%d" % i for i in range(STACK_ARGS)])
         head = [
             "u64 %s(%s) {" % (name, args),
             "  u32 stack_[%d]; u32 sp = HOST2DS(&stack_[%d]);" % (self.frame_words(out) + STACK_ARGS + 2, self.frame_words(out)),
             "  u32 r4=0,r5=0,r6=0,r7=0,r8=0,r9=0,r10=0,r11=0,r12=0,lr=MAGIC_LR,res=0,sh=0,pc_val=0; u32 n=0,z=0,c=0,v=0;",
-            "  " + " ".join("stack_[%d]=s%d;" % (self.frame_words(out) + i, i) for i in range(STACK_ARGS)),
+            "  " + " ".join("stack_[%d]=a%d;" % (self.frame_words(out) + i, i) for i in range(STACK_ARGS)),
         ]
         if name in self.gosub_funcs:
             head.append("  static void *const gs_[] = { %s0 };" % "".join("&&L%08x, " % a for a in self.gosub_labels))

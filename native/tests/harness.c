@@ -209,9 +209,9 @@ static void test_flags_lifted(void) {
 static void test_callf(void) {
     CHECK_EQ(t_pack10(1, 2, 3, 4, 5, 6, 7, 8, 9, 10), PACK10);
     CHECK_EQ(h_pack10(1, 2, 3, 4, 5, 6, 7, 8, 9, 10), PACK10);
-    {   /* CALLF tel que le code traduit l'ecrit : r0..r3, puis 6 mots sous sp ; resultat dans r0:r1 */
+    {   /* CALLF tel que le code traduit l'ecrit : r0..r3, puis 10 mots sous sp ; resultat dans r0:r1 */
         u32 r0, r1, r2, r3, sp = 0x02200000u, i;
-        for (i = 0; i < 6; i++) P32(sp + 4 * i) = 5 + i;
+        for (i = 0; i < 10; i++) P32(sp + 4 * i) = 5 + i;
         r0 = 1; r1 = 2; r2 = 3; r3 = 4;
         CALLF(h_pack10);
         CHECK_EQ(r0, 0x87654321u); CHECK_EQ(r1, 0xA9u);
@@ -221,6 +221,8 @@ static void test_callf(void) {
         r0 = 1; r1 = 2;
         CALLF(nds_call_target(A_h_pack10));
         CHECK_EQ(r0, 0x87654321u); CHECK_EQ(r1, 0xA9u);
+        CALLF(t_args14);                               /* 7e et 10e mots de pile (arguments 11 et 14) */
+        CHECK_EQ(r0, 14); CHECK_EQ(r1, 11);
     }
     CHECK_EQ(C1(t_call10, 0), PACK10);                 /* bl d'une fonction traduite */
     host_calls = 0;

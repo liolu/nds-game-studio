@@ -5,7 +5,7 @@
   python3 native/tests/arm2c_test.py --regen   # apres un changement de arm2c_cases.s (clang avec la cible ARM)
   python3 native/tests/arm2c_test.py --arch x86_64   # macOS : version Intel, lancee par Rosetta sur Apple Silicon
 
-Couvre : RD/WR et la rotation de LDRW, les macros de drapeaux, CALLF a 10 arguments (fonction traduite et fonction C),
+Couvre : RD/WR et la rotation de LDRW, les macros de drapeaux, CALLF a 10 arguments (fonction traduite et fonction C) et 14 (t_args14),
 les sous-routines internes (GOSUB_TAG, gs_), nds_call_target sur des adresses ARM et Thumb, et les fils verts de
 nitro-pc/context.c (OS_SaveContext/OS_LoadContext, nds_run_on_stack : deux fils sur des piles de la fenetre se
 passent la main un million de fois chacun).
@@ -47,6 +47,7 @@ CASES = [
     ("t_tail", 0x2c0, False, "00c0a0e10100a0e11cff2fe1"),
     ("t_gosub", 0x300, False, "10402de9020000eb030000eb040000eb1080bde88000a0e11eff2fe1010080e20ef0a0e104e02de5f9ffffeb090080e204f09de4"),
     ("t_thumb", 0x380, True, "00b500f003f800f001f800bd400003307047"),
+    ("t_args14", 0x400, False, "24009de518109de51eff2fe1"),
 ]
 # --- fin des CASES ---
 
