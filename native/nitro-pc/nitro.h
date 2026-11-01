@@ -16,33 +16,8 @@ typedef long long s64;
 #define REG8(a) (*(volatile u8 *)(a))
 #define IO 0x04000000u
 
-/* Windows */
-#define WINAPI __attribute__((stdcall))
-#define IMPORT __attribute__((dllimport))
-IMPORT void *WINAPI VirtualAlloc(void *, unsigned long, unsigned long, unsigned long);
-IMPORT int WINAPI VirtualProtect(void *, unsigned long, unsigned long, unsigned long *);
-IMPORT void *WINAPI AddVectoredExceptionHandler(unsigned long, void *);
-IMPORT void *WINAPI CreateFileA(const char *, unsigned long, unsigned long, void *, unsigned long, unsigned long, void *);
-IMPORT int WINAPI ReadFile(void *, void *, unsigned long, unsigned long *, void *);
-IMPORT int WINAPI WriteFile(void *, const void *, unsigned long, unsigned long *, void *);
-IMPORT unsigned long WINAPI GetFileSize(void *, unsigned long *);
-IMPORT int WINAPI CloseHandle(void *);
-IMPORT void *WINAPI GetStdHandle(unsigned long);
-IMPORT void WINAPI ExitProcess(unsigned);
-IMPORT void WINAPI Sleep(unsigned long);
-IMPORT int WINAPI QueryPerformanceCounter(s64 *);
-IMPORT int WINAPI QueryPerformanceFrequency(s64 *);
-IMPORT const char *WINAPI GetCommandLineA(void);
-IMPORT void *WINAPI CreateFileMappingA(void *, void *, unsigned long, unsigned long, unsigned long, const char *);
-IMPORT void *WINAPI MapViewOfFile(void *, unsigned long, unsigned long, unsigned long, unsigned long);
-IMPORT void *WINAPI CreateThread(void *, unsigned long, void *, void *, unsigned long, unsigned long *);
-IMPORT int WINAPI SetThreadPriority(void *, int);
-IMPORT void *WINAPI GetCurrentThread(void);
-IMPORT void *WINAPI OpenFileMappingA(unsigned long, int, const char *);
-IMPORT void *WINAPI CreateEventA(void *, int, int, const char *);
-IMPORT int WINAPI SetEvent(void *);
-IMPORT unsigned long WINAPI WaitForSingleObject(void *, unsigned long);
-IMPORT unsigned long WINAPI GetActiveProcessorCount(unsigned short);
+/* plateforme : memoire, fichiers, fils, temps, son (os_win32.c) */
+#include "os.h"
 
 /* core.c */
 extern u32 nds_cpsr;

@@ -6,7 +6,6 @@
 #define VISIBLE 192
 
 u32 nds_frame;
-IMPORT unsigned WINAPI timeBeginPeriod(unsigned);
 
 static s64 freq, t0;
 static u32 if_state;
@@ -27,8 +26,7 @@ static u32 fifo_count(void) { return fifo_w - fifo_r; }
 static u32 clock_k; /* cycles par tic QPC, en virgule fixe 16 bits */
 
 static u64 cycles64(void) {
-    s64 now;
-    QueryPerformanceCounter(&now);
+    s64 now = os_time_now();
     return ((u64)(now - t0) * clock_k) >> 16;
 }
 
@@ -41,9 +39,8 @@ extern const int nds_has_c;
 int nds_in_veh;
 static int open_depth;
 static void io_open(int on) {
-    unsigned long old;
-    VirtualProtect((void *)IO, 0x1000, on ? 4 : 1, &old);
-    VirtualProtect((void *)0x04100000u, 0x1000, on ? 4 : 1, &old);
+    os_mem_protect((void *)IO, 0x1000, on ? OS_RW : OS_NOACCESS);
+    os_mem_protect((void *)0x04100000u, 0x1000, on ? OS_RW : OS_NOACCESS);
 }
 /* le runtime touche aux registres sans passer par les exceptions */
 #define OPEN() do { if (!nds_in_veh && open_depth++ == 0) io_open(1); } while (0)
@@ -169,7 +166,7 @@ void io_wait_irq(void) {
             if (!(nds_cpsr & 0x80)) irq_deliver();
             return;
         }
-        Sleep(1);
+        os_sleep(1);
     }
 }
 
@@ -397,10 +394,10 @@ void nds_io_write(u32 a, u32 v, u32 size) {
 }
 
 void io_init(void) {
-    QueryPerformanceFrequency(&freq);
-    QueryPerformanceCounter(&t0);
+    freq = os_time_freq();
+    t0 = os_time_now();
     clock_k = (u32)((MS_FREQ << 16) / (u64)freq);
-    timeBeginPeriod(1);
+    os_time_hires();
     nds_in_veh = nds_has_c ? 0 : 1;
     REG32(IO + 0x184) = 0x101;
     REG32(0x027FFF8Cu) = 0xFFFFFFFFu; /* tous les modules ARM7 sont prets */

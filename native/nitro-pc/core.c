@@ -53,8 +53,7 @@ static void vlog(const char *fmt, va_list ap) {
         else buf[w++] = *fmt;
     }
     buf[w++] = '\n';
-    unsigned long written;
-    WriteFile(GetStdHandle((unsigned long)-12), buf, w, &written, 0);
+    os_stderr_write(buf, w);
 }
 
 void nds_log(const char *fmt, ...) { va_list ap; va_start(ap, fmt); vlog(fmt, ap); va_end(ap); }
@@ -64,7 +63,7 @@ void nds_fatal(const char *fmt, ...) {
     va_start(ap, fmt);
     vlog(fmt, ap);
     va_end(ap);
-    ExitProcess(3);
+    os_exit(3);
 }
 
 void nds_unhandled(const char *f, u32 pc) { nds_fatal("instruction non traduite %s @%x", f, pc); }
@@ -75,21 +74,7 @@ static const char *argv_[32];
 static int argc_;
 
 static void parse_args(void) {
-    static char line[2048];
-    const char *c = GetCommandLineA();
-    int n = 0;
-    while (*c && n < 2047) line[n++] = *c++;
-    line[n] = 0;
-    char *p = line;
-    while (*p && argc_ < 32) {
-        while (*p == ' ') p++;
-        if (!*p) break;
-        char end = ' ';
-        if (*p == '"') { end = '"'; p++; }
-        argv_[argc_++] = p;
-        while (*p && *p != end) p++;
-        if (*p) *p++ = 0;
-    }
+    argc_ = os_get_args(argv_, 32);
 }
 
 int nds_arg(const char *name, const char **value) {
@@ -390,7 +375,7 @@ void nds_dump_threads(void) {
 /* piles x86 au-dessus de la zone DS, jamais sous 0x01000000 que le code traduit reserve au miroir ITCM */
 static u32 next_stack = 0x20000000u;
 static u8 *stack_alloc(u32 size) {
-    u8 *p = VirtualAlloc((void *)next_stack, size, 0x3000, 4);
+    u8 *p = os_mem_alloc((void *)next_stack, size);
     if (!p) nds_fatal("pile impossible a %x", next_stack);
     next_stack += (size + 0xFFFF) & ~0xFFFFu;
     return p;
@@ -427,21 +412,6 @@ void OS_InitContext(u32 ctx, u32 pc, u32 sp) {
 }
 
 /* ------------------------------------------------------------------ exceptions : registres a effets */
-#define EXC_ACCESS 0xC0000005u
-#define EXC_STEP 0x80000004u
-#define EXC_CONTINUE (-1)
-#define EXC_NEXT 0
-#define PAGE_RW 4
-#define PAGE_NONE 1
-
-typedef struct { u32 code, flags; void *rec; void *addr; u32 nparams; u32 info[15]; } ExcRecord;
-/* CONTEXT x86 : seuls Esp (196), Eip (184), EFlags (192) servent */
-typedef struct { ExcRecord *rec; u8 *ctx; } ExcPointers;
-#define CTX_U32(c, off) (*(u32 *)((c) + (off)))
-#define CTX_EIP 184
-#define CTX_EFLAGS 192
-#define CTX_ESP 196
-
 int nds_trace;
 u32 nds_trace_count, nds_trace_eip, nds_trace_addr, nds_trace_stack[13];
 static u32 pending_page, pending_addr, pending_write;
@@ -449,23 +419,21 @@ void nds_irq_tramp(void);
 __asm__(".globl _nds_irq_tramp\n_nds_irq_tramp:\n  pushf\n  pusha\n  cld\n  call _irq_deliver\n  popa\n  popf\n  ret\n");
 
 static void io_protect(u32 page, int on) {
-    unsigned long old;
-    VirtualProtect((void *)page, 0x1000, on ? PAGE_NONE : PAGE_RW, &old);
+    os_mem_protect((void *)page, 0x1000, on ? OS_NOACCESS : OS_RW);
 }
 
-static long WINAPI on_exception(ExcPointers *e) {
-    ExcRecord *r = e->rec;
-    if (r->code == EXC_ACCESS) {
-        u32 addr = r->info[1];
+static int on_exception(OsFault *e) {
+    if (e->kind == OS_FAULT_ACCESS) {
+        u32 addr = e->addr;
         u32 page = addr & ~0xFFFu;
         if (page == IO || page == 0x04100000u) {
             io_protect(IO, 0);
             io_protect(0x04100000u, 0);
             if (nds_trace) {
                 nds_trace_count++;
-                nds_trace_eip = (u32)r->addr;
+                nds_trace_eip = e->ip;
                 nds_trace_addr = addr;
-                u32 *st = (u32 *)CTX_U32(e->ctx, CTX_ESP);
+                u32 *st = (u32 *)os_fault_reg(e, OS_REG_SP);
                 int k = 0;
                 for (int i = 0; i < 200 && k < 12; i++)
                     if (st[i] >= 0x10000000u && st[i] < 0x11000000u) nds_trace_stack[k++] = st[i];
@@ -473,12 +441,12 @@ static long WINAPI on_exception(ExcPointers *e) {
             }
             pending_page = page;
             pending_addr = addr;
-            pending_write = r->info[0] == 1;
+            pending_write = e->access == 1;
             if (!pending_write) io_before_read(addr);
-            CTX_U32(e->ctx, CTX_EFLAGS) |= 0x100;
-            return EXC_CONTINUE;
+            os_fault_set_step(e, 1);
+            return OS_FAULT_RESUME;
         }
-        nds_log("acces memoire invalide %x (%s) eip=%x esp=%x arm=%x", addr, r->info[0] ? "ecriture" : "lecture", (u32)r->addr, CTX_U32(e->ctx, CTX_ESP), nds_pc);
+        nds_log("acces memoire invalide %x (%s) eip=%x esp=%x arm=%x", addr, e->access ? "ecriture" : "lecture", e->ip, os_fault_reg(e, OS_REG_SP), nds_pc);
 #ifdef NDS_INSTRUMENT
         nds_log("  r0=%x r1=%x r2=%x r3=%x r4=%x r5=%x", nds_r[0], nds_r[1], nds_r[2], nds_r[3], nds_r[4], nds_r[5]);
         for (int k = 0; k < 6; k++) {
@@ -488,8 +456,8 @@ static long WINAPI on_exception(ExcPointers *e) {
             }
         }
 #endif
-        u32 *st = (u32 *)CTX_U32(e->ctx, CTX_ESP);
-        u32 *bp = (u32 *)CTX_U32(e->ctx, 180);
+        u32 *st = (u32 *)os_fault_reg(e, OS_REG_SP);
+        u32 *bp = (u32 *)os_fault_reg(e, OS_REG_BP);
 #ifdef NDS_INSTRUMENT
         {
             extern u32 nds_ring[4096], nds_ring_pos;
@@ -510,43 +478,33 @@ static long WINAPI on_exception(ExcPointers *e) {
             u32 v = st[i];
             if (v >= 0x10000000u && v < 0x11000000u) nds_log("    %x", v);
         }
-        ExitProcess(4);
+        os_exit(4);
     }
-    if (r->code == EXC_STEP && pending_page) {
+    if (e->kind == OS_FAULT_STEP && pending_page) {
         u32 page = pending_page, addr = pending_addr;
         pending_page = 0;
         if (pending_write) io_after_write(addr);
         int ready = io_irq_ready();
         io_protect(IO, 1);
         io_protect(0x04100000u, 1);
-        CTX_U32(e->ctx, CTX_EFLAGS) &= ~0x100u;
-        if (ready) {
-            u32 esp = CTX_U32(e->ctx, CTX_ESP) - 4;
-            *(u32 *)esp = CTX_U32(e->ctx, CTX_EIP);
-            CTX_U32(e->ctx, CTX_ESP) = esp;
-            CTX_U32(e->ctx, CTX_EIP) = (u32)nds_irq_tramp;
-        }
-        return EXC_CONTINUE;
+        os_fault_set_step(e, 0);
+        if (ready) os_fault_call(e, nds_irq_tramp);
+        return OS_FAULT_RESUME;
     }
-    nds_log("exception %x a %x", r->code, (u32)r->addr);
-    ExitProcess(5);
-    return EXC_NEXT;
+    nds_log("exception %x a %x", e->code, e->ip);
+    os_exit(5);
+    return OS_FAULT_PASS;
 }
 
 /* ------------------------------------------------------------------ chargement */
 static void reserve(u32 addr, u32 size) {
-    void *p = VirtualAlloc((void *)addr, size, 0x3000, PAGE_RW);
+    void *p = os_mem_alloc((void *)addr, size);
     if (p != (void *)addr) nds_fatal("memoire DS indisponible a %x", addr);
 }
 
 static void load_file(const char *path) {
-    void *h = CreateFileA(path, 0x80000000u, 1, 0, 3, 0, 0);
-    if (h == (void *)-1) nds_fatal("rom introuvable : %s", path);
-    nds_rom_size = GetFileSize(h, 0);
-    nds_rom = VirtualAlloc(0, nds_rom_size, 0x3000, PAGE_RW);
-    unsigned long got;
-    ReadFile(h, nds_rom, nds_rom_size, &got, 0);
-    CloseHandle(h);
+    nds_rom = os_file_load(path, &nds_rom_size);
+    if (!nds_rom) nds_fatal("rom introuvable : %s", path);
 }
 
 /* decompression BLZ de arm9 (identique au MIi_UncompressBackward du SDK, faite ici car le module charge avant _start) */
@@ -595,24 +553,16 @@ static void load_arm9(void) {
 }
 
 /* profil par echantillons (--prof) : ou le jeu passe son temps */
-IMPORT unsigned long WINAPI SuspendThread(void *);
-IMPORT unsigned long WINAPI ResumeThread(void *);
-IMPORT int WINAPI GetThreadContext(void *, void *);
-IMPORT int WINAPI DuplicateHandle(void *, void *, void *, void **, unsigned long, int, unsigned long);
-IMPORT void *WINAPI GetCurrentProcess(void);
 static void *main_thread;
 
-static unsigned long WINAPI prof_thread(void *arg) {
+static void prof_thread(void *arg) {
     static u32 addrs[256], counts[256];
-    static u32 ctx[256];
-    u32 total = 0;
+    u32 total = 0, sp = 0;
     for (;;) {
-        Sleep(5);
-        ctx[0] = 0x10001;
-        SuspendThread(main_thread);
-        GetThreadContext(main_thread, ctx);
-        ResumeThread(main_thread);
-        u32 eip = ctx[184 / 4] & ~0xFu;
+        os_sleep(5);
+        u32 eip;
+        os_thread_sample(main_thread, &eip, &sp);
+        eip &= ~0xFu;
         total++;
         for (int i = 0; i < 256; i++) {
             if (addrs[i] == eip) { counts[i]++; break; }
@@ -628,7 +578,7 @@ static unsigned long WINAPI prof_thread(void *arg) {
             }
 #endif
             {
-                u32 *st = (u32 *)ctx[196 / 4];
+                u32 *st = (u32 *)sp;
                 int shown = 0;
                 for (u32 i = 0; i < 4000 && shown < 24; i++)
                     if (st[i] >= 0x10000000u && st[i] < 0x11000000u) { nds_log("  pile %8x", st[i]); shown++; }
@@ -643,7 +593,6 @@ static unsigned long WINAPI prof_thread(void *arg) {
             for (int i = 0; i < 256; i++) { addrs[i] = 0; counts[i] = 0; }
         }
     }
-    return 0;
 }
 
 static void run_game(void) {
@@ -653,7 +602,7 @@ static void run_game(void) {
 
 void nds_start(void) {
     parse_args();
-    AddVectoredExceptionHandler(1, on_exception);
+    os_fault_install(on_exception);
     reserve(0x01FF0000u, 0x10000);   /* ITCM (0x01FF8000), reservation alignee sur 64 Ko */
     reserve(0x02000000u, 0x02000000u); /* RAM principale, miroirs, WRAM partagee et ARM7 */
     reserve(0x04000000u, 0x00200000u); /* registres */
@@ -687,8 +636,8 @@ void nds_start(void) {
     }
 #endif
     if (nds_arg("--prof", 0)) {
-        DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &main_thread, 0, 0, 2);
-        CreateThread(0, 0x10000, prof_thread, 0, 0, 0);
+        main_thread = os_thread_self();
+        os_thread_start(prof_thread, 0, 0x10000);
     }
     /* grande pile, allouee apres la memoire DS pour ne pas la gener */
     enum { MAIN_STACK = 16 << 20 };

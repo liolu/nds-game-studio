@@ -58,18 +58,16 @@ u32 PM_GetBackLight(u32 *top, u32 *bottom) {
 u32 PM_SetLCDPower(u32 on) { return 1; }
 u32 PM_GetLCDPower(void) { return 1; }
 u32 PM_ForceToPowerOffAsync(void *cb, void *arg) { return 0; }
-u32 PM_ForceToPowerOff(void) { ExitProcess(0); return 0; }
+u32 PM_ForceToPowerOff(void) { os_exit(0); return 0; }
 
 /* horloge */
-typedef struct { u16 year, month, dow, day, hour, minute, second, ms; } SYSTEMTIME;
-IMPORT void WINAPI GetLocalTime(SYSTEMTIME *);
 typedef struct { u32 year, month, day, week; } RTCDate;
 typedef struct { u32 hour, minute, second; } RTCTime;
 
 void RTC_Init(void) {}
 u32 RTC_GetDateTime(RTCDate *d, RTCTime *t) {
-    SYSTEMTIME s;
-    GetLocalTime(&s);
+    OsTime s;
+    os_local_time(&s);
     if (d) { d->year = s.year % 100; d->month = s.month; d->day = s.day; d->week = s.dow; }
     if (t) { t->hour = s.hour; t->minute = s.minute; t->second = s.second; }
     return 0;

@@ -34,23 +34,15 @@ static u32 *card_cmd; /* result, ?, ?, source, destination, longueur */
 
 static void save_flush(void) {
     if (!save_path) return;
-    void *f = CreateFileA(save_path, 0x40000000u, 0, 0, 2, 0, 0);
-    if (f == (void *)-1) return;
-    unsigned long w;
-    WriteFile(f, save, SAVE_SIZE, &w, 0);
-    CloseHandle(f);
+    os_file_save(save_path, save, SAVE_SIZE);
 }
 
 static void save_load(void) {
-    save = VirtualAlloc(0, SAVE_SIZE, 0x3000, 4);
+    save = os_mem_alloc(0, SAVE_SIZE);
     for (u32 i = 0; i < SAVE_SIZE; i++) save[i] = 0xFF;
     nds_arg("--save", &save_path);
     if (!save_path) return;
-    void *f = CreateFileA(save_path, 0x80000000u, 1, 0, 3, 0, 0);
-    if (f == (void *)-1) return;
-    unsigned long r;
-    ReadFile(f, save, SAVE_SIZE, &r, 0);
-    CloseHandle(f);
+    os_file_read(save_path, save, SAVE_SIZE);
 }
 
 static void card_request(u32 req) {

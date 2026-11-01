@@ -29,6 +29,17 @@ for bin_dir in (str(TOOLCHAIN_BIN), WINLIBS):
     if os.path.isdir(bin_dir):
         os.environ["PATH"] = bin_dir + os.pathsep + os.environ["PATH"]
         break
+# Couche systeme du runtime (nitro-pc/os.h) : une seule source os_*.c par plateforme
+OS_SOURCES = {"win32": "os_win32.c"}
+
+
+def runtime_sources():
+    os_source = OS_SOURCES.get(sys.platform)
+    if not os_source:
+        sys.exit("pas de couche systeme nitro-pc pour la plateforme %s" % sys.platform)
+    return sorted(p for p in RUNTIME.glob("*.c") if not p.name.startswith("os_") or p.name == os_source)
+
+
 IDLE = 0x4000 | 0x08000000  # priorite basse, le PC reste utilisable ; pas de console quand le launcher nous lance
 
 GAME_FLAGS = ["-m32", "-std=gnu89", "-O1", "-w", "-fwrapv", "-fno-strict-aliasing", "-fno-delete-null-pointer-checks",
@@ -169,7 +180,7 @@ def main():
     force = set(filter(None, a.lift.split(",")))
 
     # 1. runtime : ce qu'il definit remplace le jeu
-    rt_srcs = sorted(RUNTIME.glob("*.c"))
+    rt_srcs = runtime_sources()
     rt_flags = RUNTIME_FLAGS + ["-I", RUNTIME]
     with ThreadPoolExecutor(a.j) as e:
         res = list(e.map(compile_one, [(s, obj_for(out, s), rt_flags) for s in rt_srcs]))

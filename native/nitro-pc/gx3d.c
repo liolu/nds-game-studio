@@ -907,12 +907,12 @@ static void edge_band(void *arg, int band, int bands) {
 const u32 *gx_render(int w, int h, int k, int margin) {
     static int last_w, last_h;
     if (!color_buf) {
-        color_buf = VirtualAlloc(0, MAX_W * MAX_H * 4, 0x3000, 4);
-        z_buf = VirtualAlloc(0, MAX_W * MAX_H * 4, 0x3000, 4);
-        id_buf = VirtualAlloc(0, MAX_W * MAX_H, 0x3000, 4);
-        tex_arena = VirtualAlloc(0, TEX_ARENA * 4, 0x3000, 4);
+        color_buf = os_mem_alloc(0, MAX_W * MAX_H * 4);
+        z_buf = os_mem_alloc(0, MAX_W * MAX_H * 4);
+        id_buf = os_mem_alloc(0, MAX_W * MAX_H);
+        tex_arena = os_mem_alloc(0, TEX_ARENA * 4);
     }
-    while (__sync_lock_test_and_set(&list_lock, 1)) Sleep(0);
+    while (__sync_lock_test_and_set(&list_lock, 1)) os_yield();
     int fresh = list_fresh;
     if (fresh) {
         int t = list_shown;
@@ -970,7 +970,7 @@ void gx_begin_frame(void) {
     st->vx2 = vp_x2;
     st->vy2 = vp_y2;
     REG16(IO + 0x604) = (u16)poly_count[build];
-    while (__sync_lock_test_and_set(&list_lock, 1)) Sleep(0);
+    while (__sync_lock_test_and_set(&list_lock, 1)) os_yield();
     int t = list_ready;
     list_ready = build;
     build = t;

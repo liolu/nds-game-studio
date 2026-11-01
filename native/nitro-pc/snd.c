@@ -1,10 +1,6 @@
 /* Son : le travail du firmware ARM7 (sequenceur SSEQ, banques SBNK, ondes SWAV, flux PCM) et le mixeur. */
 #include "nitro.h"
 
-IMPORT unsigned WINAPI waveOutOpen(void **, unsigned, const void *, unsigned long, unsigned long, unsigned long);
-IMPORT unsigned WINAPI waveOutPrepareHeader(void *, void *, unsigned);
-IMPORT unsigned WINAPI waveOutWrite(void *, void *, unsigned);
-
 #define RATE 32768
 #define CHANNELS 16
 #define PLAYERS 16
@@ -14,7 +10,7 @@ IMPORT unsigned WINAPI waveOutWrite(void *, void *, unsigned);
 volatile u32 *snd_shared(void);
 
 static volatile long lock_word;
-static void lock(void) { while (__sync_lock_test_and_set(&lock_word, 1)) Sleep(0); }
+static void lock(void) { while (__sync_lock_test_and_set(&lock_word, 1)) os_yield(); }
 static void unlock(void) { __sync_lock_release(&lock_word); }
 
 /* ------------------------------------------------------------------ tables */
@@ -852,68 +848,48 @@ static void mix(s16 *out, u32 frames) {
     }
 }
 
-typedef struct {
-    u16 tag, channels;
-    u32 rate, bytes;
-    u16 align, bits, extra;
-} __attribute__((packed)) WaveFmt;
-typedef struct {
-    void *data;
-    u32 len, recorded, user, flags, loops;
-    void *next;
-    u32 reserved;
-} WaveHdr;
-
-#define BUFFERS 6
 #define BUF_FRAMES 384
 
-static unsigned long WINAPI audio_thread(void *arg) {
-    static s16 buf[BUFFERS][BUF_FRAMES * 2];
-    static WaveHdr hdr[BUFFERS];
-    void *dev = 0;
-    WaveFmt fmt = {1, 2, RATE, RATE * 4, 4, 16, 0};
-    if (!nds_arg("--mute", 0) && waveOutOpen(&dev, 0xFFFFFFFFu, &fmt, 0, 0, 0)) {
-        nds_log("pas de sortie son");
-        dev = 0;
+static void audio_thread(void *arg) {
+    static s16 idle_buf[BUF_FRAMES * 2];
+    OsAudio *dev = 0;
+    if (!nds_arg("--mute", 0)) {
+        dev = os_audio_open(RATE, BUF_FRAMES);
+        if (!dev) nds_log("pas de sortie son");
     }
-    SetThreadPriority(GetCurrentThread(), 2);
-    for (int i = 0; i < BUFFERS; i++) {
-        hdr[i].data = buf[i];
-        hdr[i].len = sizeof(buf[i]);
-        if (dev) {
-            waveOutPrepareHeader(dev, &hdr[i], sizeof(WaveHdr));
-            mix(buf[i], BUF_FRAMES);
-            waveOutWrite(dev, &hdr[i], sizeof(WaveHdr));
+    os_thread_set_high_priority();
+    if (dev) {
+        /* amorce : tous les tampons sont remplis avant que la sortie ne commence a consommer */
+        for (u32 i = os_audio_depth(dev); i; i--) {
+            s16 *b = os_audio_acquire(dev);
+            mix(b, BUF_FRAMES);
+            os_audio_submit(dev);
         }
     }
-    int cur = 0;
     const char *wav_path = 0;
-    void *wav = (void *)-1;
+    OsFile wav = OS_BAD_FILE;
     u32 wav_bytes = 0;
     if (nds_arg("--wav", &wav_path) && wav_path) {
-        wav = CreateFileA(wav_path, 0x40000000u, 0, 0, 2, 0, 0);
+        wav = os_file_create(wav_path);
         master = 0.6f;
     }
     for (;;) {
-        if (wav != (void *)-1) {
-            unsigned long w;
-            Sleep(BUF_FRAMES * 1000 / RATE);
-            mix(buf[0], BUF_FRAMES);
-            WriteFile(wav, buf[0], sizeof(buf[0]), &w, 0);
-            wav_bytes += sizeof(buf[0]);
+        if (wav != OS_BAD_FILE) {
+            os_sleep(BUF_FRAMES * 1000 / RATE);
+            mix(idle_buf, BUF_FRAMES);
+            os_file_write(wav, idle_buf, sizeof(idle_buf));
+            wav_bytes += sizeof(idle_buf);
             (void)wav_bytes;
         } else if (dev) {
-            while (!(*(volatile u32 *)&hdr[cur].flags & 1)) Sleep(2);
-            mix(buf[cur], BUF_FRAMES);
-            waveOutWrite(dev, &hdr[cur], sizeof(WaveHdr));
-            cur = (cur + 1) % BUFFERS;
+            s16 *b = os_audio_acquire(dev);
+            mix(b, BUF_FRAMES);
+            os_audio_submit(dev);
         } else {
             /* sans sortie son (ou --mute), le sequenceur avance quand meme : les flux en dependent */
-            Sleep(BUF_FRAMES * 1000 / RATE);
-            mix(buf[0], BUF_FRAMES);
+            os_sleep(BUF_FRAMES * 1000 / RATE);
+            mix(idle_buf, BUF_FRAMES);
         }
     }
-    return 0;
 }
 
 void snd_start_output(void) {
@@ -922,5 +898,5 @@ void snd_start_output(void) {
         for (int t = 0; t < 16; t++) players[p].tracks[t] = 0xFF;
     for (int t = 0; t < TRACKS; t++) tracks[t].index = (u8)t;
     if (nds_arg("--mute", 0)) master = 0;
-    CreateThread(0, 0x40000, audio_thread, 0, 0, 0);
+    os_thread_start(audio_thread, 0, 0x40000);
 }

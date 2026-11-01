@@ -143,7 +143,7 @@ No ROM is, or ever will be, in the repo or the CI, so:
 
 | Step | Change | Done when |
 |---|---|---|
-| 1 | Extract `os.h` + `os_win32.c` (no behavior change) | Windows module builds and boots the same |
+| 1 | Extract `os.h` + `os_win32.c` (no behavior change). **Code done, not yet built or run on Windows** | Windows module builds and boots the same |
 | 2 | `DS()`/`HOST2DS()` in translator and runtime, `nds_mem = 0` on win32 | same golden frames on Windows |
 | 3 | Code pointers as DS addresses, direct-mapped dispatch, no fixups, gosub tags | same golden frames on Windows |
 | 4 | 64-bit `Slot`, arm64/x86_64 context switch, no x86 inline asm on 64-bit | unit harness passes on macOS |

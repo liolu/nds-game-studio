@@ -118,7 +118,7 @@ typedef struct {
 } Snapshot;
 static Snapshot snap;
 static volatile int worker_busy;
-static void *worker_event;
+static OsEvent worker_event;
 
 static void snapshot_take(void) {
     Snapshot *s = &snap;
@@ -507,27 +507,26 @@ static int render_engine(const Eng *base, u32 *screen) {
 #define MAX_THREADS 8
 typedef void (*BandFn)(void *arg, int band, int bands);
 static int pool_size;
-static void *pool_go[MAX_THREADS], *pool_done[MAX_THREADS];
+static OsEvent pool_go[MAX_THREADS], pool_done[MAX_THREADS];
 static volatile BandFn pool_fn;
 static void *volatile pool_arg;
 
-static unsigned long WINAPI pool_thread(void *param) {
+static void pool_thread(void *param) {
     int index = (int)(u32)param;
     for (;;) {
-        WaitForSingleObject(pool_go[index], 0xFFFFFFFFu);
+        os_event_wait(pool_go[index]);
         pool_fn(pool_arg, index + 1, pool_size + 1);
-        SetEvent(pool_done[index]);
+        os_event_set(pool_done[index]);
     }
-    return 0;
 }
 
 /* appelle fn(arg, 0..n-1, n) ; le fil courant fait la bande 0 */
 void gfx_parallel(BandFn fn, void *arg) {
     pool_fn = fn;
     pool_arg = arg;
-    for (int i = 0; i < pool_size; i++) SetEvent(pool_go[i]);
+    for (int i = 0; i < pool_size; i++) os_event_set(pool_go[i]);
     fn(arg, 0, pool_size + 1);
-    for (int i = 0; i < pool_size; i++) WaitForSingleObject(pool_done[i], 0xFFFFFFFFu);
+    for (int i = 0; i < pool_size; i++) os_event_wait(pool_done[i]);
 }
 
 /* ------------------------------------------------------------------ assemblage */
@@ -642,9 +641,9 @@ static void engine_output(const Eng *e, int index, int k, int w, int h, int marg
 /* ------------------------------------------------------------------ boucle du fil de rendu */
 static u32 *back_top, *back_bottom;
 
-static unsigned long WINAPI render_thread(void *arg) {
+static void render_thread(void *arg) {
     for (;;) {
-        WaitForSingleObject(worker_event, 0xFFFFFFFFu);
+        os_event_wait(worker_event);
         int k, ds_width;
         present_config(&k, &ds_width);
         int w = ds_width * k, h = 192 * k;
@@ -665,7 +664,6 @@ static unsigned long WINAPI render_thread(void *arg) {
         present_flip(w, h, snap.frame);
         worker_busy = 0;
     }
-    return 0;
 }
 
 /* appele au VBlank par le fil du jeu */
@@ -674,19 +672,19 @@ void gfx_render(void) {
     if (!started) {
         started = 1;
         for (int i = 0; i < 32; i++) to8[i] = (u8)(i * 255 / 31);
-        int cores = (int)GetActiveProcessorCount(0xFFFF);
+        int cores = os_cpu_count();
         pool_size = cores > 4 ? (cores - 3 > MAX_THREADS - 1 ? MAX_THREADS - 1 : cores - 3) : 1;
         for (int i = 0; i < pool_size; i++) {
-            pool_go[i] = CreateEventA(0, 0, 0, 0);
-            pool_done[i] = CreateEventA(0, 0, 0, 0);
-            CreateThread(0, 0x40000, pool_thread, (void *)(u32)i, 0, 0);
+            pool_go[i] = os_event_create();
+            pool_done[i] = os_event_create();
+            os_thread_start(pool_thread, (void *)(u32)i, 0x40000);
         }
-        worker_event = CreateEventA(0, 0, 0, 0);
-        CreateThread(0, 0x40000, render_thread, 0, 0, 0);
+        worker_event = os_event_create();
+        os_thread_start(render_thread, 0, 0x40000);
     }
     gx_begin_frame();
     if (worker_busy) return; /* le dessin precedent n'est pas fini : cette image n'est pas dessinee, le jeu continue */
     worker_busy = 1;
     snapshot_take();
-    SetEvent(worker_event);
+    os_event_set(worker_event);
 }
