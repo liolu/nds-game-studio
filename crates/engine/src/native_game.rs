@@ -5,8 +5,8 @@
 //! proposé qu'une fois le module prêt. Les outils (traducteur, compilateur, runtime, recettes) sont livrés à côté du
 //! studio, dans `native-toolchain` ; sinon ils sont téléchargés. Un `native/<code>.exe` à côté du studio passe avant.
 //!
-//! Le jeu tourne dans son propre processus 32 bits, car son code suppose des pointeurs 32 bits, et reçoit
-//! la rom de l'utilisateur en argument. Il dessine ses deux écrans à la définition de la fenêtre dans une mémoire
+//! Le jeu tourne dans son propre processus (32 bits sous Windows, où son code suppose des pointeurs 32 bits ; 64 bits
+//! sous macOS, voir `native/MACOS.md`), et reçoit la rom de l'utilisateur en argument. Il dessine ses deux écrans à la définition de la fenêtre dans une mémoire
 //! partagée et lit les commandes sur son entrée standard ; le moteur les affiche sur les écrans habituels (fenêtres
 //! liées ou séparées, F8, F9). Le launcher lui donne le format et la définition : tout changement s'applique en jeu.
 
@@ -42,6 +42,9 @@ const MAX_SCALE: f32 = 6.0;
 struct SharedFrames {
     #[cfg(windows)]
     handle: windows_sys::Win32::Foundation::HANDLE,
+    /// Nom de l'objet POSIX, pour le détruire.
+    #[cfg(unix)]
+    name: std::ffi::CString,
     view: *const u8,
 }
 
@@ -70,7 +73,36 @@ impl SharedFrames {
         }
     }
 
-    #[cfg(not(windows))]
+    /// macOS limite le nom à 31 caractères, barre oblique du début comprise.
+    #[cfg(unix)]
+    fn new(name: &str) -> Option<Self> {
+        let name = std::ffi::CString::new(name).ok()?;
+        if name.as_bytes().len() > 31 || name.as_bytes().first() != Some(&b'/') {
+            return None;
+        }
+        // SAFETY: nom terminé par zéro ; le descripteur est fermé dans tous les cas, la vue est rendue dans `drop`.
+        unsafe {
+            // Un reste d'un processus arrêté de force qui avait le même numéro
+            libc::shm_unlink(name.as_ptr());
+            let fd = libc::shm_open(name.as_ptr(), libc::O_CREAT | libc::O_EXCL | libc::O_RDWR, 0o600 as libc::c_uint);
+            if fd < 0 {
+                return None;
+            }
+            let view = if libc::ftruncate(fd, SHM_BYTES as libc::off_t) == 0 {
+                libc::mmap(std::ptr::null_mut(), SHM_BYTES, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_SHARED, fd, 0)
+            } else {
+                libc::MAP_FAILED
+            };
+            libc::close(fd);
+            if view == libc::MAP_FAILED {
+                libc::shm_unlink(name.as_ptr());
+                return None;
+            }
+            Some(Self { name, view: view as *const u8 })
+        }
+    }
+
+    #[cfg(not(any(windows, unix)))]
     fn new(_name: &str) -> Option<Self> {
         None
     }
@@ -107,6 +139,26 @@ impl Drop for SharedFrames {
     }
 }
 
+#[cfg(unix)]
+impl Drop for SharedFrames {
+    fn drop(&mut self) {
+        // SAFETY: vue et nom viennent de `new` et ne servent plus ; le jeu garde sa propre vue jusqu'à sa fin.
+        unsafe {
+            libc::munmap(self.view as *mut libc::c_void, SHM_BYTES);
+            libc::shm_unlink(self.name.as_ptr());
+        }
+    }
+}
+
+/// Le nom de la mémoire partagée avec le jeu. Sous macOS : 31 caractères au plus, comme `os_posix.c`.
+fn shm_name(code: &str) -> String {
+    if cfg!(unix) {
+        format!("/ndsgs-{}-{code}", std::process::id())
+    } else {
+        format!("nds-game-studio-{}-{code}", std::process::id())
+    }
+}
+
 /// Le dossier `native` à côté de l'exécutable.
 pub fn native_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("NDSGS_NATIVE_DIR") {
@@ -116,8 +168,34 @@ pub fn native_dir() -> PathBuf {
     exe.parent().unwrap_or(Path::new(".")).join("native")
 }
 
-/// Le runtime et les modules sont des programmes Windows : ailleurs, rien à générer.
-const CAN_GENERATE: bool = cfg!(windows);
+/// Les modules se génèrent sous Windows (GCC) et macOS (clang des Command Line Tools) ; ailleurs, rien à générer.
+const CAN_GENERATE: bool = cfg!(any(windows, target_os = "macos"));
+
+/// Architecture de la boîte à outils : celle de ce programme, comme `native_build.py --arch`.
+const MACOS_ARCH: &str = if cfg!(target_arch = "aarch64") { "arm64" } else { "x86_64" };
+
+/// Python de la boîte à outils.
+fn toolchain_python(tools: &Path) -> PathBuf {
+    if cfg!(windows) {
+        tools.join("python").join("python.exe")
+    } else {
+        tools.join("python").join("bin").join("python3")
+    }
+}
+
+/// Nom du module d'un jeu : `<code>.exe` sous Windows, `<code>` ailleurs.
+fn module_file(code: &str) -> String {
+    format!("{code}{}", std::env::consts::EXE_SUFFIX)
+}
+
+/// `AL7E.exe` ou `AL7E` : le code d'un module de `native/`.
+fn module_code(path: &Path) -> Option<String> {
+    let name = path.file_name()?.to_str()?;
+    let suffix = std::env::consts::EXE_SUFFIX;
+    let split = name.len().checked_sub(suffix.len())?;
+    let code = name.get(..split).filter(|_| name[split..].eq_ignore_ascii_case(suffix))?;
+    (code.len() == 4 && path.is_file()).then(|| code.to_string())
+}
 
 /// Les jeux que le launcher sait générer et la version de la boîte à outils (`native/tools/export_recipes.py`).
 const INDEX: &str = include_str!("../../../native/games/index.json");
@@ -169,12 +247,12 @@ pub fn is_experimental(code: &str) -> bool {
 }
 
 fn generated_path(code: &str) -> PathBuf {
-    crate::save::data_dir().join("native").join(format!("{code}-{}.exe", index().toolchain))
+    crate::save::data_dir().join("native").join(format!("{code}-{}{}", index().toolchain, std::env::consts::EXE_SUFFIX))
 }
 
 /// Le module à lancer s'il existe déjà.
 fn module_path(code: &str) -> Option<PathBuf> {
-    [native_dir().join(format!("{code}.exe")), generated_path(code)].into_iter().find(|p| p.exists())
+    [native_dir().join(module_file(code)), generated_path(code)].into_iter().find(|p| p.exists())
 }
 
 /// Où en est la génération d'un module : lu à chaque image.
@@ -339,15 +417,31 @@ pub(crate) fn download(url: &str, to: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Le dossier de la boîte à outils si elle est déjà là : celui donné par `NDSGS_TOOLCHAIN_DIR` (essai d'une boîte
+/// faite depuis le dépôt), ou `native-toolchain` à côté de l'exécutable.
+fn local_toolchain() -> Option<PathBuf> {
+    let exe = std::env::current_exe().unwrap_or_default();
+    let beside = exe.parent().unwrap_or(Path::new(".")).join("native-toolchain");
+    [std::env::var_os("NDSGS_TOOLCHAIN_DIR").map(PathBuf::from), Some(beside)].into_iter().flatten().find(|dir| toolchain_python(dir).exists())
+}
+
+/// Nom de l'archive de la boîte à outils : une par plateforme.
+fn toolchain_asset(version: u32) -> String {
+    if cfg!(target_os = "macos") {
+        format!("native-toolchain-{version}-macos-{MACOS_ARCH}.zip")
+    } else {
+        format!("native-toolchain-{version}.zip")
+    }
+}
+
 /// Télécharge et décompresse la boîte à outils si elle n'est pas là ; renvoie son dossier.
 fn ensure_toolchain(state: &Mutex<Generation>) -> Result<PathBuf, String> {
-    let exe = std::env::current_exe().unwrap_or_default();
-    let bundled = exe.parent().unwrap_or(Path::new(".")).join("native-toolchain");
-    if bundled.join("python").join("python.exe").exists() {
-        return Ok(bundled);
+    if let Some(dir) = local_toolchain() {
+        return Ok(dir);
     }
     let version = index().toolchain;
-    let dir = crate::save::data_dir().join("native-toolchain").join(version.to_string());
+    let folder = if cfg!(target_os = "macos") { format!("{version}-macos-{MACOS_ARCH}") } else { version.to_string() };
+    let dir = crate::save::data_dir().join("native-toolchain").join(folder);
     let ready = dir.join("installed");
     if ready.exists() {
         return Ok(dir);
@@ -359,7 +453,7 @@ fn ensure_toolchain(state: &Mutex<Generation>) -> Result<PathBuf, String> {
         std::fs::copy(local, &archive).map_err(|e| e.to_string())?;
     } else {
         say(state, tr("Downloading the tools (only once)...", "Telechargement des outils (une seule fois)...").to_string());
-        download(&format!("{TOOLCHAIN_URL}/native-toolchain-{version}.zip"), &archive)?;
+        download(&format!("{TOOLCHAIN_URL}/{}", toolchain_asset(version)), &archive)?;
     }
     say(state, tr("Installing the tools...", "Installation des outils...").to_string());
     let file = std::fs::File::open(&archive).map_err(|e| e.to_string())?;
@@ -367,6 +461,23 @@ fn ensure_toolchain(state: &Mutex<Generation>) -> Result<PathBuf, String> {
     let _ = std::fs::remove_file(&archive);
     std::fs::write(ready, "").map_err(|e| e.to_string())?;
     Ok(dir)
+}
+
+/// Sous macOS, le compilateur est celui des Command Line Tools : le jeu est compilé chez le joueur, et le SDK d'Apple
+/// ne peut pas être redistribué avec la boîte à outils.
+fn check_compiler() -> Result<(), String> {
+    if !cfg!(target_os = "macos") {
+        return Ok(());
+    }
+    let found = Command::new("xcrun").args(["--find", "clang"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
+    if found {
+        return Ok(());
+    }
+    Err(tr(
+        "The Xcode Command Line Tools are missing, and they compile the game. Open Terminal, run: xcode-select --install, then try again.",
+        "Les outils de ligne de commande Xcode manquent, ils compilent le jeu. Ouvrez Terminal, lancez : xcode-select --install, puis recommencez.",
+    )
+    .to_string())
 }
 
 /// Lit une sortie du programme ligne par ligne : tout pour le journal, la fin pour le launcher.
@@ -384,10 +495,11 @@ fn follow_output(output: impl Read, state: &Mutex<Generation>, log: &Mutex<Strin
 }
 
 fn generate(code: &str, rom: &Path, state: &Mutex<Generation>) -> Result<PathBuf, String> {
+    check_compiler()?;
     let tools = ensure_toolchain(state)?;
     say(state, tr("Preparing the game from your rom (about a minute, only once)...", "Preparation du jeu depuis votre rom (environ une minute, une seule fois)...").to_string());
     let out = crate::save::data_dir().join("native").join(format!("build-{code}"));
-    let mut command = Command::new(tools.join("python").join("python.exe"));
+    let mut command = Command::new(toolchain_python(&tools));
     command
         .arg("-u")
         .arg(tools.join("native").join("tools").join("native_build.py"))
@@ -405,6 +517,18 @@ fn generate(code: &str, rom: &Path, state: &Mutex<Generation>) -> Result<PathBuf
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         command.creation_flags(CREATE_NO_WINDOW);
     }
+    // Le Mac reste utilisable pendant la compilation (`native_build.py` baisse aussi la priorité de ses compilateurs)
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: setpriority est sûr entre fork et exec.
+        unsafe {
+            command.pre_exec(|| {
+                libc::setpriority(libc::PRIO_PROCESS, 0, 10);
+                Ok(())
+            });
+        }
+    }
     command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command.spawn().map_err(|e| e.to_string())?;
     let log = Mutex::new(String::new());
@@ -415,7 +539,7 @@ fn generate(code: &str, rom: &Path, state: &Mutex<Generation>) -> Result<PathBuf
     });
     let status = child.wait().map_err(|e| e.to_string())?;
     let log = log.into_inner().unwrap();
-    let built = out.join(format!("{code}.exe"));
+    let built = out.join(module_file(code));
     if !status.success() || !built.exists() {
         let tail: Vec<&str> = log.lines().rev().filter(|l| !l.trim().is_empty()).take(3).collect();
         error!("generation de {code} :\n{log}");
@@ -439,10 +563,8 @@ impl Plugin for NativeGamesPlugin {
         }
         let mut codes: std::collections::BTreeSet<String> = if CAN_GENERATE { index().games.keys().cloned().collect() } else { Default::default() };
         for entry in std::fs::read_dir(native_dir()).into_iter().flatten().flatten() {
-            let path = entry.path();
-            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-            if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("exe")) && stem.len() == 4 {
-                codes.insert(stem.to_string());
+            if let Some(code) = module_code(&entry.path()) {
+                codes.insert(code);
             }
         }
         for code in codes {
@@ -549,7 +671,7 @@ fn launch(commands: &mut Commands, images: &mut Assets<Image>, code: &str, rom: 
     let _ = std::fs::create_dir_all(&saves);
     let log = std::fs::File::create(saves.join("runtime.log")).map(Stdio::from).unwrap_or_else(|_| Stdio::null());
 
-    let name = format!("nds-game-studio-{}-{code}", std::process::id());
+    let name = shm_name(code);
     let Some(frames) = SharedFrames::new(&name) else {
         error!("{code} : pas de memoire pour les images");
         commands.set_state(StudioState::Menu);
@@ -683,6 +805,39 @@ fn stop_module(mut commands: Commands) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Le jeu ouvre l'objet par son nom (`os_shm_open`) et écrit l'en-tête que le launcher lit ; `drop` détruit le nom.
+    #[cfg(unix)]
+    #[test]
+    fn la_memoire_partagee_est_vue_des_deux_cotes_puis_detruite() {
+        let name = shm_name("TEST");
+        assert!(name.len() <= 31 && name.starts_with('/'));
+        let frames = SharedFrames::new(&name).expect("shm_open + ftruncate + mmap");
+        assert_eq!(frames.header(), [0; 4]);
+        let c_name = std::ffi::CString::new(name.clone()).unwrap();
+        // SAFETY: côté jeu : ouverture par le nom, taille lue par fstat, comme os_posix.c.
+        unsafe {
+            let fd = libc::shm_open(c_name.as_ptr(), libc::O_RDWR, 0);
+            assert!(fd >= 0);
+            let mut st: libc::stat = std::mem::zeroed();
+            assert_eq!(libc::fstat(fd, &mut st), 0);
+            assert!(st.st_size as usize >= SHM_BYTES);
+            let p = libc::mmap(std::ptr::null_mut(), st.st_size as usize, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_SHARED, fd, 0);
+            libc::close(fd);
+            assert_ne!(p, libc::MAP_FAILED);
+            let header = p as *mut u32;
+            header.write_volatile(7);
+            header.add(1).write_volatile(256);
+            // Le dernier octet de la mémoire des images
+            (p as *mut u8).add(SHM_BYTES - 1).write_volatile(0xAB);
+            assert_eq!(frames.header(), [7, 256, 0, 0]);
+            assert_eq!(*frames.view.add(SHM_BYTES - 1), 0xAB);
+            libc::munmap(p, st.st_size as usize);
+        }
+        drop(frames);
+        // SAFETY: le nom n'existe plus.
+        assert!(unsafe { libc::shm_open(c_name.as_ptr(), libc::O_RDWR, 0) } < 0);
+    }
 
     #[test]
     fn l_index_est_lisible_et_donne_l_etat_des_jeux() {

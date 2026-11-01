@@ -1436,7 +1436,7 @@ fn play_tab(rom: &Rom, registry: &GameRegistry) -> (Top, Rest) {
             }
             if native.is_none() {
                 let reason = if crate::native_game::windows_only(&code_for_state) {
-                    tr("Not playable on this system yet: native games only run on Windows for now.", "Pas encore jouable sur ce systeme : les jeux natifs ne tournent que sous Windows pour l'instant.")
+                    tr("Not playable on this system yet: native games only run on Windows and macOS for now.", "Pas encore jouable sur ce systeme : les jeux natifs ne tournent que sous Windows et macOS pour l'instant.")
                 } else {
                     tr("Not playable yet: this game has no native module.", "Pas encore jouable : ce jeu n'a pas de module natif.")
                 };
