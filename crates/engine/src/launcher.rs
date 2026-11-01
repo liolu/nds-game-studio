@@ -2,7 +2,8 @@
 //!
 //! - à gauche : le logo, le bouton de la vue des jeux (4 carrés) et les jeux favoris ;
 //! - la vue des jeux, en grille ou en liste, avec les dossiers de jeux (les sous-dossiers de `rom`) : clic pour
-//!   entrer, Retour ou Echap pour remonter, « Nouveau dossier » ; un jeu se range depuis ses Parametres ;
+//!   entrer, Retour ou Echap pour remonter, « Nouveau dossier » ; un jeu se range en le glissant sur un dossier
+//!   (ou sur Retour), ou depuis ses Parametres ; barre de recherche (Ctrl+F, dans tous les dossiers) et tri ;
 //! - la page d'un jeu : son image, son nom, le bouton favori et quatre boutons qui changent la zone
 //!   du bas (Jouer, Moding, Description, Parametres) ;
 //! - les textes suivent la langue (`i18n`) ; la zone est refaite quand elle change ;
@@ -11,7 +12,8 @@
 //!   l'historique (`activity`). Il n'est jamais refait avec la zone, pour garder sa position.
 //!
 //! Sans rom, aucun jeu n'est montré : seulement le message qui dit de déposer une rom dans la
-//! fenêtre. Elle est copiée dans le dossier `rom` à côté du launcher (voir `library`).
+//! fenêtre ou de la choisir avec « Ajouter des jeux ». Elle est copiée dans le dossier `rom` à côté du launcher
+//! (voir `library`).
 //!
 //! Il n'y a pas d'émulation : « Jouer » lance le module natif du jeu (décompilation + runtime),
 //! reconnu par le `game_code` de son game.toml. Sans module, le bouton le dit.
@@ -25,7 +27,9 @@ use bevy::asset::RenderAssetUsages;
 use bevy::image::ImageSampler;
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
+use bevy::picking::events::PointerDrag;
 use bevy::picking::hover::{HoverMap, Hovered};
+use bevy::picking::Pickable;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::ui::{Pressed, ScrollPosition};
@@ -35,7 +39,8 @@ use bevy::window::FileDragAndDrop;
 use crate::activity::{self, What};
 use crate::asset_browser::AssetBrowser;
 use crate::i18n::{self, t, tr, Lang, Language, Tr};
-use crate::library::{self, Imported, LibraryPrefs, LibraryView, RomInfo};
+use crate::game_meta::{self, GameMeta, MetaDb};
+use crate::library::{self, Imported, LibraryPrefs, LibraryView, RomInfo, SortCell, SortKey};
 use crate::options::ToggleOptions;
 use crate::saves_page::format_size;
 use crate::screens::{DisplayCamera, DsScreens};
@@ -73,6 +78,8 @@ const HEADER_H: f32 = 126.0;
 const STATUS_SECONDS: f64 = 5.0;
 const POLL_EVERY: f64 = 2.0;
 const CONFIRM_SECONDS: f64 = 3.0;
+/// Un jeu ne part qu'après ces pixels : un clic où la souris bouge un peu reste un clic.
+const DRAG_FROM: f32 = 8.0;
 /// Pixels défilés par cran de molette.
 const WHEEL_LINE: f32 = 70.0;
 
@@ -104,6 +111,8 @@ struct Rom {
     /// Jaquette et son rapport largeur / hauteur.
     art: Option<(Handle<Image>, f32)>,
     tint: Color,
+    /// Ce que dit GameTDB (`game_meta`).
+    meta: GameMeta,
 }
 
 #[derive(Resource, Default)]
@@ -143,8 +152,68 @@ struct Launcher {
     confirm_remove: Option<f64>,
     /// Le lien d'un mod en train d'être tapé (onglet Moding).
     mod_link: Option<String>,
+    /// Une seule copie à la fois : deux roms de même nom se gêneraient (`import_rom`).
+    import_lock: Arc<Mutex<()>>,
+    tally: ImportTally,
+    /// Sélecteur de fichiers ouvert, et ce qu'il a rendu (vide si annulé).
+    picking: bool,
+    picked: Arc<Mutex<Option<Vec<PathBuf>>>>,
+    /// Texte cherché, et si les touches vont dans la barre.
+    search: String,
+    search_focus: bool,
+    /// Le tag en train d'être tapé (Parametres d'un jeu).
+    tag_input: Option<String>,
+    /// La base de GameTDB, et le fil qui la lit. Téléchargement demandé une fois par lancement.
+    meta: MetaDb,
+    meta_job: Option<Arc<Mutex<Option<MetaDb>>>>,
+    meta_started: bool,
+    meta_fetched: bool,
+    /// Le jeu (chemin relatif) en train d'être glissé vers un dossier.
+    dragging: Option<String>,
     /// Ce qu'on tape là est l'adresse de l'hôte d'une partie en réseau.
     typing_host: bool,
+}
+
+/// Bilan d'un ajout de plusieurs roms : chaque message remplace le précédent, une erreur passerait
+/// inaperçue.
+#[derive(Default)]
+struct ImportTally {
+    added: usize,
+    already: usize,
+    failed: usize,
+    first_error: Option<String>,
+}
+
+impl ImportTally {
+    fn record(&mut self, result: &Result<Imported, String>) {
+        match result {
+            Ok(Imported { already: true, .. }) => self.already += 1,
+            Ok(Imported { already: false, .. }) => self.added += 1,
+            Err(e) => {
+                self.failed += 1;
+                self.first_error.get_or_insert_with(|| e.clone());
+            }
+        }
+    }
+
+    /// Rien pour une seule rom : son message suffit.
+    fn summary(&self) -> Option<String> {
+        let Self { added, already, failed, .. } = self;
+        if added + already + failed < 2 {
+            return None;
+        }
+        let mut parts = Vec::new();
+        if *added > 0 {
+            parts.push(t!("{added} added", "{added} ajoute(s)"));
+        }
+        if *already > 0 {
+            parts.push(t!("{already} already in the launcher", "{already} deja dans le launcher"));
+        }
+        if let Some(error) = &self.first_error {
+            parts.push(t!("{failed} failed: {error}", "{failed} en echec : {error}"));
+        }
+        Some(parts.join(", "))
+    }
 }
 
 /// Couleurs d'un bouton : `Look` donne celles au repos et au survol.
@@ -170,6 +239,20 @@ struct DropOverlay;
 
 #[derive(Component)]
 struct ViewChoice(LibraryView);
+
+#[derive(Component)]
+struct SearchBox;
+
+/// Déposer un jeu ici le range dans ce dossier (vide = la racine).
+#[derive(Component)]
+struct DropFolder(String);
+
+/// Ce qui suit la souris pendant qu'on glisse un jeu, et sa ligne qui dit où il ira.
+#[derive(Component)]
+struct DragGhost;
+
+#[derive(Component)]
+struct DragHint;
 
 #[derive(Component)]
 struct VersionText;
@@ -223,11 +306,11 @@ impl Plugin for LauncherPlugin {
         app.init_resource::<Launcher>()
             .add_systems(Startup, setup)
             .add_systems(OnEnter(StudioState::Menu), spawn_launcher.before(crate::studio::auto_start))
-            .add_systems(Update, (take_drops, poll_copies, poll_disk, back_key, type_folder_name, type_mod_link, expire_confirm, log_clicks, rebuild, show_status).chain().run_if(in_state(StudioState::Menu)))
+            .add_systems(Update, (take_drops, poll_picker, poll_copies, poll_disk, back_key, drag_game, type_folder_name, type_mod_link, type_search, type_tag, leave_search, expire_confirm, log_clicks, rebuild, show_status).chain().run_if(in_state(StudioState::Menu)))
             .add_systems(Update, (activity_visibility, activity_now, activity_decomp, activity_history, note_update, poll_mods).run_if(in_state(StudioState::Menu)))
-            .add_systems(Update, (wheel, looks, view_choice_looks, lang_choice_looks, base_mods_looks, version_text, redo_on_language))
+            .add_systems(Update, (wheel, (looks, drop_looks).chain(), view_choice_looks, lang_choice_looks, base_mods_looks, version_text, redo_on_language))
             .init_resource::<UpdateOffer>()
-            .add_systems(Update, (poll_covers, cover_choice_looks, prepare_games, update_banner.run_if(in_state(StudioState::Menu))));
+            .add_systems(Update, (poll_covers, poll_meta, cover_choice_looks, prepare_games, update_banner.run_if(in_state(StudioState::Menu))));
     }
 }
 
@@ -374,7 +457,8 @@ fn reload_roms(lau: &mut Launcher, images: &mut Assets<Image>) {
             let icon = (!info.icon.is_empty()).then(|| images.add(rgba_image(32, 32, info.icon.clone(), ImageSampler::nearest())));
             let [r, g, b] = info.average_color();
             let art = if lau.prefs.covers { load_art(&info.code, images) } else { None };
-            Rom { info, icon, art, tint: Color::srgb(r * 0.45, g * 0.45, b * 0.45) }
+            let meta = lau.meta.lookup(&info.code);
+            Rom { info, icon, art, tint: Color::srgb(r * 0.45, g * 0.45, b * 0.45), meta }
         })
         .collect();
     lau.dirty = true;
@@ -520,6 +604,30 @@ fn poll_covers(mut lau: ResMut<Launcher>, mut images: ResMut<Assets<Image>>, mut
     }
 }
 
+/// Lit la base des infos, et la télécharge si l'option des jaquettes le permet.
+fn poll_meta(mut lau: ResMut<Launcher>) {
+    let fetch = lau.prefs.covers && !lau.meta_fetched;
+    if lau.meta_job.is_none() && (!lau.meta_started || fetch) {
+        lau.meta_started = true;
+        lau.meta_fetched |= fetch;
+        lau.meta_job = Some(game_meta::start(fetch));
+    }
+    let Some(job) = lau.meta_job.clone() else { return };
+    let arrived = job.lock().unwrap().take();
+    if let Some(db) = arrived {
+        let lau = &mut *lau;
+        lau.meta = db;
+        for rom in &mut lau.roms {
+            rom.meta = lau.meta.lookup(&rom.info.code);
+        }
+        lau.dirty = true;
+    }
+    // Le fil garde sa copie du pointeur tant qu'il travaille
+    if Arc::strong_count(&job) <= 2 {
+        lau.meta_job = None;
+    }
+}
+
 fn set_covers(on: bool) -> impl FnMut(On<Activate>, ResMut<Launcher>, ResMut<Assets<Image>>) {
     move |_, mut lau, mut images| {
         lau.prefs.covers = on;
@@ -548,7 +656,7 @@ fn say(lau: &mut Launcher, time: &Time<Real>, message: impl Into<String>) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-//  Ajouter une rom (glisser-déposer), suivre le dossier
+//  Ajouter une rom (glisser-déposer ou sélecteur de fichiers), suivre le dossier
 // ─────────────────────────────────────────────────────────────────────────
 
 fn take_drops(mut drops: MessageReader<FileDragAndDrop>, mut lau: ResMut<Launcher>, time: Res<Time<Real>>, mut overlays: Query<&mut Node, With<DropOverlay>>) {
@@ -576,11 +684,46 @@ fn take_drops(mut drops: MessageReader<FileDragAndDrop>, mut lau: ResMut<Launche
     }
 }
 
+/// Le bouton « Ajouter des jeux ». Le dialogue du système (Windows, macOS, Linux) bloque jusqu'à sa fermeture, d'où
+/// le fil ; sur macOS, rfd l'ouvre de lui-même sur le fil principal.
+fn pick_roms(_: On<Activate>, mut lau: ResMut<Launcher>) {
+    if lau.picking {
+        return;
+    }
+    lau.picking = true;
+    let picked = lau.picked.clone();
+    std::thread::spawn(move || {
+        let files = rfd::FileDialog::new().set_title(tr("Add games", "Ajouter des jeux")).add_filter(tr("DS roms", "Roms DS"), &["nds", "dsi"]).pick_files().unwrap_or_default();
+        *picked.lock().unwrap() = Some(files);
+    });
+}
+
+fn poll_picker(mut lau: ResMut<Launcher>, time: Res<Time<Real>>) {
+    let picked = lau.picked.lock().unwrap().take();
+    let Some(files) = picked else { return };
+    lau.picking = false;
+    let count = files.len();
+    for file in files {
+        start_copy(&mut lau, file);
+    }
+    match count {
+        0 => {}
+        1 => say(&mut lau, &time, tr("Copying the rom...", "Copie de la rom...")),
+        n => say(&mut lau, &time, t!("Copying {n} roms...", "Copie de {n} roms...")),
+    }
+}
+
+fn add_games_button(c: &mut ChildSpawnerCommands, font: &Fonts, normal: Color, hover: Color, size: f32) {
+    button(c, button_node(), normal, hover).observe(pick_roms).with_child(text(font, tr("Add games", "Ajouter des jeux"), size, TEXT));
+}
+
 fn start_copy(lau: &mut Launcher, source: PathBuf) {
     lau.copying += 1;
     let results = lau.imported.clone();
+    let lock = lau.import_lock.clone();
     let target = library::folder_path(&library::rom_dir(), &lau.folder);
     std::thread::spawn(move || {
+        let _one_at_a_time = lock.lock();
         let result = library::import_rom(&source, &target);
         results.lock().unwrap().push(result);
     });
@@ -593,6 +736,7 @@ fn poll_copies(mut lau: ResMut<Launcher>, mut images: ResMut<Assets<Image>>, tim
     }
     lau.copying -= results.len();
     for result in results {
+        lau.tally.record(&result);
         let message = match result {
             Ok(Imported { title, already: true }) => t!("{title} is already in the launcher", "{title} est deja dans le launcher"),
             Ok(Imported { title, already: false }) => {
@@ -605,6 +749,11 @@ fn poll_copies(mut lau: ResMut<Launcher>, mut images: ResMut<Assets<Image>>, tim
             }
         };
         say(&mut lau, &time, message);
+    }
+    if lau.copying == 0 {
+        if let Some(summary) = std::mem::take(&mut lau.tally).summary() {
+            say(&mut lau, &time, summary);
+        }
     }
     reload_roms(&mut lau, &mut images);
 }
@@ -623,11 +772,15 @@ fn poll_disk(mut lau: ResMut<Launcher>, mut images: ResMut<Assets<Image>>, time:
 
 fn back_key(keys: Res<ButtonInput<KeyCode>>, mut lau: ResMut<Launcher>, screens: Res<DsScreens>, windows: Query<&Window>) {
     let focused = windows.get(screens.main_window()).is_ok_and(|w| w.focused);
-    if !focused || !keys.just_pressed(KeyCode::Escape) || lau.naming.is_some() || lau.mod_link.is_some() {
+    if !focused || !keys.just_pressed(KeyCode::Escape) || lau.naming.is_some() || lau.mod_link.is_some() || lau.tag_input.is_some() || lau.search_focus || lau.dragging.is_some() {
         return;
     }
     if lau.open.is_some() {
         lau.open = None;
+        lau.dirty = true;
+    } else if !lau.search.is_empty() {
+        lau.search.clear();
+        lau.scroll_reset = true;
         lau.dirty = true;
     } else if !lau.folder.is_empty() {
         let parent = library::parent_of(&lau.folder).to_string();
@@ -638,6 +791,8 @@ fn back_key(keys: Res<ButtonInput<KeyCode>>, mut lau: ResMut<Launcher>, screens:
 fn enter_folder(lau: &mut Launcher, folder: String) {
     lau.folder = folder;
     lau.naming = None;
+    lau.search.clear();
+    lau.search_focus = false;
     lau.scroll_reset = true;
     lau.dirty = true;
 }
@@ -699,6 +854,190 @@ fn type_mod_link(mut typed: MessageReader<KeyboardInput>, mut lau: ResMut<Launch
             }
         }
         lau.dirty = true;
+    }
+}
+
+/// Une touche dans un champ de texte, hors Entrée et Échap : effacer, coller (Ctrl+V ou Cmd+V), écrire.
+fn edit_field(key: &KeyboardInput, field: &mut String, command: bool, clipboard: &mut bevy::clipboard::Clipboard) {
+    match &key.logical_key {
+        Key::Backspace => {
+            field.pop();
+        }
+        Key::Character(letter) if command && letter.eq_ignore_ascii_case("v") => {
+            if let Some(Ok(text)) = clipboard.fetch_text().poll_result() {
+                field.extend(text.chars().filter(|c| !c.is_control()));
+            }
+        }
+        _ if command => {}
+        _ => {
+            if let Some(text) = &key.text {
+                field.extend(text.chars().filter(|c| !c.is_control()));
+            }
+        }
+    }
+}
+
+/// Ctrl+F (Cmd+F) ouvre la barre de recherche ; les touches y vont jusqu'à Entrée, Échap (qui vide) ou un clic ailleurs.
+fn type_search(mut typed: MessageReader<KeyboardInput>, mut lau: ResMut<Launcher>, keys: Res<ButtonInput<KeyCode>>, mut clipboard: ResMut<bevy::clipboard::Clipboard>, screens: Res<DsScreens>) {
+    let main = screens.main_window();
+    let command = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight, KeyCode::SuperLeft, KeyCode::SuperRight]);
+    for key in typed.read() {
+        if key.window != main || !key.state.is_pressed() {
+            continue;
+        }
+        if !lau.search_focus {
+            let free = lau.open.is_none() && lau.naming.is_none() && lau.mod_link.is_none() && lau.tag_input.is_none();
+            if free && command && matches!(&key.logical_key, Key::Character(letter) if letter.eq_ignore_ascii_case("f")) {
+                lau.search_focus = true;
+                lau.dirty = true;
+            }
+            continue;
+        }
+        match &key.logical_key {
+            Key::Enter => lau.search_focus = false,
+            Key::Escape => {
+                lau.search.clear();
+                lau.search_focus = false;
+            }
+            _ => edit_field(key, &mut lau.search, command, &mut clipboard),
+        }
+        lau.scroll_reset = true;
+        lau.dirty = true;
+    }
+}
+
+/// Après le relâchement, pour ne pas refaire la zone sous un clic en cours : le clic serait perdu.
+fn leave_search(mut lau: ResMut<Launcher>, buttons: Res<ButtonInput<MouseButton>>, boxes: Query<&Hovered, With<SearchBox>>) {
+    if lau.search_focus && buttons.just_released(MouseButton::Left) && !boxes.iter().any(|hovered| hovered.get()) {
+        lau.search_focus = false;
+        lau.dirty = true;
+    }
+}
+
+/// Le nouveau tag du jeu ouvert : Entrée l'ajoute, Échap annule.
+fn type_tag(mut typed: MessageReader<KeyboardInput>, mut lau: ResMut<Launcher>, keys: Res<ButtonInput<KeyCode>>, mut clipboard: ResMut<bevy::clipboard::Clipboard>, time: Res<Time<Real>>, screens: Res<DsScreens>) {
+    let main = screens.main_window();
+    let command = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight, KeyCode::SuperLeft, KeyCode::SuperRight]);
+    for key in typed.read() {
+        if lau.tag_input.is_none() || key.window != main || !key.state.is_pressed() {
+            continue;
+        }
+        match &key.logical_key {
+            Key::Enter => add_typed_tag(&mut lau, &time),
+            Key::Escape => lau.tag_input = None,
+            _ => {
+                if let Some(mut tag) = lau.tag_input.take() {
+                    edit_field(key, &mut tag, command, &mut clipboard);
+                    lau.tag_input = Some(tag);
+                }
+            }
+        }
+        lau.dirty = true;
+    }
+}
+
+fn add_typed_tag(lau: &mut Launcher, time: &Time<Real>) {
+    let tag = lau.tag_input.clone().unwrap_or_default();
+    let Some(code) = lau.open.as_ref().and_then(|file| lau.roms.iter().find(|r| r.info.file == *file)).map(|r| r.info.code.clone()) else { return };
+    match lau.prefs.add_tag(&code, &tag) {
+        Ok(()) => {
+            lau.tag_input = None;
+            lau.prefs.store();
+        }
+        // Le nom reste à corriger
+        Err(e) => say(lau, time, e),
+    }
+    lau.dirty = true;
+}
+
+/// Sur une carte de jeu : au-delà de quelques pixels, le jeu part avec la souris.
+fn start_drag(file: String) -> impl FnMut(On<PointerDrag>, Commands, ResMut<Launcher>, Res<DsScreens>, Query<(Entity, &DisplayCamera)>) {
+    move |drag, mut commands, mut lau, screens, cameras| {
+        if lau.dragging.is_some() || drag.button != bevy::picking::pointer::PointerButton::Primary || drag.distance.length() < DRAG_FROM {
+            return;
+        }
+        let Some((camera, _)) = cameras.iter().find(|(_, d)| d.0 == screens.main_window()) else { return };
+        let Some(rom) = lau.roms.iter().find(|r| r.info.file == file) else { return };
+        let font = lau.font.clone();
+        commands
+            .spawn((
+                Node { position_type: PositionType::Absolute, flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(10), padding: UiRect::all(px(8)), max_width: px(360), border: UiRect::all(px(2)), border_radius: BorderRadius::all(px(8)), ..default() },
+                BackgroundColor(PANEL),
+                BorderColor::all(ITEM_ON),
+                GlobalZIndex(20),
+                // Sinon il cacherait les dossiers à la souris
+                Pickable::IGNORE,
+                UiTargetCamera(camera),
+                DespawnOnExit(StudioState::Menu),
+                DragGhost,
+            ))
+            .with_children(|ghost| {
+                cover(ghost, rom, 44.0);
+                ghost.spawn((Node { flex_direction: FlexDirection::Column, row_gap: px(2), ..default() }, Pickable::IGNORE)).with_children(|lines| {
+                    lines.spawn((text(&font, rom.info.title.clone(), 14.0, TEXT), Pickable::IGNORE));
+                    lines.spawn((text(&font, "", 12.0, DIM), Pickable::IGNORE, DragHint));
+                });
+            });
+        lau.dragging = Some(file.clone());
+    }
+}
+
+/// Le jeu glissé : suit la souris, dit où il ira, se range au relâchement. Lu ici et pas sur les cartes : la zone peut
+/// être refaite pendant qu'on glisse (une jaquette arrive), ce qui effacerait la carte de départ. Échap annule.
+#[allow(clippy::too_many_arguments)]
+fn drag_game(
+    mut commands: Commands,
+    mut lau: ResMut<Launcher>,
+    mut images: ResMut<Assets<Image>>,
+    time: Res<Time<Real>>,
+    buttons: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    screens: Res<DsScreens>,
+    windows: Query<&Window>,
+    targets: Query<(&DropFolder, &Hovered)>,
+    mut ghosts: Query<(Entity, &mut Node), With<DragGhost>>,
+    mut hints: Query<&mut Text, With<DragHint>>,
+) {
+    let Some(file) = lau.dragging.clone() else { return };
+    let target = targets.iter().find(|(_, hovered)| hovered.get()).map(|(folder, _)| folder.0.clone());
+    let released = !buttons.pressed(MouseButton::Left);
+    if released || keys.just_pressed(KeyCode::Escape) {
+        lau.dragging = None;
+        for (ghost, _) in &ghosts {
+            commands.entity(ghost).despawn();
+        }
+        if let Some(folder) = target.filter(|_| released) {
+            drop_game(&mut lau, &mut images, &time, &file, &folder);
+        }
+        return;
+    }
+    if let Some(cursor) = windows.get(screens.main_window()).ok().and_then(Window::cursor_position) {
+        for (_, mut node) in &mut ghosts {
+            node.left = px(cursor.x + 14.0);
+            node.top = px(cursor.y + 14.0);
+        }
+    }
+    let wanted = match &target {
+        Some(folder) if folder.is_empty() => t!("Move to the main folder", "Ranger a la racine"),
+        Some(folder) => t!("Move to {folder}", "Ranger dans {folder}"),
+        None => tr("Drop it on a folder, Esc = cancel", "Deposez-le sur un dossier, Echap = annuler").to_string(),
+    };
+    for mut hint in &mut hints {
+        if hint.0 != wanted {
+            hint.0.clone_from(&wanted);
+        }
+    }
+}
+
+/// Le dossier sous le jeu glissé s'allume.
+fn drop_looks(lau: Res<Launcher>, mut targets: Query<(&Hovered, &mut BackgroundColor), With<DropFolder>>) {
+    if lau.dragging.is_none() {
+        return;
+    }
+    for (hovered, mut color) in &mut targets {
+        if hovered.get() && color.0 != ITEM_ON {
+            color.0 = ITEM_ON;
+        }
     }
 }
 
@@ -907,15 +1246,22 @@ fn spawn_sidebar(c: &mut ChildSpawnerCommands, lau: &Launcher, footer: &str) {
 
 fn show_library(_: On<Activate>, mut lau: ResMut<Launcher>) {
     lau.open = None;
+    lau.tag_input = None;
     lau.dirty = true;
 }
 
 fn open_game(file: String) -> impl FnMut(On<Activate>, ResMut<Launcher>) {
     move |_, mut lau| {
+        // Relâché sur sa propre carte après l'avoir glissé : ce n'est pas un clic
+        if lau.dragging.is_some() {
+            return;
+        }
         info!("jeu ouvert : {file}");
         lau.open = Some(file.clone());
         lau.tab = Tab::Play;
         lau.confirm_remove = None;
+        lau.tag_input = None;
+        lau.search_focus = false;
         lau.dirty = true;
     }
 }
@@ -924,26 +1270,31 @@ fn spawn_empty(main: &mut ChildSpawnerCommands, lau: &Launcher) {
     let font = &lau.font;
     main.spawn(Node { width: percent(100), height: percent(100), flex_direction: FlexDirection::Column, justify_content: JustifyContent::Center, align_items: AlignItems::Center, row_gap: px(14), padding: UiRect::all(px(40)), ..default() }).with_children(|empty| {
         empty.spawn(text(font, tr("No games", "Aucun jeu"), 32.0, TEXT));
-        empty.spawn(text(font, tr("Drag a DS rom (.nds) into this window to add it to the launcher.", "Glissez une rom DS (.nds) dans cette fenetre pour l'ajouter au launcher."), 18.0, TEXT));
+        empty.spawn(text(font, tr("Drag a DS rom (.nds, .dsi) into this window or choose it to add it to the launcher.", "Glissez une rom DS (.nds, .dsi) dans cette fenetre ou choisissez-la pour l'ajouter au launcher."), 18.0, TEXT));
+        add_games_button(empty, font, ITEM_ON, Color::srgb(0.3, 0.44, 0.74), 16.0);
         empty.spawn(text(font, t!("It will be copied to {}", "Elle sera copiee dans {}", library::rom_dir().display()), 14.0, DIM));
     });
 }
 
 fn spawn_library(main: &mut ChildSpawnerCommands, lau: &Launcher) {
     let font = &lau.font;
-    let count = roms_here(lau).count();
+    let roms = shown_roms(lau);
+    let folders = shown_folders(lau);
+    let count = roms.len();
+    let searching = !lau.search.trim().is_empty();
     let games = if count == 1 { tr("1 game", "1 jeu").to_string() } else { t!("{count} games", "{count} jeux") };
-    let empty_folder = count == 0 && !lau.folder.is_empty() && folders_here(lau).next().is_none();
+    let empty_folder = !searching && count == 0 && !lau.folder.is_empty() && folders.is_empty();
     main.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(8), padding: UiRect::new(px(MAIN_PAD), px(MAIN_PAD), px(16), px(8)), ..default() }).with_children(|bar| {
         if !lau.folder.is_empty() {
             button(bar, button_node(), ITEM, ITEM_HOVER)
+                .insert(DropFolder(library::parent_of(&lau.folder).to_string()))
                 .observe(|_: On<Activate>, mut lau: ResMut<Launcher>| {
                     let parent = library::parent_of(&lau.folder).to_string();
                     enter_folder(&mut lau, parent);
                 })
                 .with_child(text(font, tr("<- Back", "<- Retour"), 14.0, TEXT));
         }
-        let title = if lau.folder.is_empty() { games } else { format!("{}   -   {games}", lau.folder) };
+        let title = if lau.folder.is_empty() || searching { games } else { format!("{}   -   {games}", lau.folder) };
         bar.spawn((text(font, title, 16.0, DIM), Node { flex_grow: 1.0, ..default() }));
         if empty_folder {
             button(bar, button_node(), ITEM, ITEM_HOVER).observe(delete_folder).with_child(text(font, tr("Delete this empty folder", "Supprimer ce dossier vide"), 14.0, TEXT));
@@ -954,6 +1305,7 @@ fn spawn_library(main: &mut ChildSpawnerCommands, lau: &Launcher) {
                 lau.dirty = true;
             })
             .with_child(text(font, tr("New folder", "Nouveau dossier"), 14.0, TEXT));
+        add_games_button(bar, font, ITEM_ON, Color::srgb(0.3, 0.44, 0.74), 14.0);
         for (view, name) in view_names() {
             view_button(bar, font, view, name);
         }
@@ -973,6 +1325,7 @@ fn spawn_library(main: &mut ChildSpawnerCommands, lau: &Launcher) {
             row.spawn(text(font, tr("Type the name, Enter = create, Esc = cancel", "Tapez le nom, Entree = creer, Echap = annuler"), 13.0, DIM));
         });
     }
+    spawn_search_and_sort(main, lau);
     let mut scroll = main.spawn((
         Node { flex_grow: 1.0, flex_basis: px(0), min_height: px(0), width: percent(100), overflow: Overflow::scroll_y(), ..default() },
         ScrollPosition(Vec2::new(0.0, lau.grid_scroll)),
@@ -980,20 +1333,124 @@ fn spawn_library(main: &mut ChildSpawnerCommands, lau: &Launcher) {
         Scrollable,
         GridScroll,
     ));
-    scroll.with_children(|area| match lau.prefs.view {
-        LibraryView::Grid => spawn_grid(area, lau),
-        LibraryView::List => spawn_list(area, lau),
+    scroll.with_children(|area| {
+        if searching && roms.is_empty() && folders.is_empty() {
+            area.spawn((text(font, t!("Nothing matches \"{}\"", "Rien ne correspond a \"{}\"", lau.search.trim()), 16.0, DIM), Node { margin: UiRect::all(px(MAIN_PAD)), ..default() }));
+            return;
+        }
+        match lau.prefs.view {
+            LibraryView::Grid => spawn_grid(area, lau, &roms, &folders),
+            LibraryView::List => spawn_list(area, lau, &roms, &folders),
+        }
     });
 }
 
-/// Les jeux du dossier montré.
-fn roms_here(lau: &Launcher) -> impl Iterator<Item = &Rom> {
-    lau.roms.iter().filter(|r| library::parent_of(&r.info.file) == lau.folder)
+/// La barre de recherche, puis les boutons de tri.
+fn spawn_search_and_sort(main: &mut ChildSpawnerCommands, lau: &Launcher) {
+    let font = &lau.font;
+    main.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(8), padding: UiRect::new(px(MAIN_PAD), px(MAIN_PAD), px(0), px(8)), ..default() }).with_children(|row| {
+        let (border, shown, color) = match (lau.search_focus, lau.search.is_empty()) {
+            (true, _) => (ITEM_ON, format!("{}_", lau.search), TEXT),
+            (false, false) => (BORDER, lau.search.clone(), TEXT),
+            (false, true) => (BORDER, tr("Search: name, publisher, year, genre, tag... (Ctrl+F)", "Rechercher : nom, editeur, annee, genre, tag... (Ctrl+F)").to_string(), DIM),
+        };
+        button(row, Node { flex_grow: 1.0, flex_basis: px(0), min_width: px(0), justify_content: JustifyContent::FlexStart, padding: UiRect::axes(px(12), px(8)), border: UiRect::all(px(2)), border_radius: BorderRadius::all(px(6)), ..default() }, PANEL, PANEL)
+            .insert((BorderColor::all(border), SearchBox))
+            .observe(|_: On<Activate>, mut lau: ResMut<Launcher>| {
+                lau.search_focus = true;
+                lau.dirty = true;
+            })
+            .with_child(text(font, shown, 15.0, color));
+        if !lau.search.is_empty() {
+            button(row, button_node(), ITEM, ITEM_HOVER)
+                .observe(|_: On<Activate>, mut lau: ResMut<Launcher>| {
+                    lau.search.clear();
+                    lau.search_focus = false;
+                    lau.scroll_reset = true;
+                    lau.dirty = true;
+                })
+                .with_child(text(font, tr("Clear", "Effacer"), 14.0, TEXT));
+        }
+    });
+    main.spawn(Node { flex_direction: FlexDirection::Row, flex_wrap: FlexWrap::Wrap, align_items: AlignItems::Center, column_gap: px(4), row_gap: px(4), padding: UiRect::new(px(MAIN_PAD), px(MAIN_PAD), px(0), px(8)), ..default() }).with_children(|row| {
+        row.spawn((text(font, tr("Sort:", "Trier :"), 13.0, DIM), Node { margin: UiRect::right(px(4)), ..default() }));
+        for key in SortKey::ALL {
+            let active = lau.prefs.sort == key;
+            let (normal, hover) = if active { (ITEM_ON, ITEM_ON) } else { (ITEM, ITEM_HOVER) };
+            // Pas de fleches dans toutes les polices
+            let label = if !active { key.label().to_string() } else if lau.prefs.sort_reverse { format!("{} v", key.label()) } else { format!("{} ^", key.label()) };
+            button(row, Node { padding: UiRect::axes(px(9), px(5)), ..button_node() }, normal, hover)
+                .observe(move |_: On<Activate>, mut lau: ResMut<Launcher>| {
+                    // Le même bouton une seconde fois inverse l'ordre
+                    lau.prefs.sort_reverse = if lau.prefs.sort == key { !lau.prefs.sort_reverse } else { key.starts_reversed() };
+                    lau.prefs.sort = key;
+                    lau.prefs.store();
+                    lau.scroll_reset = true;
+                    lau.dirty = true;
+                })
+                .with_child(text(font, label, 13.0, TEXT));
+        }
+    });
 }
 
-/// Les dossiers du dossier montré.
-fn folders_here(lau: &Launcher) -> impl Iterator<Item = &String> {
-    lau.folders.iter().filter(|f| library::parent_of(f) == lau.folder)
+fn genres_of(lau: &Launcher, rom: &Rom) -> String {
+    lau.meta.genre_names(&rom.meta).join(", ")
+}
+
+/// L'éditeur écrit dans la rom ; GameTDB seulement si elle n'en dit rien.
+fn publisher_of(rom: &Rom) -> &str {
+    if rom.info.publisher.is_empty() { &rom.meta.publisher } else { &rom.info.publisher }
+}
+
+/// La valeur comparée par le tri choisi ; rien si on ne la connaît pas.
+fn sort_cell(lau: &Launcher, rom: &Rom) -> Option<SortCell> {
+    let label = |value: &str| (!value.is_empty()).then(|| SortCell::Text(library::fold(value)));
+    match lau.prefs.sort {
+        SortKey::Title => label(&rom.info.title),
+        SortKey::Publisher => label(publisher_of(rom)),
+        SortKey::Developer => label(&rom.meta.developer),
+        SortKey::Year => rom.meta.year.map(|year| SortCell::Number(f32::from(year))),
+        SortKey::Genre => label(&genres_of(lau, rom)),
+        SortKey::Tag => label(&lau.prefs.tags_of(&rom.info.code).join(", ")),
+        SortKey::Region => label(rom.info.region()),
+        SortKey::Size => Some(SortCell::Number(rom.info.size as f32)),
+        SortKey::Decomp => decompiled(&rom.info.code).map(SortCell::Number),
+    }
+}
+
+/// Ce que montre un jeu sous son titre : l'éditeur, ou ce qu'on trie quand la carte ne le dit pas déjà.
+fn sort_detail(lau: &Launcher, rom: &Rom) -> String {
+    match lau.prefs.sort {
+        SortKey::Developer => rom.meta.developer.clone(),
+        SortKey::Year => rom.meta.year.map_or_else(String::new, |year| year.to_string()),
+        SortKey::Genre => genres_of(lau, rom),
+        SortKey::Tag => lau.prefs.tags_of(&rom.info.code).join(", "),
+        SortKey::Region => rom.info.region().to_string(),
+        SortKey::Size => format_size(rom.info.size),
+        SortKey::Title | SortKey::Publisher | SortKey::Decomp => publisher_of(rom).to_string(),
+    }
+}
+
+/// Tout ce que la recherche regarde.
+fn search_text(lau: &Launcher, rom: &Rom) -> String {
+    let info = &rom.info;
+    let year = rom.meta.year.map_or_else(String::new, |year| year.to_string());
+    let tags = lau.prefs.tags_of(&info.code).join(" ");
+    let parts = [info.title.as_str(), publisher_of(rom), &rom.meta.publisher, &rom.meta.developer, &year, &genres_of(lau, rom), &rom.meta.genres.join(" "), &tags, info.region(), &info.code, &info.internal_name, &info.file];
+    library::fold(&parts.join(" "))
+}
+
+/// Les jeux montrés, triés : ceux du dossier, ou ceux de tous les dossiers pendant une recherche.
+fn shown_roms(lau: &Launcher) -> Vec<&Rom> {
+    let query = library::fold(lau.search.trim());
+    let games = lau.roms.iter().filter(|r| if query.is_empty() { library::parent_of(&r.info.file) == lau.folder } else { library::matches_search(&search_text(lau, r), &query) });
+    library::sort_games(games.map(|r| (sort_cell(lau, r), library::fold(&r.info.title), r)).collect(), lau.prefs.sort_reverse)
+}
+
+/// Les dossiers montrés : ceux du dossier, ou ceux dont le nom correspond pendant une recherche.
+fn shown_folders(lau: &Launcher) -> Vec<&String> {
+    let query = library::fold(lau.search.trim());
+    lau.folders.iter().filter(|f| if query.is_empty() { library::parent_of(f) == lau.folder } else { library::matches_search(&library::fold(f), &query) }).collect()
 }
 
 /// Les jeux d'un dossier, ses sous-dossiers compris.
@@ -1044,11 +1501,12 @@ fn view_button(c: &mut ChildSpawnerCommands, font: &Fonts, view: LibraryView, na
         .with_child(text(font, name, 14.0, TEXT));
 }
 
-fn spawn_grid(area: &mut ChildSpawnerCommands, lau: &Launcher) {
+fn spawn_grid(area: &mut ChildSpawnerCommands, lau: &Launcher, roms: &[&Rom], folders: &[&String]) {
     let font = &lau.font;
     area.spawn(Node { width: percent(100), height: auto(), flex_direction: FlexDirection::Row, flex_wrap: FlexWrap::Wrap, align_content: AlignContent::FlexStart, column_gap: px(20), row_gap: px(20), padding: UiRect::new(px(MAIN_PAD), px(MAIN_PAD), px(6), px(84)), ..default() }).with_children(|grid| {
-        for folder in folders_here(lau) {
+        for folder in folders.iter().copied() {
             button(grid, Node { width: px(190), height: px(268), flex_shrink: 0.0, flex_direction: FlexDirection::Column, align_items: AlignItems::Center, padding: UiRect::all(px(10)), row_gap: px(8), border_radius: BorderRadius::all(px(10)), overflow: Overflow::clip(), ..default() }, PANEL, ITEM_HOVER)
+                .insert(DropFolder(folder.clone()))
                 .observe(open_folder(folder.clone()))
                 .with_children(|card| {
                     folder_icon(card, 170.0);
@@ -1056,16 +1514,17 @@ fn spawn_grid(area: &mut ChildSpawnerCommands, lau: &Launcher) {
                     card.spawn((text(font, games_in_folder(lau, folder), 12.0, DIM), Node { width: percent(100), ..default() }));
                 });
         }
-        for rom in roms_here(lau) {
+        for rom in roms.iter().copied() {
             button(grid, Node { width: px(190), height: px(268), flex_shrink: 0.0, flex_direction: FlexDirection::Column, align_items: AlignItems::Center, padding: UiRect::all(px(10)), row_gap: px(8), border_radius: BorderRadius::all(px(10)), overflow: Overflow::clip(), ..default() }, PANEL, ITEM_HOVER)
                 .observe(open_game(rom.info.file.clone()))
+                .observe(start_drag(rom.info.file.clone()))
                 .with_children(|card| {
                     cover(card, rom, 170.0);
                     if lau.prefs.is_favorite(&rom.info.file) {
                         card.spawn(Node { position_type: PositionType::Absolute, top: px(16), right: px(16), ..default() }).with_children(|b| star(b, lau, &rom.info.file, 22.0));
                     }
                     card.spawn((text(font, rom.info.title.clone(), 14.0, TEXT), Node { width: percent(100), ..default() }));
-                    card.spawn((text(font, rom.info.publisher.clone(), 12.0, DIM), Node { width: percent(100), ..default() }));
+                    card.spawn((text(font, sort_detail(lau, rom), 12.0, DIM), Node { width: percent(100), ..default() }));
                     if let Some(code) = decompiled(&rom.info.code) {
                         progress_bar(card, code);
                     }
@@ -1083,9 +1542,12 @@ fn progress_bar(c: &mut ChildSpawnerCommands, value: f32) {
     c.spawn((Node { width: percent(100), height: px(5), flex_shrink: 0.0, border_radius: BorderRadius::all(px(3)), overflow: Overflow::clip(), ..default() }, BackgroundColor(ITEM))).with_child((Node { width: percent(value.clamp(0.0, 100.0)), height: percent(100), ..default() }, BackgroundColor(GOOD)));
 }
 
-fn spawn_list(area: &mut ChildSpawnerCommands, lau: &Launcher) {
+fn spawn_list(area: &mut ChildSpawnerCommands, lau: &Launcher, roms: &[&Rom], folders: &[&String]) {
     let font = &lau.font;
-    let columns: [(&str, f32); 5] = [(tr("Publisher", "Editeur"), 170.0), ("Code", 60.0), ("Region", 70.0), (tr("Size", "Taille"), 70.0), ("Decomp", 70.0)];
+    // Ce qu'on trie remplace le code quand aucune colonne ne le montre
+    let sorted_column = matches!(lau.prefs.sort, SortKey::Developer | SortKey::Year | SortKey::Genre | SortKey::Tag);
+    let (publisher_width, second): (f32, (&str, f32)) = if sorted_column { (110.0, (lau.prefs.sort.label(), 120.0)) } else { (170.0, ("Code", 60.0)) };
+    let columns: [(&str, f32); 5] = [(tr("Publisher", "Editeur"), publisher_width), second, ("Region", 70.0), (tr("Size", "Taille"), 70.0), ("Decomp", 70.0)];
     area.spawn(Node { width: percent(100), height: auto(), flex_direction: FlexDirection::Column, row_gap: px(4), padding: UiRect::new(px(MAIN_PAD), px(MAIN_PAD), px(6), px(84)), ..default() }).with_children(|list| {
         list.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(14), padding: UiRect::axes(px(8), px(4)), ..default() }).with_children(|head| {
             head.spawn(Node { width: px(44), ..default() });
@@ -1095,8 +1557,9 @@ fn spawn_list(area: &mut ChildSpawnerCommands, lau: &Launcher) {
             }
             head.spawn(Node { width: px(22), ..default() });
         });
-        for folder in folders_here(lau) {
+        for folder in folders.iter().copied() {
             button(list, Node { flex_direction: FlexDirection::Row, flex_shrink: 0.0, align_items: AlignItems::Center, column_gap: px(14), padding: UiRect::axes(px(8), px(6)), border_radius: BorderRadius::all(px(6)), ..default() }, PANEL, ITEM_HOVER)
+                .insert(DropFolder(folder.clone()))
                 .observe(open_folder(folder.clone()))
                 .with_children(|row| {
                     folder_icon(row, 44.0);
@@ -1104,15 +1567,17 @@ fn spawn_list(area: &mut ChildSpawnerCommands, lau: &Launcher) {
                     row.spawn(text(font, games_in_folder(lau, folder), 14.0, DIM));
                 });
         }
-        for rom in roms_here(lau) {
+        for rom in roms.iter().copied() {
             let info = &rom.info;
             button(list, Node { flex_direction: FlexDirection::Row, flex_shrink: 0.0, align_items: AlignItems::Center, column_gap: px(14), padding: UiRect::axes(px(8), px(6)), border_radius: BorderRadius::all(px(6)), ..default() }, PANEL, ITEM_HOVER)
                 .observe(open_game(info.file.clone()))
+                .observe(start_drag(info.file.clone()))
                 .with_children(|row| {
                     cover(row, rom, 44.0);
                     row.spawn((text(font, info.title.clone(), 15.0, TEXT), Node { flex_grow: 1.0, flex_basis: px(0), min_width: px(0), ..default() }));
                     let decomp = decompiled(&info.code).map_or_else(|| "-".to_string(), |v| format!("{v:.1} %"));
-                    let values = [info.publisher.clone(), info.code.clone(), info.region().to_string(), format_size(info.size), decomp];
+                    let second = if sorted_column { sort_detail(lau, rom) } else { info.code.clone() };
+                    let values = [publisher_of(rom).to_string(), second, info.region().to_string(), format_size(info.size), decomp];
                     for ((_, width), value) in columns.iter().zip(values) {
                         row.spawn((text(font, value, 14.0, DIM), Node { width: px(*width), ..default() }));
                     }
@@ -1358,7 +1823,7 @@ fn spawn_game(main: &mut ChildSpawnerCommands, lau: &Launcher, rom: &Rom, regist
         let (top, rest): (Top, Rest) = match lau.tab {
             Tab::Play => play_tab(rom, registry),
             Tab::Modding => modding_tab(rom, registry, lau.mod_link.clone(), lau.typing_host),
-            Tab::Description => description_tab(rom),
+            Tab::Description => description_tab(lau, rom),
             Tab::Settings => settings_tab(lau, rom, registry),
         };
         zone.spawn(Node { flex_shrink: 0.0, min_height: px(MAIN_PAD + COVER - HEADER_H + 14.0), flex_direction: FlexDirection::Column, row_gap: px(10), padding: UiRect::new(px(beside - 2.0), px(20), px(16), px(10)), ..default() }).with_children(|t| top(t, font));
@@ -1775,11 +2240,14 @@ fn modding_tab(rom: &Rom, registry: &GameRegistry, link: Option<String>, typing_
     )
 }
 
-fn description_tab(rom: &Rom) -> (Top, Rest) {
+fn description_tab(lau: &Launcher, rom: &Rom) -> (Top, Rest) {
     let info = rom.info.clone();
+    let tags = lau.prefs.tags_of(&info.code).join(", ");
+    let (genres, developer, year) = (genres_of(lau, rom), rom.meta.developer.clone(), rom.meta.year.map_or_else(String::new, |year| year.to_string()));
+    let publisher_known = publisher_of(rom).to_string();
     (
         Box::new({
-            let (title, publisher) = (info.title.clone(), info.publisher.clone());
+            let (title, publisher) = (info.title.clone(), publisher_known);
             move |t, font| {
                 t.spawn(text(font, title, 22.0, TEXT));
                 if !publisher.is_empty() {
@@ -1789,13 +2257,17 @@ fn description_tab(rom: &Rom) -> (Top, Rest) {
         }),
         Box::new(move |r, font| {
             let rows = [
+                (tr("Developer", "Developpeur"), developer),
+                (tr("Year", "Annee"), year),
+                ("Genre", genres),
+                ("Tags", tags),
                 (tr("Game code", "Code du jeu"), info.code.clone()),
                 ("Region", info.region().to_string()),
                 (tr("Internal name", "Nom interne"), info.internal_name.clone()),
                 (tr("Size", "Taille"), format_size(info.size)),
                 (tr("File", "Fichier"), info.file.clone()),
             ];
-            for (name, value) in rows {
+            for (name, value) in rows.into_iter().filter(|(_, value)| !value.is_empty()) {
                 r.spawn(Node { flex_direction: FlexDirection::Row, column_gap: px(12), ..default() }).with_children(|row| {
                     row.spawn((text(font, name, 15.0, DIM), Node { width: px(140), ..default() }));
                     row.spawn(text(font, value, 15.0, TEXT));
@@ -1813,6 +2285,10 @@ fn settings_tab(lau: &Launcher, rom: &Rom, registry: &GameRegistry) -> (Top, Res
     let current = library::parent_of(&file).to_string();
     let native_code = native_game(registry, &rom.info.code).map(|_| rom.info.code.clone());
     let path_for_native = rom.info.path.clone();
+    let code = rom.info.code.clone();
+    let game_tags = lau.prefs.tags_of(&code).to_vec();
+    let known_tags = lau.prefs.all_tags();
+    let tag_input = lau.tag_input.clone();
     (
         Box::new(move |t, font| {
             if let Some(code) = native_code.clone() {
@@ -1850,6 +2326,7 @@ fn settings_tab(lau: &Launcher, rom: &Rom, registry: &GameRegistry) -> (Top, Res
                 .with_child(text(font, label, 15.0, TEXT));
         }),
         Box::new(move |r, font| {
+            spawn_tags(r, font, &code, &game_tags, &known_tags, tag_input);
             if folders.is_empty() {
                 return;
             }
@@ -1868,20 +2345,82 @@ fn settings_tab(lau: &Launcher, rom: &Rom, registry: &GameRegistry) -> (Top, Res
     )
 }
 
-/// Range un jeu : il reste ouvert et favori, et la vue des jeux le retrouve dans son nouveau dossier.
-fn move_game(lau: &mut Launcher, images: &mut Assets<Image>, time: &Time<Real>, file: &str, folder: &str) {
+/// Les tags du jeu : un clic met ou retire un tag déjà connu, « Nouveau tag » en crée un.
+fn spawn_tags(r: &mut ChildSpawnerCommands, font: &Fonts, code: &str, game_tags: &[String], known_tags: &[String], input: Option<String>) {
+    r.spawn(text(font, tr("Tags (click to add or remove)", "Tags (clic pour mettre ou retirer)"), 15.0, DIM));
+    r.spawn(Node { flex_direction: FlexDirection::Row, flex_wrap: FlexWrap::Wrap, align_items: AlignItems::Center, column_gap: px(6), row_gap: px(6), ..default() }).with_children(|row| {
+        for tag in known_tags {
+            let on = game_tags.contains(tag);
+            let (normal, hover) = if on { (ITEM_ON, ITEM_ON) } else { (ITEM, ITEM_HOVER) };
+            let (code, name) = (code.to_string(), tag.clone());
+            button(row, button_node(), normal, hover)
+                .observe(move |_: On<Activate>, mut lau: ResMut<Launcher>| {
+                    if on {
+                        lau.prefs.remove_tag(&code, &name);
+                    } else if lau.prefs.add_tag(&code, &name).is_err() {
+                        return;
+                    }
+                    lau.prefs.store();
+                    lau.dirty = true;
+                })
+                .with_child(text(font, tag.clone(), 14.0, TEXT));
+        }
+        match input {
+            Some(tag) => {
+                row.spawn((Node { padding: UiRect::axes(px(12), px(8)), min_width: px(200), border: UiRect::all(px(2)), border_radius: BorderRadius::all(px(6)), ..default() }, BorderColor::all(ITEM_ON), BackgroundColor(PANEL))).with_child(text(font, format!("{tag}_"), 14.0, TEXT));
+                button(row, button_node(), ITEM_ON, ITEM_HOVER)
+                    .observe(|_: On<Activate>, mut lau: ResMut<Launcher>, time: Res<Time<Real>>| add_typed_tag(&mut lau, &time))
+                    .with_child(text(font, tr("Add", "Ajouter"), 14.0, TEXT));
+                row.spawn(text(font, tr("Enter = add, Esc = cancel", "Entree = ajouter, Echap = annuler"), 13.0, DIM));
+            }
+            None => {
+                button(row, button_node(), ITEM, ITEM_HOVER)
+                    .observe(|_: On<Activate>, mut lau: ResMut<Launcher>| {
+                        lau.tag_input = Some(String::new());
+                        lau.dirty = true;
+                    })
+                    .with_child(text(font, tr("New tag", "Nouveau tag"), 14.0, TEXT));
+            }
+        }
+    });
+}
+
+/// Déplace la rom ; les favoris suivent. Rend son nouveau chemin relatif, ou dit pourquoi elle reste.
+fn relocate_rom(lau: &mut Launcher, time: &Time<Real>, file: &str, folder: &str) -> Option<String> {
     match library::move_rom(&library::rom_dir(), file, folder) {
         Ok(moved) => {
             for favorite in lau.prefs.favorites.iter_mut().filter(|f| *f == file) {
-                *favorite = moved.clone();
+                favorite.clone_from(&moved);
             }
             lau.prefs.store();
-            lau.open = Some(moved);
-            lau.folder = folder.to_string();
-            lau.scroll_reset = true;
-            reload_roms(lau, images);
+            Some(moved)
         }
-        Err(e) => say(lau, time, e),
+        Err(e) => {
+            say(lau, time, e);
+            None
+        }
+    }
+}
+
+/// Range un jeu : il reste ouvert et favori, et la vue des jeux le retrouve dans son nouveau dossier.
+fn move_game(lau: &mut Launcher, images: &mut Assets<Image>, time: &Time<Real>, file: &str, folder: &str) {
+    if let Some(moved) = relocate_rom(lau, time, file, folder) {
+        lau.open = Some(moved);
+        lau.folder = folder.to_string();
+        lau.scroll_reset = true;
+        reload_roms(lau, images);
+    }
+}
+
+/// Un jeu glissé sur un dossier : on reste où l'on est, pour en ranger d'autres.
+fn drop_game(lau: &mut Launcher, images: &mut Assets<Image>, time: &Time<Real>, file: &str, folder: &str) {
+    if library::parent_of(file) == folder {
+        return;
+    }
+    if relocate_rom(lau, time, file, folder).is_some() {
+        let shown = if folder.is_empty() { tr("the main folder", "la racine") } else { folder };
+        say(lau, time, t!("Moved to {shown}", "Range dans {shown}"));
+        reload_roms(lau, images);
     }
 }
 
@@ -1957,7 +2496,7 @@ pub fn spawn_options_page(c: &mut ChildSpawnerCommands) {
         }
         row.spawn((page_label("", 13.0, DIM), CoverStatus));
     });
-    c.spawn(page_label(tr("Downloaded from GameTDB for the games you installed.", "Telechargees depuis GameTDB pour les jeux installes."), 13.0, DIM));
+    c.spawn(page_label(tr("Downloaded from GameTDB for the games you installed, with their developer, year and genre.", "Telechargees depuis GameTDB pour les jeux installes, avec leur developpeur, leur annee et leur genre."), 13.0, DIM));
     c.spawn(page_label(tr("Roms folder", "Dossier des roms"), 15.0, DIM));
     c.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(12), ..default() }).with_children(|row| {
         button(row, Node { flex_shrink: 0.0, ..button_node() }, ITEM, ITEM_HOVER).observe(|_: On<Activate>| open_rom_folder()).with_child(page_label(tr("Open the folder", "Ouvrir le dossier"), 15.0, TEXT));
@@ -2073,5 +2612,49 @@ fn view_choice_looks(lau: Res<Launcher>, mut buttons: Query<(&ViewChoice, &Hover
         if color.0 != wanted {
             color.0 = wanted;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+
+    fn imported(already: bool) -> Result<Imported, String> {
+        Ok(Imported { title: "Jeu".into(), already })
+    }
+
+    #[test]
+    fn tally_is_silent_for_one_rom() {
+        let mut tally = ImportTally::default();
+        assert_eq!(tally.summary(), None);
+        tally.record(&Err("photo.nds: not a DS rom".into()));
+        assert_eq!(tally.summary(), None);
+    }
+
+    #[test]
+    fn tally_keeps_the_first_error() {
+        let mut tally = ImportTally::default();
+        for result in [imported(false), Err("a.nds: not a DS rom".to_string()), imported(false), imported(true), Err("b.nds: not a DS rom".to_string())] {
+            tally.record(&result);
+        }
+        assert_eq!(tally.summary().unwrap(), "2 added, 1 already in the launcher, 2 failed: a.nds: not a DS rom");
+    }
+
+    #[test]
+    fn cancelling_the_picker_does_nothing() {
+        let mut world = World::new();
+        world.init_resource::<Launcher>();
+        world.init_resource::<Time<Real>>();
+        {
+            let mut lau = world.resource_mut::<Launcher>();
+            lau.picking = true;
+            *lau.picked.lock().unwrap() = Some(Vec::new());
+        }
+        world.run_system_once(poll_picker).unwrap();
+        let lau = world.resource::<Launcher>();
+        assert!(!lau.picking);
+        assert_eq!(lau.copying, 0);
+        assert_eq!(lau.status, "");
     }
 }

@@ -17,6 +17,7 @@ pub mod asset_browser;
 pub mod asset_scan;
 pub mod controllers;
 pub mod covers;
+pub mod game_meta;
 pub mod devtools;
 pub mod i18n;
 pub mod input;

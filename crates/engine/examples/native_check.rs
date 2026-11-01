@@ -3,6 +3,7 @@
 //! `cargo run --release -p nds-engine --example native_check -- <code> <rom> <capture.png> <secondes> [enter@s] [touch@s] [f8@s]`
 //! `click=texte@s` active le bouton qui porte ce texte (le dernier s'il y en a plusieurs) ; une capture par fenetre.
 //! `drop=chemin@s` depose un fichier ou un dossier sur la fenetre ; `type=texte@s` tape ce texte au clavier.
+//! `press=x,y@s`, `moveto=x,y@s`, `release=x,y@s` : la souris dans la fenetre, sans toucher au vrai curseur.
 //! (avec `NDSGS_NATIVE_MUTE=1` et `NDSGS_NATIVE_DIR`)
 
 use bevy::prelude::*;
@@ -20,6 +21,38 @@ struct Check {
     clicks: Vec<(String, f32, bool)>,
     drops: Vec<(String, f32, bool)>,
     typed: Vec<(String, f32, bool)>,
+    mouse: Vec<(MouseStep, Vec2, f32, bool)>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum MouseStep {
+    Press,
+    Move,
+    Release,
+}
+
+/// Les memes messages que winit : le picking lit `WindowEvent`, `ButtonInput` lit `MouseButtonInput`.
+fn mouse_steps(time: Res<Time>, mut check: ResMut<Check>, mut windows: Query<(Entity, &mut Window)>, mut events: MessageWriter<bevy::window::WindowEvent>, mut buttons: MessageWriter<bevy::input::mouse::MouseButtonInput>, mut moves: MessageWriter<bevy::window::CursorMoved>) {
+    use bevy::input::ButtonState;
+    use bevy::input::mouse::MouseButtonInput;
+    use bevy::window::{CursorMoved, WindowEvent};
+    let now = time.elapsed_secs();
+    let Some((window, mut state)) = windows.iter_mut().next() else { return };
+    for (step, at, when, done) in &mut check.mouse {
+        if *done || now < *when {
+            continue;
+        }
+        *done = true;
+        state.bypass_change_detection().set_cursor_position(Some(*at));
+        let moved = CursorMoved { window, position: *at, delta: None };
+        moves.write(moved.clone());
+        events.write(WindowEvent::CursorMoved(moved));
+        if *step != MouseStep::Move {
+            let input = MouseButtonInput { button: MouseButton::Left, state: if *step == MouseStep::Press { ButtonState::Pressed } else { ButtonState::Released }, window };
+            buttons.write(input);
+            events.write(WindowEvent::MouseButtonInput(input));
+        }
+    }
 }
 
 /// Les fichiers deposes et les touches passent par les memes messages que les vrais.
@@ -109,7 +142,7 @@ fn simulate(
             window.set_physical_cursor_position(Some(bevy::math::DVec2::new(w / 2.0, h * 0.75)));
         }
         mouse.press(MouseButton::Left);
-    } else {
+    } else if !check.touch_at.is_empty() {
         mouse.release(MouseButton::Left);
     }
 }
@@ -152,8 +185,20 @@ fn main() {
             clicks: args.iter().filter_map(|a| a.strip_prefix("click=")).filter_map(|a| a.rsplit_once('@')).filter_map(|(t, s)| Some((t.to_string(), s.parse().ok()?, false))).collect(),
             drops: args.iter().filter_map(|a| a.strip_prefix("drop=")).filter_map(|a| a.rsplit_once('@')).filter_map(|(t, s)| Some((t.to_string(), s.parse().ok()?, false))).collect(),
             typed: args.iter().filter_map(|a| a.strip_prefix("type=")).filter_map(|a| a.rsplit_once('@')).filter_map(|(t, s)| Some((t.to_string(), s.parse().ok()?, false))).collect(),
+            mouse: args.iter().filter_map(|a| {
+                let (step, rest) = a.split_once('=')?;
+                let step = match step {
+                    "press" => MouseStep::Press,
+                    "moveto" => MouseStep::Move,
+                    "release" => MouseStep::Release,
+                    _ => return None,
+                };
+                let (at, when) = rest.rsplit_once('@')?;
+                let (x, y) = at.split_once(',')?;
+                Some((step, Vec2::new(x.parse().ok()?, y.parse().ok()?), when.parse().ok()?, false))
+            }).collect(),
         })
         .add_systems(PreUpdate, simulate.after(bevy::input::InputSystems))
-        .add_systems(Update, (no_focus, capture, clicks, drops_and_keys))
+        .add_systems(Update, (no_focus, capture, clicks, drops_and_keys, mouse_steps))
         .run();
 }

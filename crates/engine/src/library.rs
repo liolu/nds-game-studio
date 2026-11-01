@@ -7,6 +7,8 @@
 //! Les roms ne sont jamais émulées : elles identifient le jeu (code `AQIE`...) pour trouver son module
 //! natif, et donnent ses fichiers à la fenêtre Assets (F6) et au runtime.
 
+use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -322,6 +324,104 @@ pub enum LibraryView {
     List,
 }
 
+/// Ordre des jeux dans la vue.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SortKey {
+    #[default]
+    Title,
+    Publisher,
+    Developer,
+    Year,
+    Genre,
+    Tag,
+    Region,
+    Size,
+    Decomp,
+}
+
+impl SortKey {
+    pub const ALL: [SortKey; 9] = [SortKey::Title, SortKey::Publisher, SortKey::Developer, SortKey::Year, SortKey::Genre, SortKey::Tag, SortKey::Region, SortKey::Size, SortKey::Decomp];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SortKey::Title => tr("Name", "Nom"),
+            SortKey::Publisher => tr("Publisher", "Editeur"),
+            SortKey::Developer => tr("Developer", "Developpeur"),
+            SortKey::Year => tr("Year", "Annee"),
+            SortKey::Genre => "Genre",
+            SortKey::Tag => "Tag",
+            SortKey::Region => "Region",
+            SortKey::Size => tr("Size", "Taille"),
+            SortKey::Decomp => "Decomp",
+        }
+    }
+
+    /// Le plus récent, le plus gros, le plus avancé d'abord.
+    pub fn starts_reversed(self) -> bool {
+        matches!(self, SortKey::Year | SortKey::Size | SortKey::Decomp)
+    }
+}
+
+/// Ce qu'on compare pour un jeu.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SortCell {
+    Number(f32),
+    Text(String),
+}
+
+impl SortCell {
+    fn compare(&self, other: &SortCell) -> Ordering {
+        match (self, other) {
+            (SortCell::Number(a), SortCell::Number(b)) => a.total_cmp(b),
+            (SortCell::Text(a), SortCell::Text(b)) => a.cmp(b),
+            (SortCell::Number(_), SortCell::Text(_)) => Ordering::Less,
+            (SortCell::Text(_), SortCell::Number(_)) => Ordering::Greater,
+        }
+    }
+}
+
+/// Trie (valeur, titre plié, jeu). Sans valeur, un jeu reste à la fin dans les deux sens ; à égalité, l'ordre du titre.
+pub fn sort_games<T>(mut games: Vec<(Option<SortCell>, String, T)>, reverse: bool) -> Vec<T> {
+    games.sort_by(|a, b| {
+        let by_value = match (&a.0, &b.0) {
+            (None, None) => Ordering::Equal,
+            (None, Some(_)) => Ordering::Greater,
+            (Some(_), None) => Ordering::Less,
+            (Some(x), Some(y)) if reverse => y.compare(x),
+            (Some(x), Some(y)) => x.compare(y),
+        };
+        by_value.then_with(|| a.1.cmp(&b.1))
+    });
+    games.into_iter().map(|(_, _, game)| game).collect()
+}
+
+/// Minuscules sans accents : « Pokémon » se trouve en tapant « pokemon ». Le ™ et le ® ne comptent pas.
+pub fn fold(text: &str) -> String {
+    text.chars()
+        .flat_map(char::to_lowercase)
+        .filter(|c| !matches!(c, '™' | '®' | '©'))
+        .map(|c| match c {
+            'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' | 'ā' => 'a',
+            'ç' => 'c',
+            'è' | 'é' | 'ê' | 'ë' | 'ē' => 'e',
+            'ì' | 'í' | 'î' | 'ï' | 'ī' => 'i',
+            'ñ' => 'n',
+            'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'ō' => 'o',
+            'ù' | 'ú' | 'û' | 'ü' | 'ū' => 'u',
+            'ý' | 'ÿ' => 'y',
+            other => other,
+        })
+        .collect()
+}
+
+/// Tous les mots cherchés sont dans le texte, dans n'importe quel ordre. Les deux sont déjà pliés (`fold`).
+pub fn matches_search(haystack: &str, query: &str) -> bool {
+    query.split_whitespace().all(|word| haystack.contains(word))
+}
+
+const MAX_TAG: usize = 32;
+
 /// Préférences du launcher (`launcher.toml`, à part d'options.toml : réinitialiser les options ne
 /// doit pas effacer les favoris).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -335,11 +435,15 @@ pub struct LibraryPrefs {
     /// Mise à jour remise à plus tard : sa version, et jusqu'à quand (secondes depuis 1970).
     pub update_later: String,
     pub update_later_until: u64,
+    pub sort: SortKey,
+    pub sort_reverse: bool,
+    /// Tags de l'utilisateur, par code de jeu : ils suivent le jeu d'un dossier à l'autre.
+    pub tags: BTreeMap<String, Vec<String>>,
 }
 
 impl Default for LibraryPrefs {
     fn default() -> Self {
-        LibraryPrefs { favorites: Vec::new(), view: LibraryView::default(), covers: true, update_later: String::new(), update_later_until: 0 }
+        LibraryPrefs { favorites: Vec::new(), view: LibraryView::default(), covers: true, update_later: String::new(), update_later_until: 0, sort: SortKey::default(), sort_reverse: false, tags: BTreeMap::new() }
     }
 }
 
@@ -368,6 +472,43 @@ impl LibraryPrefs {
             self.favorites.retain(|f| f != file);
         } else {
             self.favorites.push(file.to_string());
+        }
+    }
+
+    pub fn tags_of(&self, code: &str) -> &[String] {
+        self.tags.get(code).map_or(&[], Vec::as_slice)
+    }
+
+    /// Tous les tags, sans doublon, triés.
+    pub fn all_tags(&self) -> Vec<String> {
+        let mut all: Vec<String> = self.tags.values().flatten().cloned().collect();
+        all.sort_by_key(|tag| fold(tag));
+        all.dedup();
+        all
+    }
+
+    /// Le tag sous l'orthographe déjà utilisée ailleurs : « RPG » et « rpg » restent un seul tag.
+    pub fn add_tag(&mut self, code: &str, tag: &str) -> Result<(), String> {
+        let tag = tag.trim();
+        if tag.is_empty() || tag.chars().count() > MAX_TAG || tag.chars().any(char::is_control) {
+            return Err(t!("Invalid tag: {tag}", "Tag invalide : {tag}"));
+        }
+        let wanted = fold(tag);
+        let name = self.all_tags().into_iter().find(|known| fold(known) == wanted).unwrap_or_else(|| tag.to_string());
+        let tags = self.tags.entry(code.to_string()).or_default();
+        if !tags.contains(&name) {
+            tags.push(name);
+            tags.sort_by_key(|tag| fold(tag));
+        }
+        Ok(())
+    }
+
+    pub fn remove_tag(&mut self, code: &str, tag: &str) {
+        if let Some(tags) = self.tags.get_mut(code) {
+            tags.retain(|t| t != tag);
+            if tags.is_empty() {
+                self.tags.remove(code);
+            }
         }
     }
 }
@@ -482,8 +623,61 @@ mod tests {
     }
 
     #[test]
+    fn import_of_a_selection_reports_each_file() {
+        let source_dir = temp_dir("selection-source");
+        let dir = temp_dir("selection-target").join("rom");
+        let (nds, dsi, photo) = (source_dir.join("jeu.nds"), source_dir.join("jeu.dsi"), source_dir.join("photo.nds"));
+        std::fs::write(&nds, fake_rom("Le Jeu\nEditeur")).unwrap();
+        std::fs::write(&dsi, fake_rom("Le Jeu DSi\nEditeur")).unwrap();
+        std::fs::write(&photo, vec![1u8; 0x400]).unwrap();
+        assert_eq!(import_rom(&nds, &dir).unwrap(), Imported { title: "Le Jeu".into(), already: false });
+        assert_eq!(import_rom(&dsi, &dir).unwrap(), Imported { title: "Le Jeu DSi".into(), already: false });
+        assert!(import_rom(&photo, &dir).is_err());
+        let names: Vec<String> = folder_stamp(&dir).into_iter().map(|(n, _)| n).collect();
+        assert_eq!(names, ["jeu.dsi", "jeu.nds"]);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2, "aucun fichier temporaire ne reste");
+    }
+
+    #[test]
+    fn sorting_keeps_unknown_values_last() {
+        let games = || vec![(None, "a".to_string(), "sans"), (Some(SortCell::Number(2006.0)), "b".to_string(), "2006"), (Some(SortCell::Number(2010.0)), "c".to_string(), "2010"), (Some(SortCell::Number(2006.0)), "a".to_string(), "2006 a")];
+        assert_eq!(sort_games(games(), false), ["2006 a", "2006", "2010", "sans"]);
+        assert_eq!(sort_games(games(), true), ["2010", "2006 a", "2006", "sans"]);
+    }
+
+    #[test]
+    fn search_ignores_case_accents_and_word_order() {
+        assert_eq!(fold("Pokémon™ Noir"), "pokemon noir");
+        let game = fold("LEGO Star Wars II  LucasArts 2006 Action");
+        assert!(matches_search(&game, &fold("star LUCASARTS")));
+        assert!(matches_search(&game, &fold("2006")));
+        assert!(matches_search(&game, ""));
+        assert!(!matches_search(&game, &fold("star trek")));
+        assert!(matches_search(&fold("ポケモン"), &fold("ポケ")));
+    }
+
+    #[test]
+    fn tags_stay_one_spelling() {
+        let mut prefs = LibraryPrefs::default();
+        prefs.add_tag("AAAE", " RPG ").unwrap();
+        prefs.add_tag("BBBE", "rpg").unwrap();
+        prefs.add_tag("BBBE", "Enfance").unwrap();
+        prefs.add_tag("BBBE", "RPG").unwrap();
+        assert_eq!(prefs.tags_of("BBBE"), ["Enfance", "RPG"]);
+        assert_eq!(prefs.all_tags(), ["Enfance", "RPG"]);
+        for bad in ["", "  ", "a\nb", &"x".repeat(MAX_TAG + 1)] {
+            assert!(prefs.add_tag("AAAE", bad).is_err(), "{bad}");
+        }
+        prefs.remove_tag("BBBE", "RPG");
+        prefs.remove_tag("AAAE", "RPG");
+        assert!(prefs.tags_of("AAAE").is_empty());
+        assert_eq!(prefs.all_tags(), ["Enfance"]);
+    }
+
+    #[test]
     fn prefs_round_trip_and_favorites() {
-        let mut prefs = LibraryPrefs { favorites: vec![], view: LibraryView::List, covers: true, ..Default::default() };
+        let mut prefs = LibraryPrefs { favorites: vec![], view: LibraryView::List, covers: true, sort: SortKey::Year, sort_reverse: true, ..Default::default() };
+        prefs.add_tag("AL7E", "Lego").unwrap();
         prefs.toggle_favorite("a.nds");
         prefs.toggle_favorite("b.nds");
         prefs.toggle_favorite("a.nds");
