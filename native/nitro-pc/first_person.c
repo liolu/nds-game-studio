@@ -20,30 +20,30 @@ extern int nds_fp_mode;
 static inline s32 fx(float v) { return (s32)(v * 4096.0f); }
 static inline float real(s32 v) { return (float)v / 4096.0f; }
 
-static float wrap_angle(float a) {
+float fp_wrap_angle(float a) {
     while (a > PI) a -= 2 * PI;
     while (a < -PI) a += 2 * PI;
     return a;
 }
 
 /* pas de bibliotheque mathematique dans le module : serie de Taylor, sur [-pi/2, pi/2] */
-static float sine(float a) {
-    a = wrap_angle(a);
+float fp_sine(float a) {
+    a = fp_wrap_angle(a);
     if (a > PI / 2) a = PI - a;
     else if (a < -PI / 2) a = -PI - a;
     float x2 = a * a;
     return a * (1 - x2 / 6 * (1 - x2 / 20 * (1 - x2 / 42 * (1 - x2 / 72))));
 }
 
-static float cosine(float a) { return sine(a + PI / 2); }
+float fp_cosine(float a) { return fp_sine(a + PI / 2); }
 
-static float arc_tangent(float y, float x) {
+float fp_arc_tangent(float y, float x) {
     /* assez juste pour un cap de depart : par pas de dichotomie sur le sinus et le cosinus */
     float low = -PI, high = PI;
     for (int i = 0; i < 24; i++) {
         float mid = (low + high) / 2;
         /* signe du produit vectoriel entre (x, y) et la direction mid */
-        if (cosine(mid) * y - sine(mid) * x > 0) low = mid;
+        if (fp_cosine(mid) * y - fp_sine(mid) * x > 0) low = mid;
         else high = mid;
     }
     return (low + high) / 2;
@@ -105,7 +105,7 @@ int nds_fp_arm_slot(int slot) { return slot >= 0 && slot < 32 && (nds_fp_arm_slo
 #define ARM_Z -0.8f
 
 void nds_fp_hold_arms(float *view) {
-    float s = sine(pitch), c = cosine(pitch);
+    float s = fp_sine(pitch), c = fp_cosine(pitch);
     float y = view[1] * c + view[2] * s, z = view[2] * c - view[1] * s - ARM_SHOULDER_Z;
     view[0] = view[0] * ARM_SPREAD + ARM_X;
     view[1] = y * ARM_RAISE_COS - z * ARM_RAISE_SIN + ARM_Y;
@@ -129,6 +129,11 @@ void nds_fp_crosshair(u32 *screen, int w, int h, int k, int stride) {
 void nds_hook_camera(u32 camera) {
     static int active = -1;
     static int seen_x, seen_y;
+    /* la camera libre passe avant : le corps redevient entier, et le regard repartira du personnage */
+    if (nds_free_camera(camera)) {
+        started = 0;
+        return;
+    }
     if (active < 0) active = nds_fp_camera && nds_arg("--first-person", 0);
     if (!active || camera != nds_fp_camera) return;
     u32 hero = player();
@@ -143,18 +148,18 @@ void nds_hook_camera(u32 camera) {
     if (!started) {
         /* nouveau personnage ou nouveau niveau : le regard part dans la direction du personnage */
         started = 1;
-        yaw = arc_tangent(real(body[6]), real(body[8]));
+        yaw = fp_arc_tangent(real(body[6]), real(body[8]));
         pitch = 0;
         seen_x = mouse_x;
         seen_y = mouse_y;
     }
-    yaw = wrap_angle(yaw - (float)(mouse_x - seen_x) * RADIANS_PER_COUNT);
+    yaw = fp_wrap_angle(yaw - (float)(mouse_x - seen_x) * RADIANS_PER_COUNT);
     pitch -= (float)(mouse_y - seen_y) * RADIANS_PER_COUNT;
     if (pitch > MAX_PITCH) pitch = MAX_PITCH;
     if (pitch < -MAX_PITCH) pitch = -MAX_PITCH;
     seen_x = mouse_x;
     seen_y = mouse_y;
-    float look_x = sine(yaw), look_z = cosine(yaw), up = sine(pitch), level = cosine(pitch);
+    float look_x = fp_sine(yaw), look_z = fp_cosine(yaw), up = fp_sine(pitch), level = fp_cosine(pitch);
     s32 *pos = (s32 *)DS(camera);
     pos[0] = body[9] + fx(look_x * EYE_FORWARD);
     pos[1] = body[10] + fx(EYE_HEIGHT);

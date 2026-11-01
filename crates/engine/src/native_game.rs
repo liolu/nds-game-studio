@@ -595,8 +595,37 @@ struct Running {
     /// Un mod dirige la caméra à la souris : le curseur est retenu, F7 le rend.
     mouse_look: bool,
     captured: bool,
+    /// Le mod de caméra libre est actif : C l'allume, V gèle la scène.
+    free_camera_mod: bool,
+    free_camera: FreeCamera,
     /// Cumul des mouvements de la souris, envoyé au module.
     mouse: (i16, i16),
+}
+
+/// Ce que le joueur a choisi avec C et V. Envoyé au module avec les touches, bits 12 et 13.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum FreeCamera {
+    Off,
+    Moving,
+    Frozen,
+}
+
+impl FreeCamera {
+    fn after_c(self) -> Self {
+        if self == Self::Off { Self::Moving } else { Self::Off }
+    }
+
+    fn after_v(self) -> Self {
+        if self == Self::Frozen { Self::Moving } else { Self::Frozen }
+    }
+
+    fn key_bits(self) -> u16 {
+        match self {
+            Self::Off => 0,
+            Self::Moving => 1 << 12,
+            Self::Frozen => 3 << 12,
+        }
+    }
 }
 
 #[derive(Component)]
@@ -689,6 +718,7 @@ fn launch(commands: &mut Commands, images: &mut Assets<Image>, code: &str, rom: 
     };
     let mod_args = crate::mod_packs::native_args(code);
     let mouse_look = mod_args.iter().any(|arg| arg == "--first-person");
+    let free_camera_mod = mod_args.iter().any(|arg| arg == "--free-camera");
     let mut command = Command::new(module);
     command.arg(rom).arg("--pipe").arg("--shm").arg(&name).arg("--save").arg(saves.join("backup.sav")).args(mod_args).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(log);
     if std::env::var_os("NDSGS_NATIVE_MUTE").is_some() {
@@ -717,7 +747,7 @@ fn launch(commands: &mut Commands, images: &mut Assets<Image>, code: &str, rom: 
         commands.spawn((Sprite { image: image.clone(), custom_size: Some(size), ..default() }, NativeScreen, engine.layers(), in_game()));
     }
     let stdin = child.stdin.take();
-    commands.insert_resource(Running { code: code.to_string(), child, stdin, frames, seq: 0, top, bottom, sent: [0xFF; PACKET], mouse_look, captured: mouse_look, mouse: (0, 0) });
+    commands.insert_resource(Running { code: code.to_string(), child, stdin, frames, seq: 0, top, bottom, sent: [0xFF; PACKET], mouse_look, captured: mouse_look, free_camera_mod, free_camera: FreeCamera::Off, mouse: (0, 0) });
 }
 
 fn show_frames(mut commands: Commands, mut running: ResMut<Running>, mut images: ResMut<Assets<Image>>, mut sprites: Query<&mut Sprite, With<NativeScreen>>) {
@@ -758,12 +788,34 @@ fn show_frames(mut commands: Commands, mut running: ResMut<Running>, mut images:
 
 /// La souris dirige la caméra : le curseur reste dans la fenêtre, F7 le rend pour toucher l'écran du bas ou la barre de titre.
 fn mouse_look(mut running: ResMut<Running>, motion: Res<AccumulatedMouseMotion>, keys: Res<ButtonInput<KeyCode>>, screens: Res<DsScreens>, mut windows: Query<(&Window, &mut CursorOptions)>, mut toasts: MessageWriter<ShowToast>, mut told: Local<bool>) {
-    if !running.mouse_look {
+    if !running.mouse_look && !running.free_camera_mod {
         return;
     }
     if !*told {
         *told = true;
-        toasts.write(ShowToast(tr("The mouse moves the camera. F7 frees the cursor.", "La souris dirige la camera. F7 libere le curseur.").to_string()));
+        let text = if running.mouse_look {
+            tr("The mouse moves the camera. F7 frees the cursor.", "La souris dirige la camera. F7 libere le curseur.")
+        } else {
+            tr("C: free camera. V: freeze the scene.", "C : camera libre. V : geler la scene.")
+        };
+        toasts.write(ShowToast(text.to_string()));
+    }
+    if running.free_camera_mod {
+        let before = running.free_camera;
+        if keys.just_pressed(KeyCode::KeyC) {
+            running.free_camera = before.after_c();
+        } else if keys.just_pressed(KeyCode::KeyV) {
+            running.free_camera = before.after_v();
+        }
+        if running.free_camera != before {
+            // Le curseur suit la caméra libre ; en la quittant, il revient à ce que la vue à la première personne demande
+            running.captured = running.free_camera != FreeCamera::Off || running.mouse_look;
+            toasts.write(ShowToast(match running.free_camera {
+                FreeCamera::Off => tr("Free camera off", "Camera libre coupee"),
+                FreeCamera::Moving => tr("Free camera: mouse, arrows, Q and W. V freezes the scene.", "Camera libre : souris, fleches, Q et W. V gele la scene."),
+                FreeCamera::Frozen => tr("Scene frozen. V resumes, C leaves.", "Scene gelee. V reprend, C quitte."),
+            }.to_string()));
+        }
     }
     if keys.just_pressed(KeyCode::F7) {
         running.captured = !running.captured;
@@ -803,8 +855,9 @@ fn send_input(mut running: ResMut<Running>, input: Res<DsInput>, mouse_buttons: 
             keys |= 1 << bit;
         }
     }
+    keys |= running.free_camera.key_bits();
     // Curseur retenu par la caméra : le clic gauche tire (bouton L)
-    if running.captured && mouse_buttons.pressed(MouseButton::Left) {
+    if running.captured && running.free_camera == FreeCamera::Off && mouse_buttons.pressed(MouseButton::Left) {
         keys |= 1 << 9;
     }
     // Il n'est nulle part, il ne touche donc pas l'écran
@@ -855,6 +908,17 @@ fn stop_module(mut commands: Commands, mut cursors: Query<&mut CursorOptions>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn c_et_v_donnent_les_bits_du_module() {
+        let off = FreeCamera::Off;
+        assert_eq!(off.key_bits(), 0);
+        assert_eq!(off.after_c().key_bits(), 1 << 12);
+        assert_eq!(off.after_v().key_bits(), 3 << 12);
+        // V reprend sans quitter la caméra ; C quitte même une scène gelée
+        assert_eq!(off.after_v().after_v(), FreeCamera::Moving);
+        assert_eq!(off.after_v().after_c(), FreeCamera::Off);
+    }
 
     /// Le jeu ouvre l'objet par son nom (`os_shm_open`) et écrit l'en-tête que le launcher lit ; `drop` détruit le nom.
     #[cfg(unix)]

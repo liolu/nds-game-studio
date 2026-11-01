@@ -92,6 +92,13 @@ void nds_fp_hold_arms(float *view);
 int nds_fp_in_hand(const float *view);
 int nds_fp_arm_slot(int slot);
 void nds_fp_crosshair(u32 *screen, int w, int h, int k, int stride);
+float fp_wrap_angle(float a);
+float fp_sine(float a);
+float fp_cosine(float a);
+float fp_arc_tangent(float y, float x);
+
+/* free_camera.c */
+int nds_free_camera(u32 camera);
 
 /* gx3d.c */
 void gx_write(u32 reg, u32 value);
@@ -112,6 +119,8 @@ void gfx_parallel(void (*fn)(void *arg, int band, int bands), void *arg);
 void present_init(void);
 void present_frame(void);
 u32 present_keys(void);
+u32 present_pad(void);
+u32 present_free_camera(void);
 void present_touch(int *down, int *x, int *y);
 void present_mouse(int *x, int *y);
 void present_config(int *scale, int *ds_width);

@@ -172,6 +172,7 @@ pub fn native_args(code: &str) -> Vec<OsString> {
         match feature.as_str() {
             "interpolate" => args.push("--interpolate".into()),
             "first_person" => args.push("--first-person".into()),
+            "free_camera" => args.push("--free-camera".into()),
             "skip_intro" => args.push("--skip-intro".into()),
             "network" => {
                 args.push("--net-port".into());

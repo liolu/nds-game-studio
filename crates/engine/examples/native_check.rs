@@ -1,6 +1,6 @@
 //! Essai sans prendre le clavier : lance un jeu natif, sans focus et muet, simule des commandes, enregistre une
 //! capture et ferme.
-//! `cargo run --release -p nds-engine --example native_check -- <code> <rom> <capture.png> <secondes> [enter@s] [touch@s] [f8@s]`
+//! `cargo run --release -p nds-engine --example native_check -- <code> <rom> <capture.png> <secondes> [enter@s] [touch@s] [f8@s] [c@s] [v@s]`
 //! `click=texte@s` active le bouton qui porte ce texte (le dernier s'il y en a plusieurs) ; une capture par fenetre.
 //! `drop=chemin@s` depose un fichier ou un dossier sur la fenetre ; `type=texte@s` tape ce texte au clavier.
 //! `press=x,y@s`, `moveto=x,y@s`, `release=x,y@s` : la souris dans la fenetre, sans toucher au vrai curseur.
@@ -18,6 +18,8 @@ struct Check {
     enter_at: Option<f32>,
     touch_at: Vec<f32>,
     f8_at: Option<f32>,
+    c_at: Vec<f32>,
+    v_at: Vec<f32>,
     clicks: Vec<(String, f32, bool)>,
     drops: Vec<(String, f32, bool)>,
     typed: Vec<(String, f32, bool)>,
@@ -135,6 +137,13 @@ fn simulate(
     } else {
         keys.release(KeyCode::F8);
     }
+    for (at, key) in [(&check.c_at, KeyCode::KeyC), (&check.v_at, KeyCode::KeyV)] {
+        if at.iter().any(|t| during(Some(*t))) {
+            keys.press(key);
+        } else {
+            keys.release(key);
+        }
+    }
     if check.touch_at.iter().any(|t| during(Some(*t))) {
         // Milieu de l'écran du bas, dans la fenêtre où les deux écrans sont fusionnés
         for mut window in &mut windows {
@@ -182,6 +191,8 @@ fn main() {
             enter_at: time_of("enter@"),
             touch_at: args.iter().filter_map(|a| a.strip_prefix("touch@")?.parse().ok()).collect(),
             f8_at: time_of("f8@"),
+            c_at: args.iter().filter_map(|a| a.strip_prefix("c@")?.parse().ok()).collect(),
+            v_at: args.iter().filter_map(|a| a.strip_prefix("v@")?.parse().ok()).collect(),
             clicks: args.iter().filter_map(|a| a.strip_prefix("click=")).filter_map(|a| a.rsplit_once('@')).filter_map(|(t, s)| Some((t.to_string(), s.parse().ok()?, false))).collect(),
             drops: args.iter().filter_map(|a| a.strip_prefix("drop=")).filter_map(|a| a.rsplit_once('@')).filter_map(|(t, s)| Some((t.to_string(), s.parse().ok()?, false))).collect(),
             typed: args.iter().filter_map(|a| a.strip_prefix("type=")).filter_map(|a| a.rsplit_once('@')).filter_map(|(t, s)| Some((t.to_string(), s.parse().ok()?, false))).collect(),

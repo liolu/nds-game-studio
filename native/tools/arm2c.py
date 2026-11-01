@@ -113,6 +113,7 @@ class Lifter:
         self.new_subs = {}
         self.hooks = {}  # adresse -> fonction du runtime appelee a l'entree, avec r0
         self.exit_hooks = {}  # adresse -> fonction du runtime appelee a chaque sortie
+        self.gates = {}  # adresse -> fonction du runtime appelee a l'entree, avec r0 : si elle ne renvoie pas 0, la fonction du jeu ne tourne pas
         self.unhandled = []
         self.flag_funcs = set()  # fonctions dont l'appelant lit les drapeaux au retour
         self.flag_pass = True
@@ -664,6 +665,8 @@ class Lifter:
             head.append("  static void *const gs_[] = { %s0 };" % "".join("&&L%08x, " % a for a in self.gosub_labels))
         if entry in self.hooks:
             head.append("  { extern void %s(u32); %s(r0); }" % (self.hooks[entry], self.hooks[entry]))
+        if entry in self.gates:
+            head.append("  { extern int %s(u32); if (%s(r0)) %s }" % (self.gates[entry], self.gates[entry], RET))
         body = "\n".join(head) + "\n" + text + "\n  " + RET + "\n}\n"
         if name in self.flag_funcs:
             body = body.replace(RET, "{ SAVEF(); " + RET + " }")

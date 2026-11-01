@@ -122,8 +122,9 @@ void present_frame(void) {
     /* boutons X/Y : actifs a 0 ; bit 15 a 0 = couvercle ouvert */
     {
         u32 xy = 0x2C00; /* X = bit 10, Y = bit 11, debogage = bit 13 : relaches a 1, comme KEYINPUT */
-        if (keys_now & (1 << 10)) xy &= ~(1u << 10);
-        if (keys_now & (1 << 11)) xy &= ~(1u << 11);
+        u32 for_game = present_free_camera() ? 0 : keys_now; /* la camera libre garde les touches */
+        if (for_game & (1 << 10)) xy &= ~(1u << 10);
+        if (for_game & (1 << 11)) xy &= ~(1u << 11);
         REG16(0x027FFFA8u) = (u16)xy;
         /* dernier releve du stylet pour le SDK : x 12 bits, y 12 bits, touche */
         REG16(0x027FFFAAu) = (u16)((touch_x & 0xFFF) | ((touch_y & 0xF) << 12));
@@ -163,7 +164,7 @@ void present_frame(void) {
     }
 }
 
-/* commandes : le launcher envoie 16 octets a chaque changement (touches, stylet, definition, cumul des mouvements de la souris) */
+/* commandes : le launcher envoie 16 octets a chaque changement (touches et camera libre, stylet, definition, cumul des mouvements de la souris) */
 static volatile u32 keys_now;
 static volatile int touch_down, touch_x, touch_y;
 static volatile int mouse_x, mouse_y;
@@ -282,7 +283,12 @@ static void peek_step(void) {
     }
 }
 
-u32 present_keys(void) { return keys_now & 0x3FF; }
+/* Touches vues par le jeu. Bits du launcher au-dela des 12 du DS : 12 = camera libre, 13 = scene gelee ; le jeu ne recoit alors plus rien. */
+u32 present_keys(void) { return present_free_camera() ? 0 : keys_now & 0x3FF; }
+
+u32 present_pad(void) { return keys_now & 0xFFF; }
+
+u32 present_free_camera(void) { return keys_now >> 12 & 3; }
 
 void present_mouse(int *x, int *y) {
     *x = mouse_x;

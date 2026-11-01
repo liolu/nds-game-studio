@@ -310,7 +310,7 @@ Left:
 - **Windows was rebuilt and run after merging the base mods** (2026-11-01): AL7E, AJTP and AR5E built from their recipes,
   3600 headless frames each with and without `--interpolate`, `arm2c_test.py` passes with WinLibs (118 checks, linked with
   `ld`, no 32-bit CRT needed). No golden-frame comparison: `9b83098` changes frames on purpose.
-- **Base mods on macOS:** `--interpolate`, `--first-person` and `net.c` go through `DS()` and `os.h` (`os_tcp_*`, BSD sockets in
+- **Base mods on macOS:** `--interpolate`, `--first-person`, `--free-camera` and `net.c` go through `DS()` and `os.h` (`os_tcp_*`, BSD sockets in
   `os_posix.c`). They compile on the Mac CI jobs, but none of them has been run on a Mac. Without its option, the 60 fps code
   computes nothing (`interp_on` in `gx3d.c`).
 - `--with-c` on Windows lost its function pointers with step 3 (3.5). Translated mode, the default, is not affected.
