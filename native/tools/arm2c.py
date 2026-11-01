@@ -4,6 +4,8 @@ Sert aux fonctions qui n'ont pas de C : assembleur du SDK, fonctions pas encore 
 Chaque fonction devient u64 nom(r0, r1, r2, r3, s0..s5) : les arguments de pile passent en s0.., le retour en r0:r1.
 Les adresses de donnees restent numeriques : la memoire du jeu est a nds_mem + adresse DS (DS() du PRELUDE ; 0 sur Windows 32 bits).
 La pile C de chaque fonction est dans cette memoire (piles des threads dans la fenetre) : sp = HOST2DS(&stack_[n]).
+Les pointeurs de code restent des adresses DS (bit Thumb compris), comme dans la rom : un appel indirect passe par
+nds_call_target. Les sous-routines internes (bl dans la fonction) mettent dans lr GOSUB_TAG + k, indice dans gs_.
 """
 import re
 
@@ -27,6 +29,7 @@ FLAGGED = LOGIC | ARITH | {"mul", "mla", "umull", "smull", "umlal", "smlal", "ls
 SHIFT_ALIAS = {"lsl": "LSL", "lsr": "LSR", "asr": "ASR", "ror": "ROR"}
 STACK_ARGS = 6
 RET = "return ((u64)r1<<32)|r0;"
+GOSUB_TAG = 0xFFF00000  # lr des sous-routines internes : jamais une adresse de retour reelle, different de MAGIC_LR
 
 PRELUDE = """/* Genere par arm2c.py */
 typedef unsigned int u32; typedef int s32; typedef unsigned short u16; typedef short s16;
@@ -47,7 +50,10 @@ u32 nds_host2ds(const volatile void *p);
 #else
 #define HOST2DS(p) ((u32)((uptr)(p) - nds_mem))
 #endif
-#define MAGIC_LR 0xFFFFFFFEu
+#define MAGIC_LR 0xFFFFFFFEu /* lr a l'entree d'une fonction : retour a l'appelant C */
+/* sous-routines internes : lr = GOSUB_TAG + k, k indice de gs_ (labels de retour de la fonction, termine par 0) */
+#define GOSUB_TAG 0xFFF00000u
+#define GOSUB_RET(x) do { u32 _k = (u32)(x) - GOSUB_TAG; if (_k < sizeof gs_ / sizeof gs_[0] - 1) goto *gs_[_k]; } while (0)
 static u32 F_N, F_Z, F_C, F_V; /* drapeaux renvoyes par les comparaisons flottantes du compilateur ARM */
 #define SAVEF() (F_N = n, F_Z = z, F_C = c, F_V = v)
 #define LOADF() (n = F_N, z = F_Z, c = F_C, v = F_V)
@@ -355,7 +361,8 @@ class Lifter:
             return None
         value = int.from_bytes(raw, "little")
         if addr in self.code_ptr:
-            return "(u32)&%s" % self.call_name(value)
+            # adresse ARM telle quelle (bit Thumb compris) ; call_name fait traduire la fonction visee
+            return "0x%xu /* &%s */" % (value, self.call_name(value))
         return "0x%xu" % value
 
     def loadstore(self, ins, mn, ops, labels):
@@ -446,11 +453,21 @@ class Lifter:
         s += "}"
         if returns:
             if self.cur_name in self.gosub_funcs:
-                return s + " if (pc_val != MAGIC_LR) goto *(void *)pc_val; " + RET, ins.cc in (ARM_CC_AL, 0)
+                return s + " " + self.gosub_ret("pc_val"), ins.cc in (ARM_CC_AL, 0)
             return s + " " + RET, True
         return s, False
 
     # ------------------------------------------------------------ control flow
+    def gosub_ret(self, reg):
+        """Retour calcule d'une fonction a sous-routines internes : vers l'appelant (MAGIC_LR), un label de gs_,
+        ou sinon une vraie adresse de code (saut terminal par nds_call_target, comme bx rX)."""
+        return "if (%s != MAGIC_LR) { GOSUB_RET(%s); CALLF(nds_call_target(%s)); } %s" % (reg, reg, reg, RET)
+
+    def gosub_tag(self, ret_addr):
+        if ret_addr not in self.gosub_labels:
+            self.gosub_labels.append(ret_addr)
+        return GOSUB_TAG + self.gosub_labels.index(ret_addr)
+
     def branch(self, ins, mn, ops, labels):
         cond = ins.cc not in (ARM_CC_AL, 0)
         if mn == "bl" and ops[0].type in (ARM_OP_IMM, ARM_OP_PIMM):
@@ -461,7 +478,7 @@ class Lifter:
                 labels.add(target)
                 nxt = ins.address + ins.size
                 labels.add(nxt)
-                return "lr = (u32)&&L%08x; goto L%08x;" % (nxt, target), False
+                return "lr = 0x%xu; goto L%08x;" % (self.gosub_tag(nxt), target), False
         if mn in ("bl", "blx") and ops[0].type in (ARM_OP_IMM, ARM_OP_PIMM):
             name = self.call_name(ops[0].imm)
             after = self.decode(ins.address + ins.size, self.cur_thumb)
@@ -476,7 +493,7 @@ class Lifter:
             if r == ARM_REG_LR:
                 if self.cur_name in self.gosub_funcs:
                     # retour de sous-routine interne, ou de la fonction : on ne le sait qu'a l'execution
-                    return "if (lr != MAGIC_LR) goto *(void *)lr; %s" % RET, ins.cc in (ARM_CC_AL, 0)
+                    return self.gosub_ret("lr"), ins.cc in (ARM_CC_AL, 0)
                 return RET, True
             name = self.rv(ins, r)
             if self.prev_set_lr:
@@ -497,7 +514,7 @@ class Lifter:
         if mn == "mov" and src.type == ARM_OP_REG:
             if src.reg == ARM_REG_LR:
                 if self.cur_name in self.gosub_funcs:
-                    return "if (lr != MAGIC_LR) goto *(void *)lr; %s" % RET, ins.cc in (ARM_CC_AL, 0)
+                    return self.gosub_ret("lr"), ins.cc in (ARM_CC_AL, 0)
                 return RET, True
             name = self.rv(ins, src.reg)
             if self.prev_set_lr:
@@ -576,6 +593,7 @@ class Lifter:
         self.cur_thumb = thumb
         self.extra_starts = []
         self.recent = []
+        self.gosub_labels = []  # retours des sous-routines internes, dans l'ordre des tags
         out = {}
         labels = set()
         seen_order = []
@@ -639,6 +657,8 @@ class Lifter:
             "  u32 r4=0,r5=0,r6=0,r7=0,r8=0,r9=0,r10=0,r11=0,r12=0,lr=MAGIC_LR,res=0,sh=0,pc_val=0; u32 n=0,z=0,c=0,v=0;",
             "  " + " ".join("stack_[%d]=s%d;" % (self.frame_words(out) + i, i) for i in range(STACK_ARGS)),
         ]
+        if name in self.gosub_funcs:
+            head.append("  static void *const gs_[] = { %s0 };" % "".join("&&L%08x, " % a for a in self.gosub_labels))
         body = "\n".join(head) + "\n" + text + "\n  " + RET + "\n}\n"
         if name in self.flag_funcs:
             body = body.replace(RET, "{ SAVEF(); " + RET + " }")

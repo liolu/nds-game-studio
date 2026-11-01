@@ -15,10 +15,6 @@ u32 nds_rom_size;
 uptr nds_mem; /* base de la fenetre DS, fixee par nds_start */
 #endif
 
-extern const struct { u32 arm; void *x86; } nds_fn_table[];
-extern const unsigned nds_fn_count;
-extern const struct { u32 at; void *x86; } nds_fixups[];
-extern const unsigned nds_fixup_count;
 extern void *const nds_entry_fn;
 
 /* ------------------------------------------------------------------ petites fonctions sans libc */
@@ -111,22 +107,6 @@ u32 nds_host2ds(const volatile void *p) {
 }
 #endif
 #endif
-
-/* ------------------------------------------------------------------ pointeurs de fonctions ARM -> x86 */
-/* rend un pointeur de fonction de l'hote ; une valeur hors de la zone DS est deja une adresse x86 (32 bits, voir MACOS.md 3.2) */
-uptr nds_call_target(u32 a) {
-    u32 key = a & ~1u;
-    if (key < 0x01000000u || key >= 0x03000000u) return a; /* deja une adresse x86 */
-    unsigned lo = 0, hi = nds_fn_count;
-    while (lo < hi) {
-        unsigned mid = (lo + hi) / 2;
-        if (nds_fn_table[mid].arm < key) lo = mid + 1;
-        else hi = mid;
-    }
-    if (lo < nds_fn_count && nds_fn_table[lo].arm == key) return (uptr)nds_fn_table[lo].x86;
-    nds_fatal("saut vers une adresse DS sans fonction : %x", a);
-    return 0;
-}
 
 /* ------------------------------------------------------------------ CP15 */
 static u32 cp15_dtcm = 0x027E000Au, cp15_ctrl = 0x00052078u;
@@ -328,7 +308,7 @@ void nds_swi(u32 n, u32 *r0, u32 *r1, u32 *r2, u32 *r3) {
 }
 
 /* ------------------------------------------------------------------ threads : contexte x86 a cote de l'OSContext du SDK */
-/* ctx : adresse DS de l'OSContext ; func : code ARM->x86 (nds_call_target) ; esp..eip : registres de l'hote.
+/* ctx : adresse DS de l'OSContext ; func : adresse ARM de la fonction du thread (nds_call_target) ; esp..eip : registres de l'hote.
  * Les decalages sont ceux de l'assembleur i386 ci-dessous (uptr = 4 octets la-bas). */
 typedef struct {
     u32 ctx;
@@ -558,19 +538,7 @@ static void load_arm9(void) {
         blz_uncompress(info[5]);
         info[5] = 0;
     }
-    /* _start recopie ITCM/DTCM depuis cette source : les pointeurs de fonctions sont corriges dans la source */
-    u32 *list = (u32 *)DS(info[0]), *end = (u32 *)DS(info[1]);
-    for (unsigned i = 0; i < nds_fixup_count; i++) {
-        u32 at = nds_fixups[i].at, src = info[2];
-        /* SDK des jeux DSi : entrees de 16 octets au lieu de 12 */
-        u32 step = (info[1] - info[0]) % 12 == 0 ? 3 : 4;
-        for (u32 *e = list; e < end; e += step) {
-            if (at >= e[0] && at < e[0] + e[1]) { at = src + (at - e[0]); break; }
-            src += e[1];
-        }
-        /* pointeur x86 range dans la memoire DS : 32 bits seulement, l'etape 3 de MACOS.md supprime nds_fixups */
-        *(u32 *)DS(at) = (u32)(uptr)nds_fixups[i].x86;
-    }
+    /* les pointeurs de fonctions du jeu restent des adresses ARM : nds_call_target les resout a l'appel */
 }
 
 /* profil par echantillons (--prof) : ou le jeu passe son temps */
@@ -640,6 +608,7 @@ void nds_start(void) {
     const char *rom = argc_ > 1 ? argv_[1] : 0;
     if (!rom) nds_fatal("usage : jeu.exe <rom.nds>");
     load_file(rom);
+    nds_code_map_init();
     load_arm9();
     arm7_init();
     io_init();

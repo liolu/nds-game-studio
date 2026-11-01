@@ -1,7 +1,7 @@
 # Native DS games on macOS: port plan
 
-Status: steps 1-2 of section 5 are written, not yet built or run on Windows. Branch `macos-native` on the fork
-`lasscat/nds-game-studio`.
+Status: steps 1-3 of section 5 are written, not yet built or run on Windows. The no-ROM harness (4.1) passes on
+macOS. Branch `macos-native` on the fork `lasscat/nds-game-studio`.
 
 The studio itself (launcher, engine, mod tools) already builds and ships for macOS: `build.yml` makes universal
 binaries and an `.app`. Only the **native game pipeline** is Windows-only: translating a game (`arm2c.py`), building its
@@ -67,9 +67,18 @@ Apple is winding Rosetta down after macOS 27. The port therefore needs a **memor
 - `nds_call_target` always maps DS address → host function. The binary search becomes a direct-mapped table over the
   code ranges (main RAM `0x02000000-0x02400000` + ITCM, 2-byte granularity, about 16 MiB of virtual memory touched
   lazily): one load per indirect call. `thread_tramp` also calls through it.
+  **Done** in `nitro-pc/calltab.c` (no assembly, no system header, so the harness builds it as is). `nds_start`
+  fills `code_map` from `nds_fn_table` before loading arm9. The direct range is `0x01FF8000-0x02400000`, a static
+  `.bss` array of 8 MiB (win32) or 16 MiB (64-bit). A miss inside that range is fatal right away. The binary search
+  remains only for addresses outside it (DTCM, mirrors). Values that are not DS code are fatal too: `MAGIC_LR`, gosub
+  tags, and the old x86 addresses that used to pass through.
 - Internal subroutines (`gosub_funcs`): `lr = (u32)&&L…` becomes `lr = GOSUB_TAG + k`, with a per-function
   `static void *const gs_[] = { &&L…, … }`. Returns (`goto *(void *)lr` / `pc_val`) become `goto *gs_[x - GOSUB_TAG]`.
   `GOSUB_TAG` sits above `0xFFF00000`, a range a real return address never uses and that differs from `MAGIC_LR`.
+  **Done**: `GOSUB_TAG = 0xFFF00000`, and `gs_` ends with a 0 so that `GOSUB_RET(x)` can bounds-check `k`. A
+  computed return goes to the C caller on `MAGIC_LR` and to `gs_[k]` on a tag. Any other value is a real code
+  address, so it becomes a tail call through `nds_call_target`, as `bx rX` already does. Before, it was a jump to
+  garbage.
 
 ### 3.3 Threads and assembly
 
@@ -101,6 +110,11 @@ The runtime is freestanding on Windows (its own `libc.c`). On macOS it links `li
 Matched decomp C uses real pointers: they become 64-bit on the host, which breaks struct layouts and every pointer
 stored in DS memory. That mode also relies on the IO trap (4 KiB `VirtualProtect` + single-step). macOS therefore runs
 **translated mode only**, which is already the default. `native_build.py` refuses `--with-c` off win32.
+
+Since step 3, `--with-c` on Windows has also lost its function pointers. DS memory now holds ARM addresses, without
+`nds_fixups`. Matched C that calls a pointer read from game data therefore jumps to ARM bytes, and a `&func` taken
+in C is an x86 address that `nds_call_target` rejects. Translated mode is not affected. If `--with-c` still matters,
+the C compiler needs its own route, for example calls through `nds_call_target` in the decomp headers.
 
 ### 3.6 Build (`native_build.py`)
 
@@ -143,6 +157,18 @@ No ROM is, or ever will be, in the repo or the CI, so:
 
 1. **Translator unit test, no ROM**: a small C harness built on macOS and Windows covers `RD/WR` + `LDRW` rotation,
    flag macros, `CALLF` with 10 arguments, gosub dispatch, and `nds_call_target` on Thumb and ARM addresses.
+   **Done**: `native/tests/`. `arm2c_cases.s` holds small ARM/Thumb functions. Their bytes are embedded in
+   `arm2c_test.py`, which lifts them with `arm2c.Lifter`, checks the generated C (no `(u32)&`, no `goto *(void *)`,
+   literals are ARM addresses, `gs_` tags), then compiles `harness.c` + `lifted.c` + `nitro-pc/calltab.c` twice
+   (normal and `NDS_INSTRUMENT`) and runs it.
+   - macOS / Linux: `pip install capstone==5.0.7`, then `python3 native/tests/arm2c_test.py`. The harness reserves a
+     4 GiB window and runs the translated code on a thread whose stack is inside the window.
+   - Windows: `python native\tests\arm2c_test.py`, either with the launcher toolchain's `python\python.exe`, which
+     already has capstone, or with any Python + capstone and WinLibs on the `PATH`. The script borrows the compiler
+     path and `LIFT_FLAGS`/`RUNTIME_FLAGS` from `native_build.py` and builds with `gcc -m32` (`nds_mem = 0`, RAM
+     committed at `0x02000000`). **Not run on Windows yet.**
+   - After editing `arm2c_cases.s`: `python3 native/tests/arm2c_test.py --regen`. This needs clang with the ARM
+     target, which the macOS one has. It applies the `R_ARM_CALL` relocations itself.
 2. **Golden frames** with the player's own ROM of a verified game (AJTP, AR5E, AL7E): run the same headless command on
    Windows (today's 32-bit build) and on macOS, then compare the BMPs and the `--wav` output:
    `--mute --frames 3000 --dump out --every 300 --keys …`. Green threads and frame skipping can shift timing, so start
@@ -156,7 +182,7 @@ No ROM is, or ever will be, in the repo or the CI, so:
 |---|---|---|
 | 1 | Extract `os.h` + `os_win32.c` (no behavior change). **Code done, not yet built or run on Windows** | Windows module builds and boots the same |
 | 2 | `DS()`/`HOST2DS()` in translator and runtime, `nds_mem = 0` on win32. **Code done**: runtime passes `clang -target x86_64-apple-macos -fsyntax-only -Werror=pointer-to-int-cast -Werror=int-to-pointer-cast` (arm64: only the x86 inline asm of step 4 remains); with `clang -target i686-w64-mingw32`, lifted code is byte-identical and runtime code differs only where a call now goes through `nds_call_target`. Not yet built with GCC or run on Windows | same golden frames on Windows |
-| 3 | Code pointers as DS addresses, direct-mapped dispatch, no fixups, gosub tags | same golden frames on Windows |
+| 3 | Code pointers as DS addresses, direct-mapped dispatch, no fixups, gosub tags. **Code done**: no-ROM harness passes on macOS (arm64), runtime still passes the step 2 checks (macOS `-Werror` casts, i686-mingw syntax). Not yet built with GCC or run on Windows | same golden frames on Windows |
 | 4 | 64-bit `Slot`, arm64/x86_64 context switch, no x86 inline asm on 64-bit | unit harness passes on macOS |
 | 5 | `os_posix.c` + CoreAudio + POSIX shm | runtime compiles with `-Werror` on macOS |
 | 6 | darwin profile in `native_build.py` | **milestone: a game boots headless on macOS**, frames dumped |

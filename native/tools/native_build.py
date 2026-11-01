@@ -267,10 +267,9 @@ def main():
         if len(lifter.flag_funcs) + len(lifter.gosub_funcs) == before:
             break
     print("fonctions a retour par drapeaux :", " ".join(sorted(lifter.flag_funcs))[:600])
-    all_calls = set(re.findall(r"CALLF\((\w+)\)|\(u32\)&(\w+)", "\n".join(bodies)))
-    for pair in all_calls:
-        n = pair[0] or pair[1]
-        if n and not n.startswith("nds_"):
+    # les pointeurs de code sont des adresses DS (nds_call_target) : seuls les appels directs nomment une fonction
+    for n in set(re.findall(r"CALLF\((\w+)\)", "\n".join(bodies))):
+        if not n.startswith("nds_"):
             protos.add(n)
     lift_c = arm2c.PRELUDE + "\n".join("extern u64 %s();" % p for p in sorted(protos)) + "\n\n" + "\n".join(bodies)
     lift_path = out / "lift" / "lifted.c"
@@ -286,24 +285,20 @@ def main():
             print(p.stderr[:5000])
             sys.exit("lifted.c : erreur")
 
-    # 4. tables : pointeurs de fonctions dans les donnees, adresse ARM -> x86, symboles absolus
+    # 4. tables : adresse ARM -> fonction de l'hote (nds_call_target), entree, build_info.
+    # La memoire DS garde les pointeurs de fonctions du jeu tels quels (adresses ARM), rien n'y est corrige.
     game_objs = [obj_for(out, s) for s in good]
     defs = nm_defined(game_objs + [lobj], a.j)
     defined = {s[1:]: t for syms in defs.values() for t, s in syms}
     defined.update({s: "T" for s in rt_defs})
     fn_names = {n for n in names.values() if n in defined}
     table = sorted((addr, n) for addr, n in list(names.items()) + [(k, v) for k, v in lifter.new_subs.items()] if n in defined or n in lifter.new_subs.values())
-    fix = sorted((frm, to & ~1) for frm, (kind, to) in game.relocs.items() if kind == "load" and (to & ~1) in dict(table))
     gen = ["typedef unsigned int u32;"]
-    tname = dict(table)
     for _, n in table:
         gen.append("extern char %s[];" % n)
     gen.append("const struct { u32 arm; void *x86; } nds_fn_table[] = {")
     gen += ["  {0x%08x, %s}," % (addr, n) for addr, n in table]
     gen.append("}; const unsigned nds_fn_count = %d;" % len(table))
-    gen.append("const struct { u32 at; void *x86; } nds_fixups[] = {")
-    gen += ["  {0x%08x, %s}," % (frm, tname[to]) for frm, to in fix]
-    gen.append("}; const unsigned nds_fixup_count = %d;" % len(fix))
     gen.append("extern char %s[]; void *const nds_entry_fn = %s;" % (names[game.entry], names[game.entry]))
     gen.append("const u32 nds_build_info_offset = 0x%x;" % game.build_info)
     gen.append("const int nds_has_c = %d;" % (1 if good else 0))

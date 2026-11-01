@@ -60,7 +60,9 @@ void nds_fatal(const char *fmt, ...);
 void nds_copy(void *dst, const void *src, u32 n);
 void nds_zero(void *dst, u32 n);
 int nds_arg(const char *name, const char **value);
-uptr nds_call_target(u32 a); /* adresse DS (ou deja x86) d'une fonction -> fonction de l'hote */
+/* calltab.c : adresse DS d'une fonction du jeu (bit Thumb compris) -> fonction de l'hote ; fatal si inconnue */
+void nds_code_map_init(void);
+uptr nds_call_target(u32 a);
 
 /* io.c */
 void io_init(void);
