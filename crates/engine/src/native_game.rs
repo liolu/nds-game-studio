@@ -556,7 +556,7 @@ fn launch(commands: &mut Commands, images: &mut Assets<Image>, code: &str, rom: 
         return;
     };
     let mut command = Command::new(module);
-    command.arg(rom).arg("--pipe").arg("--shm").arg(&name).arg("--save").arg(saves.join("backup.sav")).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(log);
+    command.arg(rom).arg("--pipe").arg("--shm").arg(&name).arg("--save").arg(saves.join("backup.sav")).args(crate::mod_packs::native_args(code)).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(log);
     if std::env::var_os("NDSGS_NATIVE_MUTE").is_some() {
         command.arg("--mute");
     }

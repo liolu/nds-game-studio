@@ -3,13 +3,14 @@
 #include "nitro.h"
 
 static const char *dump_dir;
-static u32 every = 60, max_frames;
+static u32 every = 60, max_frames, dump_from;
 static int pipe_mode;
 static const char *key_script;
 static unsigned long WINAPI input_thread(void *arg);
 static volatile u32 keys_now;
 static volatile int touch_down, touch_x, touch_y;
 static void script_step(void);
+static void peek_step(void);
 static u8 *shm;
 static volatile int cfg_scale = 1, cfg_width = 256;
 
@@ -18,6 +19,7 @@ void present_init(void) {
     nds_arg("--dump", &dump_dir);
     if (nds_arg("--every", &v) && v) { every = 0; while (*v) every = every * 10 + *v++ - '0'; }
     if (nds_arg("--frames", &v) && v) { while (*v) max_frames = max_frames * 10 + *v++ - '0'; }
+    if (nds_arg("--dumpfrom", &v) && v) { while (*v) dump_from = dump_from * 10 + *v++ - '0'; }
     nds_arg("--keys", &key_script);
     if (nds_arg("--scale", &v) && v) { cfg_scale = 0; while (*v) cfg_scale = cfg_scale * 10 + *v++ - '0'; }
     if (nds_arg("--dswidth", &v) && v) { cfg_width = 0; while (*v) cfg_width = cfg_width * 10 + *v++ - '0'; }
@@ -98,7 +100,7 @@ static void write_bmp(u32 frame, const u32 *top, const u32 *bottom, int w, int h
 /* Fin d'une image dans le fil de rendu : les lignes vont d'un seul tenant dans le jeu d'images, et le launcher lit le jeu termine */
 void present_flip(int w, int h, u32 frame) {
     static u32 last_dump = 0xFFFFFFFFu;
-    if (dump_dir && frame / every != last_dump) {
+    if (dump_dir && frame >= dump_from && frame / every != last_dump) {
         last_dump = frame / every;
         write_bmp(frame, frame_ptr(back_set, 0), frame_ptr(back_set, 1), w, h);
     }
@@ -118,6 +120,7 @@ extern u32 nds_trace_count, nds_trace_eip, nds_trace_addr, nds_trace_stack[13];
 
 void present_frame(void) {
     script_step();
+    peek_step();
     /* boutons X/Y : actifs a 0 ; bit 15 a 0 = couvercle ouvert */
     {
         u32 xy = 0x2C00; /* X = bit 10, Y = bit 11, debogage = bit 13 : relaches a 1, comme KEYINPUT */
@@ -156,7 +159,8 @@ void present_frame(void) {
     }
 #endif
     if (max_frames && nds_frame >= max_frames) {
-        nds_log("%u images, %u dessinees", nds_frame, flips);
+        extern u32 nds_swaps;
+        nds_log("%u images, %u dessinees, %u echanges 3D", nds_frame, flips, nds_swaps);
         ExitProcess(0);
     }
 }
@@ -210,6 +214,55 @@ static void script_step(void) {
         }
         if (*p == ',') p++;
         key_script = p;
+    }
+}
+
+/* essais : --peek "image:adresse:taille:fichier,..." ecrit de la memoire dans un fichier, --poke "image:adresse:valeur,..." y ecrit un mot */
+static u32 script_number(const char **t, int hex) {
+    u32 v = 0;
+    const char *p = *t;
+    for (;;) {
+        char c = *p;
+        if (c >= '0' && c <= '9') v = v * (hex ? 16 : 10) + (u32)(c - '0');
+        else if (hex && c >= 'a' && c <= 'f') v = v * 16 + (u32)(c - 'a' + 10);
+        else break;
+        p++;
+    }
+    if (*p == ':') p++;
+    *t = p;
+    return v;
+}
+
+static void peek_step(void) {
+    static const char *peeks, *pokes;
+    static int ready;
+    if (!ready) {
+        ready = 1;
+        nds_arg("--peek", &peeks);
+        nds_arg("--poke", &pokes);
+    }
+    while (pokes && *pokes) {
+        const char *p = pokes;
+        u32 frame = script_number(&p, 0);
+        if (frame > nds_frame) break;
+        u32 addr = script_number(&p, 1), value = script_number(&p, 1);
+        REG32(addr) = value;
+        pokes = *p == ',' ? p + 1 : p;
+    }
+    while (peeks && *peeks) {
+        const char *p = peeks;
+        u32 frame = script_number(&p, 0);
+        if (frame > nds_frame) break;
+        u32 addr = script_number(&p, 1), size = script_number(&p, 1);
+        char name[300];
+        int n = 0;
+        while (*p && *p != ',' && n < 299) name[n++] = *p++;
+        name[n] = 0;
+        void *f = CreateFileA(name, 0x40000000u, 0, 0, 2, 0, 0);
+        unsigned long written;
+        WriteFile(f, (void *)addr, size, &written, 0);
+        CloseHandle(f);
+        peeks = *p == ',' ? p + 1 : p;
     }
 }
 

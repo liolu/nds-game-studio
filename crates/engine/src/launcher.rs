@@ -143,6 +143,8 @@ struct Launcher {
     confirm_remove: Option<f64>,
     /// Le lien d'un mod en train d'être tapé (onglet Moding).
     mod_link: Option<String>,
+    /// Ce qu'on tape là est l'adresse de l'hôte d'une partie en réseau.
+    typing_host: bool,
 }
 
 /// Couleurs d'un bouton : `Look` donne celles au repos et au survol.
@@ -223,7 +225,7 @@ impl Plugin for LauncherPlugin {
             .add_systems(OnEnter(StudioState::Menu), spawn_launcher.before(crate::studio::auto_start))
             .add_systems(Update, (take_drops, poll_copies, poll_disk, back_key, type_folder_name, type_mod_link, expire_confirm, log_clicks, rebuild, show_status).chain().run_if(in_state(StudioState::Menu)))
             .add_systems(Update, (activity_visibility, activity_now, activity_decomp, activity_history, note_update, poll_mods).run_if(in_state(StudioState::Menu)))
-            .add_systems(Update, (wheel, looks, view_choice_looks, lang_choice_looks, version_text, redo_on_language))
+            .add_systems(Update, (wheel, looks, view_choice_looks, lang_choice_looks, base_mods_looks, version_text, redo_on_language))
             .init_resource::<UpdateOffer>()
             .add_systems(Update, (poll_covers, cover_choice_looks, prepare_games, update_banner.run_if(in_state(StudioState::Menu))));
     }
@@ -675,7 +677,10 @@ fn type_mod_link(mut typed: MessageReader<KeyboardInput>, mut lau: ResMut<Launch
         }
         match &key.logical_key {
             Key::Enter => send_mod_link(&mut lau),
-            Key::Escape => lau.mod_link = None,
+            Key::Escape => {
+                lau.mod_link = None;
+                lau.typing_host = false;
+            }
             Key::Backspace => {
                 if let Some(link) = &mut lau.mod_link {
                     link.pop();
@@ -698,8 +703,15 @@ fn type_mod_link(mut typed: MessageReader<KeyboardInput>, mut lau: ResMut<Launch
 }
 
 fn send_mod_link(lau: &mut Launcher) {
-    let Some(link) = lau.mod_link.take().filter(|l| !l.trim().is_empty()) else { return };
     let game = lau.open.as_ref().and_then(|file| lau.roms.iter().find(|r| r.info.file == *file)).map(|r| (r.info.code.clone(), r.info.path.clone()));
+    if std::mem::take(&mut lau.typing_host) {
+        if let (Some((code, _)), Some(address)) = (game, lau.mod_link.take()) {
+            crate::mod_packs::set_host_address(&code, &address);
+        }
+        lau.dirty = true;
+        return;
+    }
+    let Some(link) = lau.mod_link.take().filter(|l| !l.trim().is_empty()) else { return };
     if let Some((code, _)) = game {
         crate::mod_packs::find(&code, &link);
     }
@@ -1345,7 +1357,7 @@ fn spawn_game(main: &mut ChildSpawnerCommands, lau: &Launcher, rom: &Rom, regist
         let beside = COVER + 20.0;
         let (top, rest): (Top, Rest) = match lau.tab {
             Tab::Play => play_tab(rom, registry),
-            Tab::Modding => modding_tab(rom, registry, lau.mod_link.clone()),
+            Tab::Modding => modding_tab(rom, registry, lau.mod_link.clone(), lau.typing_host),
             Tab::Description => description_tab(rom),
             Tab::Settings => settings_tab(lau, rom, registry),
         };
@@ -1557,8 +1569,11 @@ fn spawn_mods(r: &mut ChildSpawnerCommands, font: &Fonts, code: &str, rom: &Path
 }
 
 /// Les mods venus d'ailleurs : un fichier, un dossier ou un lien, et la liste de ceux qui sont installés.
-fn spawn_mod_packs(r: &mut ChildSpawnerCommands, font: &Fonts, code: &str, rom: &Path, link: Option<String>) {
+fn spawn_mod_packs(r: &mut ChildSpawnerCommands, font: &Fonts, code: &str, rom: &Path, link: Option<String>, typing_host: bool) {
     use crate::mod_packs;
+    mod_packs::offer_base(code);
+    let host_typed = if typing_host { link.clone() } else { None };
+    let link = if typing_host { None } else { link };
     r.spawn((Node { height: px(2), margin: UiRect::vertical(px(10)), flex_shrink: 0.0, ..default() }, BackgroundColor(BORDER)));
     r.spawn(text(font, tr("Mods from elsewhere", "Mods venus d'ailleurs"), 18.0, TEXT));
     r.spawn(text(font, tr("A .zip, .7z, .rar or .tar.gz file, a folder, or a link: drop it here, or use the buttons. A mod only holds game files: nothing is run on your computer.", "Un fichier .zip, .7z, .rar ou .tar.gz, un dossier ou un lien : deposez-le ici, ou utilisez les boutons. Un mod ne contient que des fichiers de jeu : rien n'est execute sur votre ordinateur."), 15.0, DIM));
@@ -1671,6 +1686,25 @@ fn spawn_mod_packs(r: &mut ChildSpawnerCommands, font: &Fonts, code: &str, rom: 
             if !pack.description.is_empty() {
                 row.spawn(text(font, pack.description.clone(), 14.0, DIM));
             }
+            if pack.network {
+                let saved = mod_packs::host_address(code);
+                row.spawn(text(font, t!("To host, leave the address empty and give the other player your IP address (port {}). To join, type the host's address.", "Pour heberger, laissez l'adresse vide et donnez votre adresse IP a l'autre joueur (port {}). Pour rejoindre, tapez l'adresse de l'hote.", mod_packs::NET_PORT), 14.0, DIM));
+                let shown = match &host_typed {
+                    Some(typed) => format!("{typed}_"),
+                    None if saved.is_empty() => tr("Host's address: none (click to type it)", "Adresse de l'hote : aucune (cliquez pour la taper)").to_string(),
+                    None => t!("Host's address: {saved}", "Adresse de l'hote : {saved}"),
+                };
+                let (normal, hover) = if host_typed.is_some() { (ITEM_ON, ITEM_ON) } else { (ITEM, ITEM_HOVER) };
+                button(row, Node { align_self: AlignSelf::FlexStart, ..button_node() }, normal, hover)
+                    .observe(move |_: On<Activate>, mut lau: ResMut<Launcher>| {
+                        if lau.mod_link.is_none() {
+                            lau.mod_link = Some(saved.clone());
+                            lau.typing_host = true;
+                            lau.dirty = true;
+                        }
+                    })
+                    .with_child(text(font, shown, 14.0, TEXT));
+            }
             row.spawn(Node { flex_direction: FlexDirection::Row, flex_wrap: FlexWrap::Wrap, column_gap: px(8), row_gap: px(6), ..default() }).with_children(|actions| {
                 let (code_on, rom_on, id_on, enabled) = (code.to_string(), rom.to_path_buf(), pack.id.clone(), pack.enabled);
                 let (normal, hover) = if enabled { (ITEM_ON, ITEM_ON) } else { (ITEM, ITEM_HOVER) };
@@ -1717,7 +1751,7 @@ fn poll_mods(mut lau: ResMut<Launcher>, mut seen: Local<u64>) {
     }
 }
 
-fn modding_tab(rom: &Rom, registry: &GameRegistry, link: Option<String>) -> (Top, Rest) {
+fn modding_tab(rom: &Rom, registry: &GameRegistry, link: Option<String>, typing_host: bool) -> (Top, Rest) {
     let file = rom.info.file.clone();
     let (code, path) = (rom.info.code.clone(), rom.info.path.clone());
     let native = native_game(registry, &code);
@@ -1736,7 +1770,7 @@ fn modding_tab(rom: &Rom, registry: &GameRegistry, link: Option<String>) -> (Top
             r.spawn(text(font, tr("Assets: the game's 3D models and images, with their path in the rom.", "Assets : modeles 3D et images du jeu, avec leur chemin dans la rom."), 15.0, DIM));
             r.spawn(text(font, tr("Code: the game's sources, rebuilt and restarted every time you save.", "Code : les sources du jeu, recompilees et relancees a chaque enregistrement."), 15.0, DIM));
             spawn_mods(r, font, &code, &path, native.as_deref());
-            spawn_mod_packs(r, font, &code, &path, link);
+            spawn_mod_packs(r, font, &code, &path, link, typing_host);
         }),
     )
 }
@@ -1934,6 +1968,18 @@ pub fn spawn_options_page(c: &mut ChildSpawnerCommands) {
         .observe(|_: On<Activate>, mut lau: ResMut<Launcher>| lau.prepare_all = true)
         .with_child(page_label(tr("Prepare all games, experimental ones too", "Preparer tous les jeux, meme experimentaux"), 14.0, TEXT));
     c.spawn(page_label(tr("One game at a time, about a minute each. Games that work are always prepared.", "Un jeu a la fois, environ une minute chacun. Les jeux qui marchent sont toujours prepares."), 13.0, DIM));
+    c.spawn(page_label(tr("The app's mods", "Les mods de l'app"), 15.0, DIM));
+    c.spawn(Node { flex_direction: FlexDirection::Row, column_gap: px(6), ..default() }).with_children(|row| {
+        for (on, name) in [(false, tr("No", "Non")), (true, tr("Yes", "Oui"))] {
+            row.spawn((Button, Hovered::default(), button_node(), BackgroundColor(ITEM), BaseModsChoice(on)))
+                .observe(move |_: On<Activate>, mut lau: ResMut<Launcher>| {
+                    crate::mod_packs::set_base_enabled(on);
+                    lau.dirty = true;
+                })
+                .with_child(page_label(name, 14.0, TEXT));
+        }
+    });
+    c.spawn(page_label(t!("Show the mods of {} in each game's Modding tab.", "Montrer les mods de {} dans l'onglet Moding de chaque jeu.", crate::mod_packs::BASE_REPOSITORY), 13.0, DIM));
     c.spawn(page_label(tr("Updates", "Mises a jour"), 15.0, DIM));
     button(c, Node { align_self: AlignSelf::FlexStart, ..button_node() }, ITEM, ITEM_HOVER).observe(start_update).with_child(page_label(tr("Check and install updates", "Chercher et installer les mises a jour"), 14.0, TEXT));
     c.spawn(page_label("Versions", 15.0, DIM));
@@ -1986,6 +2032,19 @@ fn wheel(mut events: MessageReader<MouseWheel>, mut areas: Query<(&Hovered, &Com
 fn looks(mut buttons: Query<(&Look, &Hovered, Has<Pressed>, &mut BackgroundColor)>) {
     for (look, hovered, pressed, mut color) in &mut buttons {
         let wanted = if hovered.get() || pressed { look.hover } else { look.normal };
+        if color.0 != wanted {
+            color.0 = wanted;
+        }
+    }
+}
+
+#[derive(Component)]
+struct BaseModsChoice(bool);
+
+fn base_mods_looks(mut buttons: Query<(&BaseModsChoice, &Hovered, &mut BackgroundColor)>) {
+    let on = crate::mod_packs::base_enabled();
+    for (choice, hovered, mut color) in &mut buttons {
+        let wanted = if choice.0 == on { ITEM_ON } else if hovered.get() { ITEM_HOVER } else { ITEM };
         if color.0 != wanted {
             color.0 = wanted;
         }

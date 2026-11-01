@@ -87,6 +87,7 @@ class Lifter:
         self.th = Cs(CS_ARCH_ARM, CS_MODE_THUMB)
         self.arm.detail = self.th.detail = True
         self.new_subs = {}
+        self.hooks = {}  # adresse -> fonction du runtime appelee a l'entree, avec r0
         self.unhandled = []
         self.flag_funcs = set()  # fonctions dont l'appelant lit les drapeaux au retour
         self.flag_pass = True
@@ -622,6 +623,8 @@ class Lifter:
             "  u32 r4=0,r5=0,r6=0,r7=0,r8=0,r9=0,r10=0,r11=0,r12=0,lr=MAGIC_LR,res=0,sh=0,pc_val=0; u32 n=0,z=0,c=0,v=0;",
             "  " + " ".join("stack_[%d]=s%d;" % (self.frame_words(out) + i, i) for i in range(STACK_ARGS)),
         ]
+        if entry in self.hooks:
+            head.append("  { extern void %s(u32); %s(r0); }" % (self.hooks[entry], self.hooks[entry]))
         body = "\n".join(head) + "\n" + text + "\n  " + RET + "\n}\n"
         if name in self.flag_funcs:
             body = body.replace(RET, "{ SAVEF(); " + RET + " }")

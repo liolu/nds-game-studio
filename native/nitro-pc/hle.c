@@ -74,6 +74,8 @@ u32 RTC_GetDateTime(RTCDate *d, RTCTime *t) {
     if (t) { t->hour = s.hour; t->minute = s.minute; t->second = s.second; }
     return 0;
 }
+u32 RTC_GetTime(RTCTime *t) { return RTC_GetDateTime(0, t); }
+u32 RTC_GetDate(RTCDate *d) { return RTC_GetDateTime(d, 0); }
 u32 RTC_GetDateTimeAsync(RTCDate *d, RTCTime *t, void (*cb)(u32, void *), void *arg) {
     RTC_GetDateTime(d, t);
     if (cb) cb(0, arg);
