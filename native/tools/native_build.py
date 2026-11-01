@@ -120,7 +120,7 @@ def game_patches(code):
 
 
 # Toujours definies : les autres jeux gardent 0, et le runtime sait que la fonction n'existe pas pour eux
-PATCH_VALUES = ["nds_fp_camera", "nds_fp_players", "nds_fp_index", "nds_fp_matrix", "nds_net_screens", "nds_net_menu_screen"]
+PATCH_VALUES = ["nds_fp_camera", "nds_fp_players", "nds_fp_index", "nds_fp_matrix", "nds_fp_yaw", "nds_net_screens", "nds_net_menu_screen"]
 
 
 def has_asm(text):

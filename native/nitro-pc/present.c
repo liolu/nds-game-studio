@@ -11,6 +11,7 @@ static volatile u32 keys_now;
 static volatile int touch_down, touch_x, touch_y;
 static void script_step(void);
 static void peek_step(void);
+static void look_step(void);
 static u8 *shm;
 static volatile int cfg_scale = 1, cfg_width = 256;
 
@@ -121,6 +122,7 @@ extern u32 nds_trace_count, nds_trace_eip, nds_trace_addr, nds_trace_stack[13];
 void present_frame(void) {
     script_step();
     peek_step();
+    look_step();
     /* boutons X/Y : actifs a 0 ; bit 15 a 0 = couvercle ouvert */
     {
         u32 xy = 0x2C00; /* X = bit 10, Y = bit 11, debogage = bit 13 : relaches a 1, comme KEYINPUT */
@@ -165,18 +167,19 @@ void present_frame(void) {
     }
 }
 
-/* commandes : le launcher envoie 12 octets a chaque changement (touches, stylet, definition) */
+/* commandes : le launcher envoie 16 octets a chaque changement (touches, stylet, definition, cumul des mouvements de la souris) */
 static volatile u32 keys_now;
 static volatile int touch_down, touch_x, touch_y;
+static volatile int mouse_x, mouse_y;
 
 static unsigned long WINAPI input_thread(void *arg) {
     void *in = GetStdHandle((unsigned long)-10);
-    u16 packet[6];
+    u16 packet[8];
     unsigned long got;
     for (;;) {
         u32 have = 0;
-        while (have < 12) {
-            if (!ReadFile(in, (u8 *)packet + have, 12 - have, &got, 0) || !got) ExitProcess(0); /* launcher ferme */
+        while (have < sizeof packet) {
+            if (!ReadFile(in, (u8 *)packet + have, sizeof packet - have, &got, 0) || !got) ExitProcess(0); /* launcher ferme */
             have += got;
         }
         keys_now = packet[0];
@@ -185,6 +188,8 @@ static unsigned long WINAPI input_thread(void *arg) {
         touch_y = packet[3];
         cfg_width = packet[4];
         cfg_scale = packet[5];
+        mouse_x = (s16)packet[6];
+        mouse_y = (s16)packet[7];
     }
     return 0;
 }
@@ -214,6 +219,26 @@ static void script_step(void) {
         }
         if (*p == ',') p++;
         key_script = p;
+    }
+}
+
+/* essais : --look "image:x:y,..." donne le cumul de la souris (entiers positifs) */
+static u32 script_number(const char **t, int hex);
+
+static void look_step(void) {
+    static const char *looks;
+    static int ready;
+    if (!ready) {
+        ready = 1;
+        nds_arg("--look", &looks);
+    }
+    while (looks && *looks) {
+        const char *p = looks;
+        u32 frame = script_number(&p, 0);
+        if (frame > nds_frame) break;
+        mouse_x = (int)script_number(&p, 0);
+        mouse_y = (int)script_number(&p, 0);
+        looks = *p == ',' ? p + 1 : p;
     }
 }
 
@@ -267,6 +292,11 @@ static void peek_step(void) {
 }
 
 u32 present_keys(void) { return keys_now & 0x3FF; }
+
+void present_mouse(int *x, int *y) {
+    *x = mouse_x;
+    *y = mouse_y;
+}
 
 void present_touch(int *down, int *x, int *y) {
     *down = touch_down;
