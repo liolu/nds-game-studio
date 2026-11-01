@@ -1,14 +1,20 @@
-/* Test sans rom : PRELUDE de arm2c.py (prelude.h), fonctions de arm2c_cases.s traduites (lifted.c) et
- * nds_call_target (nitro-pc/calltab.c). Compile et lance par arm2c_test.py, qui genere prelude.h, cases.h et lifted.c. */
+/* Test sans rom : PRELUDE de arm2c.py (prelude.h), fonctions de arm2c_cases.s traduites (lifted.c),
+ * nds_call_target (nitro-pc/calltab.c) et les fils verts (nitro-pc/context.c). Compile et lance par arm2c_test.py, qui genere prelude.h, cases.h et lifted.c. */
 #include <setjmp.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "prelude.h"
 #include "cases.h"
 
 void nds_code_map_init(void);
+/* nitro-pc/context.c */
+u64 OS_SaveContext(u32 ctx);
+u64 OS_LoadContext(u32 ctx);
+void nds_ctx_init(u32 ctx, u8 *stack, u32 size, void (*entry)(u32), u32 func);
+void nds_run_on_stack(u8 *top, void (*fn)(void));
 
 #if !NDS_IDENTITY
 uptr nds_mem;
@@ -48,6 +54,16 @@ void nds_fatal(const char *fmt, ...) {
         if (!setjmp(fatal_jmp)) { (void)(expr); fatal_armed = 0; check_eq(0, 1, "fatal attendu : " #expr, __LINE__); } \
         else check_eq(1, 1, #expr, __LINE__); \
     } while (0)
+
+/* ce que context.c prend a core.c */
+void nds_log(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vprintf(fmt, ap);
+    printf("\n");
+    va_end(ap);
+}
+void nds_zero(void *dst, u32 n) { memset(dst, 0, n); }
 
 /* ------------------------------------------------------------------ ce que le code traduit demande au runtime */
 void nds_cpsr_changed(void) {}
@@ -242,6 +258,104 @@ static void test_call_target(void) {
     EXPECT_FATAL(C2(t_callreg, A_t_gosub + 4, 1));
 }
 
+/* Fils verts : bascule sur une pile de la fenetre (nds_run_on_stack, comme nds_start), puis deux fils (nds_ctx_init,
+ * comme OS_InitContext) qui se passent la main ROUNDS fois chacun par OS_SaveContext/OS_LoadContext, comme
+ * irq_deliver. Chaque fil garde des valeurs vivantes a travers la bascule (registres sauvegardes par l'appele :
+ * x19-x28 et d8-d15 sur arm64, rbx et r12-r15 sur x86_64), verifie sa pile, l'alignement et nds_cpsr. */
+#define GREEN_STACKS 0x20100000u /* adresse DS, apres la pile du fil de test (0x20000000, 1 Mo) */
+#define GREEN_STACK 0x10000u
+#define CTX_MAIN 0x02300000u    /* cles des Slot : adresses DS d'OSContext */
+#define CTX_A 0x02300100u
+#define CTX_B 0x02300200u
+enum { ROUNDS = 1000000 };
+static u32 green_runs[2], green_bad_stack, green_bad_align, green_bad_cpsr, green_bad_values, green_order_bad;
+static volatile u32 green_last; /* dernier fil passe : A et B doivent alterner */
+static u32 green_entry_arg[2];
+
+static int on_stack(const volatile void *p, u32 lo) {
+    u32 d = HOST2DS(p);
+    return d >= lo && d < lo + GREEN_STACK;
+}
+
+/* cadre aligne sur 16 (x29 sur arm64, rbp sur x86_64) : la pile l'etait a l'appel */
+__attribute__((noinline)) static int frame_aligned(void) {
+#if defined(__i386__)
+    return 1; /* Windows 32 bits : 4 octets suffisent */
+#else
+    return ((uptr)__builtin_frame_address(0) & 15) == 0;
+#endif
+}
+
+static void green(u32 self) {
+    int me = self == CTX_B;
+    u32 other = me ? CTX_A : CTX_B;
+    u32 cpsr = me ? 0x1F : 0x13;
+    u32 lo = GREEN_STACKS + GREEN_STACK * (1 + me);
+    volatile u32 marker = self;
+    green_entry_arg[me] = self;
+    /* assez de valeurs pour remplir les registres sauvegardes par l'appele */
+    u64 k0 = self, k1 = self * 3ull, k2 = self * 5ull, k3 = self * 7ull, k4 = self * 11ull;
+    u64 k5 = self * 13ull, k6 = self * 17ull, k7 = self * 19ull, k8 = self * 23ull, k9 = self * 29ull;
+    double f0 = me + 0.5, f1 = me + 1.25, f2 = me + 2.125, f3 = me + 3.0625;
+    double f4 = me + 4.5, f5 = me + 5.25, f6 = me + 6.125, f7 = me + 7.0625;
+    for (u32 i = 0; i < ROUNDS; i++) {
+        nds_cpsr = cpsr;
+        green_last = self;
+        if ((u32)OS_SaveContext(self) == 0) OS_LoadContext(other);
+        if (green_last != other) green_order_bad++;
+        green_last = self;
+        if (nds_cpsr != cpsr) green_bad_cpsr++;
+        if (!on_stack(&marker, lo) || marker != self) green_bad_stack++;
+        if (!(i & 0xFFF) && !frame_aligned()) green_bad_align++;
+        k0 += 1; k1 += 3; k2 += 5; k3 += 7; k4 += 11; k5 += 13; k6 += 17; k7 += 19; k8 += 23; k9 += 29;
+        f0 += 1.0; f1 += 1.0; f2 += 1.0; f3 += 1.0; f4 += 1.0; f5 += 1.0; f6 += 1.0; f7 += 1.0;
+        green_runs[me]++;
+    }
+    {
+        u64 r = ROUNDS;
+        if (k0 != self + r || k1 != (self + r) * 3 || k2 != (self + r) * 5 || k3 != (self + r) * 7 ||
+            k4 != (self + r) * 11 || k5 != (self + r) * 13 || k6 != (self + r) * 17 || k7 != (self + r) * 19 ||
+            k8 != (self + r) * 23 || k9 != (self + r) * 29)
+            green_bad_values++;
+        if (f0 != me + 0.5 + r || f1 != me + 1.25 + r || f2 != me + 2.125 + r || f3 != me + 3.0625 + r ||
+            f4 != me + 4.5 + r || f5 != me + 5.25 + r || f6 != me + 6.125 + r || f7 != me + 7.0625 + r)
+            green_bad_values++;
+    }
+    /* A finit le premier et laisse B finir son dernier tour ; B rend la main au fil de test */
+    OS_LoadContext(me ? CTX_MAIN : CTX_B);
+}
+
+static u32 green_start_on_stack;
+static void green_start(void) {
+    volatile u32 marker = 0;
+    green_start_on_stack = on_stack(&marker, GREEN_STACKS) && frame_aligned();
+    nds_ctx_init(CTX_A, DS(GREEN_STACKS + GREEN_STACK), GREEN_STACK, green, 0x02000100u);
+    nds_ctx_init(CTX_B, DS(GREEN_STACKS + 2 * GREEN_STACK), GREEN_STACK, green, 0x02000200u);
+    OS_LoadContext(CTX_A);
+}
+
+static void test_context(void) {
+    volatile u32 resumed = 0; /* survit a OS_LoadContext(CTX_MAIN) : en memoire, pas dans un registre */
+    nds_cpsr = 0x1F;
+    if ((u32)OS_SaveContext(CTX_MAIN) == 0) {
+        resumed = 1;
+        nds_run_on_stack(DS(GREEN_STACKS + GREEN_STACK - 64), green_start);
+        CHECK_EQ(0, 1); /* nds_run_on_stack ne revient pas */
+    }
+    CHECK_EQ(resumed, 1);
+    CHECK_EQ(nds_cpsr, 0x1F);
+    CHECK_EQ(green_start_on_stack, 1);
+    CHECK_EQ(green_entry_arg[0], CTX_A);
+    CHECK_EQ(green_entry_arg[1], CTX_B);
+    CHECK_EQ(green_runs[0], ROUNDS);
+    CHECK_EQ(green_runs[1], ROUNDS);
+    CHECK_EQ(green_order_bad, 0);
+    CHECK_EQ(green_bad_cpsr, 0);
+    CHECK_EQ(green_bad_stack, 0);
+    CHECK_EQ(green_bad_align, 0);
+    CHECK_EQ(green_bad_values, 0);
+}
+
 static void *run_tests(void *arg) {
     nds_code_map_init();
     test_memory();
@@ -250,6 +364,7 @@ static void *run_tests(void *arg) {
     test_callf();
     test_gosub();
     test_call_target();
+    test_context();
     return arg;
 }
 
@@ -261,6 +376,11 @@ int main(void) {
     void *ram = (void *)0x02000000u;
     if (VirtualAlloc(ram, 0x400000, 0x3000 /* MEM_COMMIT | MEM_RESERVE */, 0x04 /* PAGE_READWRITE */) != ram) {
         printf("RAM DS impossible a 0x02000000\n");
+        return 2;
+    }
+    void *green = (void *)GREEN_STACKS;
+    if (VirtualAlloc(green, 3 * GREEN_STACK, 0x3000, 0x04) != green) {
+        printf("piles des fils verts impossibles\n");
         return 2;
     }
     run_tests(0);
@@ -275,7 +395,8 @@ int main(void) {
     void *w = mmap(0, (1ull << 32) + 0x10000, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
     if (w == MAP_FAILED) { printf("fenetre DS impossible\n"); return 2; }
     nds_mem = (uptr)w;
-    if (mprotect(DS(0x02000000u), 0x400000, PROT_READ | PROT_WRITE) || mprotect(DS(0x20000000u), STACK, PROT_READ | PROT_WRITE)) {
+    if (mprotect(DS(0x02000000u), 0x400000, PROT_READ | PROT_WRITE) || mprotect(DS(0x20000000u), STACK, PROT_READ | PROT_WRITE) ||
+        mprotect(DS(GREEN_STACKS), 3 * GREEN_STACK, PROT_READ | PROT_WRITE)) {
         printf("memoire DS impossible\n");
         return 2;
     }

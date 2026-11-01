@@ -18,12 +18,17 @@ uptr nds_mem; /* base de la fenetre DS, fixee par nds_start */
 extern void *const nds_entry_fn;
 
 /* ------------------------------------------------------------------ petites fonctions sans libc */
+#if defined(__i386__)
 void nds_copy(void *dst, const void *src, u32 n) {
     __asm__ volatile("rep movsb" : "+D"(dst), "+S"(src), "+c"(n) : : "memory");
 }
 void nds_zero(void *dst, u32 n) {
     __asm__ volatile("rep stosb" : "+D"(dst), "+c"(n) : "a"(0) : "memory");
 }
+#else /* 64 bits : libSystem fournit memcpy/memset */
+void nds_copy(void *dst, const void *src, u32 n) { __builtin_memcpy(dst, src, n); }
+void nds_zero(void *dst, u32 n) { __builtin_memset(dst, 0, n); }
+#endif
 
 static int fmt_u(char *o, u32 v, int base, int width) {
     char tmp[16];
@@ -307,68 +312,8 @@ void nds_swi(u32 n, u32 *r0, u32 *r1, u32 *r2, u32 *r3) {
     }
 }
 
-/* ------------------------------------------------------------------ threads : contexte x86 a cote de l'OSContext du SDK */
-/* ctx : adresse DS de l'OSContext ; func : adresse ARM de la fonction du thread (nds_call_target) ; esp..eip : registres de l'hote.
- * Les decalages sont ceux de l'assembleur i386 ci-dessous (uptr = 4 octets la-bas). */
-typedef struct {
-    u32 ctx;
-    uptr esp;
-    u32 cpsr, func, fresh;
-    uptr ebp, ebx, esi, edi, eip;
-} Slot;
-static Slot slots[64];
-static uptr last_load_esp;
-
-static Slot *slot_of(u32 ctx) {
-    for (int i = 0; i < 64; i++)
-        if (slots[i].ctx == ctx) return &slots[i];
-    for (int i = 0; i < 64; i++)
-        if (!slots[i].ctx) { slots[i].ctx = ctx; return &slots[i]; }
-    nds_fatal("trop de threads");
-    return 0;
-}
-
-Slot *nds_save_slot(u32 ctx) {
-    Slot *s = slot_of(ctx);
-    s->cpsr = nds_cpsr;
-    s->fresh = 0;
-    return s;
-}
-
-Slot *nds_load_slot(u32 ctx) {
-    Slot *s = slot_of(ctx);
-    nds_cpsr = s->cpsr;
-    if (!s->esp) nds_fatal("contexte sans sauvegarde %x", ctx);
-    last_load_esp = s->esp;
-    return s;
-}
-
-/* comme setjmp/longjmp : les registres vont dans le Slot, pas sur la pile que l'appelant reutilise ensuite */
-__asm__(
-    ".globl _OS_SaveContext\n_OS_SaveContext:\n"
-    "  mov 4(%esp), %eax\n  push %eax\n  call _nds_save_slot\n  add $4, %esp\n"
-    "  mov %ebp, 20(%eax)\n  mov %ebx, 24(%eax)\n  mov %esi, 28(%eax)\n  mov %edi, 32(%eax)\n"
-    "  mov (%esp), %ecx\n  mov %ecx, 36(%eax)\n  lea 4(%esp), %ecx\n  mov %ecx, 4(%eax)\n"
-    "  xor %eax, %eax\n  ret\n"
-    ".globl _OS_LoadContext\n_OS_LoadContext:\n"
-    "  mov 4(%esp), %eax\n  push %eax\n  call _nds_load_slot\n"
-    "  mov 4(%eax), %esp\n  mov 20(%eax), %ebp\n  mov 24(%eax), %ebx\n  mov 28(%eax), %esi\n  mov 32(%eax), %edi\n"
-    "  mov 36(%eax), %ecx\n  mov $1, %eax\n  jmp *%ecx\n");
-
+/* ------------------------------------------------------------------ threads : contexte de l'hote dans context.c */
 typedef u64 (*Fn)();
-
-void nds_dump_threads(void) {
-    for (int i = 0; i < 64; i++) {
-        if (!slots[i].ctx || !slots[i].esp) continue;
-        u32 state = *(u32 *)DS(slots[i].ctx + 0x64);
-        nds_log("  thread ctx=%x etat=%u eip=%8x", slots[i].ctx, state, (u32)slots[i].eip);
-        nds_log("    %8x", (u32)slots[i].eip);
-        u32 *st = (u32 *)slots[i].esp;
-        int k = 0;
-        for (int j = 0; j < 60 && k < 8; j++)
-            if (st[j] >= 0x10000000u && st[j] < 0x11000000u) { nds_log("    %8x", st[j]); k++; }
-    }
-}
 
 /* piles de l'hote dans la fenetre, au-dessus de la zone DS, jamais sous 0x01000000 que le code traduit reserve au miroir ITCM.
  * Le code traduit y prend sp = HOST2DS(&stack_[n]) : tout code du jeu doit tourner sur une de ces piles. */
@@ -381,29 +326,18 @@ static u8 *stack_alloc(u32 size) {
 }
 
 static void thread_tramp(u32 ctx) {
-    Slot *s = slot_of(ctx);
     u32 *c = (u32 *)DS(ctx);
     /* OSContext : cpsr, r0..r12, sp, lr, pc+4 */
     u32 arg = c[1], lr = c[15];
-    ((Fn)nds_call_target(s->func))(arg, 0, 0, 0);
+    ((Fn)nds_call_target(nds_ctx_func(ctx)))(arg, 0, 0, 0);
     if (lr) ((Fn)nds_call_target(lr))(0, 0, 0, 0);
     nds_fatal("fin de thread sans suite");
 }
 
 void OS_InitContext(u32 ctx, u32 pc, u32 sp) {
-    Slot *s = slot_of(ctx);
     u32 *c = (u32 *)DS(ctx);
     enum { STACK = 1 << 20 };
-    u8 *stack = stack_alloc(STACK);
-    u32 *top = (u32 *)(stack + STACK - 64);
-    top[1] = ctx;     /* argument de thread_tramp */
-    top[0] = 0;       /* adresse de retour fictive */
-    s->esp = (uptr)top;
-    s->eip = (uptr)thread_tramp;
-    s->ebp = s->ebx = s->esi = s->edi = 0;
-    s->func = pc;
-    s->cpsr = 0x1F;
-    s->fresh = 1;
+    nds_ctx_init(ctx, stack_alloc(STACK), STACK, thread_tramp, pc);
     nds_zero(c, 0x48);
     c[0] = 0x1F;
     c[14] = sp;
@@ -415,7 +349,11 @@ int nds_trace;
 u32 nds_trace_count, nds_trace_eip, nds_trace_addr, nds_trace_stack[13];
 static u32 pending_page, pending_addr, pending_write;
 void nds_irq_tramp(void);
+#if defined(__i386__)
 __asm__(".globl _nds_irq_tramp\n_nds_irq_tramp:\n  pushf\n  pusha\n  cld\n  call _irq_deliver\n  popa\n  popf\n  ret\n");
+#else /* seulement pour --with-c (piege des registres), 32 bits seulement : MACOS.md 3.5 */
+void nds_irq_tramp(void) { nds_fatal("piege des registres sans version 64 bits"); }
+#endif
 
 static void io_protect(u32 page, int on) {
     os_mem_protect(DS(page), 0x1000, on ? OS_NOACCESS : OS_RW);
@@ -466,10 +404,10 @@ static int on_exception(OsFault *e) {
         }
 #endif
         nds_log("  ebp=%x retours :", (u32)(uptr)bp);
-        if (last_load_esp) {
-            nds_log("  pile du dernier contexte charge %x :", (u32)last_load_esp);
+        if (nds_last_load_sp) {
+            nds_log("  pile du dernier contexte charge %x :", (u32)nds_last_load_sp);
             for (int i = 0; i < 400; i++) {
-                u32 v = ((u32 *)last_load_esp)[i];
+                u32 v = ((u32 *)nds_last_load_sp)[i];
                 if (v >= 0x10000000u && v < 0x11000000u) nds_log("    %8x", v);
             }
             nds_log("  fin");
@@ -638,6 +576,6 @@ void nds_start(void) {
     /* grande pile, allouee apres la memoire DS pour ne pas la gener */
     enum { MAIN_STACK = 16 << 20 };
     u8 *stack = stack_alloc(MAIN_STACK);
-    __asm__ volatile("mov %0, %%esp\n  call *%1\n" : : "r"(stack + MAIN_STACK - 64), "r"(run_game));
+    nds_run_on_stack(stack + MAIN_STACK - 64, run_game);
     nds_fatal("le jeu s'est termine");
 }

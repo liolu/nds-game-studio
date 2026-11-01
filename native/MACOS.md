@@ -1,7 +1,7 @@
 # Native DS games on macOS: port plan
 
-Status: steps 1-3 of section 5 are written, not yet built or run on Windows. The no-ROM harness (4.1) passes on
-macOS. Branch `macos-native` on the fork `lasscat/nds-game-studio`.
+Status: steps 1-4 of section 5 are written, not yet built or run on Windows. The no-ROM harness (4.1) passes on
+macOS, natively on arm64 and as x86_64 under Rosetta. Branch `macos-native` on the fork `lasscat/nds-game-studio`.
 
 The studio itself (launcher, engine, mod tools) already builds and ships for macOS: `build.yml` makes universal
 binaries and an `.app`. Only the **native game pipeline** is Windows-only: translating a game (`arm2c.py`), building its
@@ -86,6 +86,14 @@ Apple is winding Rosetta down after macOS 27. The port therefore needs a **memor
   sp, d8-d15) and **x86_64** (rbx, rbp, r12-r15, rsp, rip). The i386 version stays behind `#if`.
 - `rep movsb/stosb` → `__builtin_memcpy/memset` off Windows. The x87 `fyl2x` becomes `log()`.
 - `nds_irq_tramp` and the exception handler are used only by `--with-c` (see 3.5).
+- **Done** in `nitro-pc/context.c` (no system header, so the harness builds it as is): `Slot`, `OS_SaveContext`/
+  `OS_LoadContext`, `nds_ctx_init` (first start of a thread, used by `OS_InitContext`) and `nds_run_on_stack` (the
+  startup switch to the 16 MiB stack). Three versions behind `#if`: i386 (the old code moved as is, same offsets, same
+  bytes), x86_64 and arm64; the Slot offsets are checked by `_Static_assert`. Symbol names go through
+  `__USER_LABEL_PREFIX__` (`_` on Mach-O and win32, none on ELF). A new thread starts in `nds_ctx_start` with its
+  argument and entry in two callee-saved registers (rbx/r12, x19/x20), and stacks stay 16-byte aligned. On 64-bit
+  `nds_copy`/`nds_zero` are `__builtin_memcpy/memset`, `ln()` in `snd.c` is `__builtin_log`, and `nds_irq_tramp`
+  is a fatal stub.
 
 ### 3.4 Platform layer
 
@@ -159,10 +167,14 @@ No ROM is, or ever will be, in the repo or the CI, so:
    flag macros, `CALLF` with 10 arguments, gosub dispatch, and `nds_call_target` on Thumb and ARM addresses.
    **Done**: `native/tests/`. `arm2c_cases.s` holds small ARM/Thumb functions. Their bytes are embedded in
    `arm2c_test.py`, which lifts them with `arm2c.Lifter`, checks the generated C (no `(u32)&`, no `goto *(void *)`,
-   literals are ARM addresses, `gs_` tags), then compiles `harness.c` + `lifted.c` + `nitro-pc/calltab.c` twice
-   (normal and `NDS_INSTRUMENT`) and runs it.
+   literals are ARM addresses, `gs_` tags), then compiles `harness.c` + `lifted.c` + `nitro-pc/calltab.c` +
+   `nitro-pc/context.c` twice (normal and `NDS_INSTRUMENT`) and runs it. The green-thread test switches to a window
+   stack with `nds_run_on_stack`, then two threads made by `nds_ctx_init` hand over to each other a million times
+   each through `OS_SaveContext`/`OS_LoadContext`, checking callee-saved values (integer and `d8-d15`), their stack,
+   frame alignment and `nds_cpsr`.
    - macOS / Linux: `pip install capstone==5.0.7`, then `python3 native/tests/arm2c_test.py`. The harness reserves a
-     4 GiB window and runs the translated code on a thread whose stack is inside the window.
+     4 GiB window and runs the translated code on a thread whose stack is inside the window. On Apple Silicon,
+     `--arch x86_64` builds the Intel version, which Rosetta runs.
    - Windows: `python native\tests\arm2c_test.py`, either with the launcher toolchain's `python\python.exe`, which
      already has capstone, or with any Python + capstone and WinLibs on the `PATH`. The script borrows the compiler
      path and `LIFT_FLAGS`/`RUNTIME_FLAGS` from `native_build.py` and builds with `gcc -m32` (`nds_mem = 0`, RAM
@@ -183,7 +195,7 @@ No ROM is, or ever will be, in the repo or the CI, so:
 | 1 | Extract `os.h` + `os_win32.c` (no behavior change). **Code done, not yet built or run on Windows** | Windows module builds and boots the same |
 | 2 | `DS()`/`HOST2DS()` in translator and runtime, `nds_mem = 0` on win32. **Code done**: runtime passes `clang -target x86_64-apple-macos -fsyntax-only -Werror=pointer-to-int-cast -Werror=int-to-pointer-cast` (arm64: only the x86 inline asm of step 4 remains); with `clang -target i686-w64-mingw32`, lifted code is byte-identical and runtime code differs only where a call now goes through `nds_call_target`. Not yet built with GCC or run on Windows | same golden frames on Windows |
 | 3 | Code pointers as DS addresses, direct-mapped dispatch, no fixups, gosub tags. **Code done**: no-ROM harness passes on macOS (arm64), runtime still passes the step 2 checks (macOS `-Werror` casts, i686-mingw syntax). Not yet built with GCC or run on Windows | same golden frames on Windows |
-| 4 | 64-bit `Slot`, arm64/x86_64 context switch, no x86 inline asm on 64-bit | unit harness passes on macOS |
+| 4 | 64-bit `Slot`, arm64/x86_64 context switch, no x86 inline asm on 64-bit. **Code done**: harness passes on macOS arm64 and x86_64 (Rosetta); the whole runtime except `os_win32.c` compiles for `arm64-apple-macos` and `x86_64-apple-macos` with the `-Werror` cast flags, and for `i686-w64-mingw32`, where `context.c` assembles to the old i386 bytes. Not yet built with GCC or run on Windows | unit harness passes on macOS |
 | 5 | `os_posix.c` + CoreAudio + POSIX shm | runtime compiles with `-Werror` on macOS |
 | 6 | darwin profile in `native_build.py` | **milestone: a game boots headless on macOS**, frames dumped |
 | 7 | Launcher integration (`native_game.rs`) | Play button works on macOS |

@@ -19,9 +19,13 @@ static float pitch_table[768];   /* demi-ton / 64 -> rapport */
 static s16 vel_table[128];       /* volume 0..127 -> 1/10 dB */
 
 static double ln(double x) {
+#if defined(__i386__) /* sans libm sous Windows */
     double r;
     __asm__("fldln2\n fxch\n fyl2x" : "=t"(r) : "0"(x) : "st(1)");
     return r;
+#else
+    return __builtin_log(x);
+#endif
 }
 
 static void tables_init(void) {

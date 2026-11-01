@@ -60,6 +60,12 @@ void nds_fatal(const char *fmt, ...);
 void nds_copy(void *dst, const void *src, u32 n);
 void nds_zero(void *dst, u32 n);
 int nds_arg(const char *name, const char **value);
+/* context.c : fils verts (OS_SaveContext/OS_LoadContext) et piles de l'hote */
+extern uptr nds_last_load_sp;
+void nds_ctx_init(u32 ctx, u8 *stack, u32 size, void (*entry)(u32), u32 func); /* 1er OS_LoadContext(ctx) : entry(ctx) */
+u32 nds_ctx_func(u32 ctx);
+void nds_run_on_stack(u8 *top, void (*fn)(void)); /* top aligne sur 16 ; fn ne revient pas */
+void nds_dump_threads(void);
 /* calltab.c : adresse DS d'une fonction du jeu (bit Thumb compris) -> fonction de l'hote ; fatal si inconnue */
 void nds_code_map_init(void);
 uptr nds_call_target(u32 a);

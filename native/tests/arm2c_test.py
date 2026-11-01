@@ -3,9 +3,12 @@
 
   python3 native/tests/arm2c_test.py           # traduit arm2c_cases.s, compile le harnais, le lance
   python3 native/tests/arm2c_test.py --regen   # apres un changement de arm2c_cases.s (clang avec la cible ARM)
+  python3 native/tests/arm2c_test.py --arch x86_64   # macOS : version Intel, lancee par Rosetta sur Apple Silicon
 
 Couvre : RD/WR et la rotation de LDRW, les macros de drapeaux, CALLF a 10 arguments (fonction traduite et fonction C),
-les sous-routines internes (GOSUB_TAG, gs_), nds_call_target sur des adresses ARM et Thumb.
+les sous-routines internes (GOSUB_TAG, gs_), nds_call_target sur des adresses ARM et Thumb, et les fils verts de
+nitro-pc/context.c (OS_SaveContext/OS_LoadContext, nds_run_on_stack : deux fils sur des piles de la fenetre se
+passent la main un million de fois chacun).
 Chaque cas est compile deux fois : normal et avec NDS_INSTRUMENT (HOST2DS verifie alors que la pile est dans la fenetre).
 
 macOS, Linux : cc (ou $CC). Fenetre de 4 Go n'importe ou (nds_mem), le code traduit tourne sur un fil dont la pile
@@ -196,11 +199,15 @@ def toolchain():
     return [cc], lift_flags, rt, harness, ["-lpthread"], ""
 
 
-def build_and_run(out, variant):
+def build_and_run(out, variant, arch=None):
     cc, lift_flags, rt_flags, harness_flags, link_flags, exe_suffix = toolchain()
-    extra = ["-DNDS_INSTRUMENT"] if variant == "instrument" else []
+    if arch:
+        cc = cc + ["-arch", arch]
+        variant = "%s-%s" % (variant, arch)
+    extra = ["-DNDS_INSTRUMENT"] if variant.startswith("instrument") else []
     objs = []
-    for src, flags in ((out / "lifted.c", lift_flags), (RUNTIME / "calltab.c", rt_flags + ["-I", str(RUNTIME)]),
+    rt = rt_flags + ["-I", str(RUNTIME)]
+    for src, flags in ((out / "lifted.c", lift_flags), (RUNTIME / "calltab.c", rt), (RUNTIME / "context.c", rt),
                        (HERE / "harness.c", harness_flags + ["-I", str(out)])):
         obj = out / ("%s-%s.o" % (src.stem, variant))
         p = subprocess.run(cc + list(flags) + extra + ["-c", str(src), "-o", str(obj)], capture_output=True, text=True)
@@ -222,7 +229,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--regen", action="store_true", help="reassembler arm2c_cases.s et recopier les octets ici")
     ap.add_argument("--out", default=str(HERE.parent / "build" / "tests"), help="dossier des fichiers generes")
+    ap.add_argument("--arch", help="macOS : architecture du harnais (arm64, x86_64 par Rosetta)")
     a = ap.parse_args()
+    if a.arch and sys.platform != "darwin":
+        sys.exit("--arch : macOS seulement")
     if a.regen:
         regen()
         return
@@ -237,7 +247,7 @@ def main():
     print("C genere : %d regles, %d echecs" % (n, bad))
     out = Path(a.out)
     write_sources(out, funcs, bodies)
-    ok = [build_and_run(out, v) for v in ("normal", "instrument")]
+    ok = [build_and_run(out, v, a.arch) for v in ("normal", "instrument")]
     sys.exit(0 if all(ok) and not bad else 1)
 
 
