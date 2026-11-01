@@ -3,12 +3,12 @@
 #include "nitro.h"
 
 typedef struct { s32 m[16]; } Mtx;
-typedef struct { float x, y, z, w, r, g, b, s, t; } Vtx;
-typedef struct { Vtx v[10]; int n; u32 attr, tex, pal; int translucent; float ysort; } Poly;
+typedef struct { float x, y, z, w, r, g, b, s, t; u32 id; } Vtx;
+typedef struct { Vtx v[10]; int n; u32 attr, tex, pal; int translucent; float ysort; Vtx src[4]; int src_n; u32 id; } Poly;
 
 #define MAX_POLYS 8192
-static Poly polys[3][MAX_POLYS];
-static int poly_count[3];
+static Poly polys[5][MAX_POLYS]; /* 3 listes qui tournent, la precedente pour l'interpolation, et l'image intermediaire */
+static int poly_count[5];
 static int build = 0;
 static int swap_pending, swap_flags, render_flags;
 
@@ -94,6 +94,8 @@ static void vertex(void) {
         o.s = cur_s / 16.0f;
         o.t = cur_t / 16.0f;
     }
+    /* ce que le jeu a donne, avant les matrices : un meme sommet garde cette valeur d'une image a l'autre */
+    o.id = ((u32)x * 0x9E3779B1u) ^ ((u32)y * 0x85EBCA77u) ^ ((u32)z * 0xC2B2AE3Du) ^ ((u32)raw_s * 0x27D4EB2Fu) ^ ((u32)raw_t * 0x165667B1u);
     if (prim < 0) return;
     prim_v[prim_count++] = o;
     switch (prim) {
@@ -152,9 +154,28 @@ static void lerp(Vtx *o, const Vtx *a, const Vtx *b, float t) {
     o->t = a->t + (b->t - a->t) * t;
 }
 
+/* decoupage aux 6 plans ; a[] doit tenir 12 sommets. Rend le nombre de sommets, au plus 10, ou 0 si rien ne reste. */
+static int clip_poly(Vtx *a, int n) {
+    Vtx b[12];
+    int na = n;
+    for (int p = 0; p < 6; p++) {
+        int nb = 0;
+        for (int i = 0; i < na; i++) {
+            const Vtx *c = &a[i], *d = &a[(i + 1) % na];
+            float pc = plane(c, p), pd = plane(d, p);
+            if (pc >= 0) b[nb++] = *c;
+            if ((pc >= 0) != (pd >= 0) && nb < 11) lerp(&b[nb++], c, d, pc / (pc - pd));
+            if (nb >= 11) break;
+        }
+        if (nb < 3) return 0;
+        na = nb;
+        for (int i = 0; i < na; i++) a[i] = b[i];
+    }
+    return na > 10 ? 10 : na;
+}
+
 static void emit_poly(const Vtx *in, int n) {
-    /* decoupage aux 6 plans */
-    Vtx a[12], b[12];
+    Vtx a[12];
     int na = n;
     for (int i = 0; i < n; i++) a[i] = in[i];
     if (prim == 2) {
@@ -174,24 +195,20 @@ static void emit_poly(const Vtx *in, int n) {
         if (front && !(cur_attr & 0x80)) return;
         if (!front && !(cur_attr & 0x40)) return;
     }
-    for (int p = 0; p < 6; p++) {
-        int nb = 0;
-        for (int i = 0; i < na; i++) {
-            const Vtx *c = &a[i], *d = &a[(i + 1) % na];
-            float pc = plane(c, p), pd = plane(d, p);
-            if (pc >= 0) b[nb++] = *c;
-            if ((pc >= 0) != (pd >= 0) && nb < 11) lerp(&b[nb++], c, d, pc / (pc - pd));
-            if (nb >= 11) break;
-        }
-        if (nb < 3) return;
-        na = nb;
-        for (int i = 0; i < na; i++) a[i] = b[i];
-    }
-    if (na > 10) na = 10;
+    Vtx source[4];
+    for (int i = 0; i < n; i++) source[i] = a[i];
+    na = clip_poly(a, n);
+    if (!na) return;
     if (poly_count[build] >= MAX_POLYS) return;
     Poly *q = &polys[build][poly_count[build]++];
     q->n = na;
     for (int i = 0; i < na; i++) q->v[i] = a[i];
+    q->src_n = n;
+    q->id = cur_attr ^ (cur_tex * 31u) ^ (cur_pal * 131u);
+    for (int i = 0; i < n; i++) {
+        q->src[i] = source[i];
+        q->id += source[i].id * source[i].id; /* sans ordre : une bande retourne un triangle sur deux */
+    }
     q->attr = cur_attr;
     q->tex = cur_tex;
     q->pal = cur_pal;
@@ -441,8 +458,9 @@ typedef struct {
     u16 toon[32], edge[8];
     int vx1, vy1, vx2, vy2;
 } ListState;
-static ListState list_state[3];
-static int list_ready = 1, list_shown = 2;
+static ListState list_state[4];
+static int list_ready = 1, list_shown = 2, list_old = 3;
+#define LIST_MID 4
 static volatile int list_fresh;
 static volatile long list_lock;
 
@@ -903,6 +921,66 @@ static void edge_band(void *arg, int band, int bands) {
     }
 }
 
+/* --interpolate : image intermediaire entre les deux dernieres listes. Les polygones se retrouvent par leurs sommets d'origine, ceux qui n'ont
+ * pas d'equivalent ou qui sautent trop loin (changement de plan) restent ou ils sont dans la nouvelle liste. */
+#define INTERP_BUCKETS 16384
+#define INTERP_MAX_JUMP 0.6f
+
+static inline int same_poly(const Poly *a, const Poly *b) { return a->id == b->id && a->src_n == b->src_n && a->attr == b->attr && a->tex == b->tex && a->pal == b->pal; }
+
+static inline float abs_f(float v) { return v < 0 ? -v : v; }
+
+/* Le milieu se calcule sur les sommets d'avant le decoupage : decoupes ensuite, les polygones voisins restent joints au bord de l'ecran. */
+static int interp_pair(Poly *out, const Poly *old, const Poly *now, float scene_w) {
+    Vtx a[12];
+    for (int i = 0; i < now->src_n; i++) {
+        const Vtx *from = &old->src[i], *to = &now->src[i];
+        /* un sommet proche de la camera, ou derriere elle, bouge beaucoup sans que ce soit un saut : on le juge a l'echelle de la scene */
+        float far = abs_f(from->w) > abs_f(to->w) ? abs_f(from->w) : abs_f(to->w);
+        float reach = (far > scene_w ? far : scene_w) * INTERP_MAX_JUMP;
+        if (abs_f(from->x - to->x) > reach || abs_f(from->y - to->y) > reach) return 0;
+        a[i] = *to;
+        a[i].x = (from->x + to->x) * 0.5f;
+        a[i].y = (from->y + to->y) * 0.5f;
+        a[i].z = (from->z + to->z) * 0.5f;
+        a[i].w = (from->w + to->w) * 0.5f;
+    }
+    int n = clip_poly(a, now->src_n);
+    if (!n) return 0;
+    out->n = n;
+    for (int i = 0; i < n; i++) out->v[i] = a[i];
+    return 1;
+}
+
+/* Rend 1 si assez de polygones se sont retrouves pour que l'image intermediaire ait un sens. Un meme modele peut etre dessine plusieurs fois :
+ * chaque polygone de l'ancienne liste ne sert qu'une fois, dans l'ordre de dessin. */
+static int interp_midpoint(void) {
+    static int head[INTERP_BUCKETS], next[MAX_POLYS];
+    const Poly *old = polys[list_old], *now = polys[list_shown];
+    int old_n = poly_count[list_old], now_n = poly_count[list_shown];
+    Poly *out = polys[LIST_MID];
+    int moved = 0;
+    float scene_w = 0;
+    for (int i = 0; i < INTERP_BUCKETS; i++) head[i] = -1;
+    for (int i = old_n - 1; i >= 0; i--) {
+        u32 bucket = old[i].id & (INTERP_BUCKETS - 1);
+        next[i] = head[bucket];
+        head[bucket] = i;
+    }
+    for (int i = 0; i < now_n; i++) scene_w += abs_f(now[i].v[0].w);
+    if (now_n) scene_w /= now_n;
+    for (int i = 0; i < now_n; i++) {
+        out[i] = now[i];
+        int *link = &head[now[i].id & (INTERP_BUCKETS - 1)];
+        while (*link >= 0 && !same_poly(&old[*link], &now[i])) link = &next[*link];
+        if (*link < 0) continue;
+        moved += interp_pair(&out[i], &old[*link], &now[i], scene_w);
+        *link = next[*link];
+    }
+    poly_count[LIST_MID] = now_n;
+    return moved > now_n / 4;
+}
+
 /* Dans le fil de rendu : l'image 3D a cette definition, refaite si la liste ou la definition a change. */
 const u32 *gx_render(int w, int h, int k, int margin) {
     static int last_w, last_h;
@@ -912,20 +990,32 @@ const u32 *gx_render(int w, int h, int k, int margin) {
         id_buf = VirtualAlloc(0, MAX_W * MAX_H, 0x3000, 4);
         tex_arena = VirtualAlloc(0, TEX_ARENA * 4, 0x3000, 4);
     }
+    static int interp = -1, calls_since, last_gap, final_pending;
+    if (interp < 0) interp = nds_arg("--interpolate", 0);
     while (__sync_lock_test_and_set(&list_lock, 1)) Sleep(0);
     int fresh = list_fresh;
     if (fresh) {
-        int t = list_shown;
+        int t = interp ? list_old : list_shown;
+        if (interp) list_old = list_shown;
         list_shown = list_ready;
         list_ready = t;
         list_fresh = 0;
     }
     __sync_lock_release(&list_lock);
-    if (!fresh && w == last_w && h == last_h) return color_buf;
+    calls_since++;
+    if (fresh) {
+        last_gap = calls_since;
+        calls_since = 0;
+    }
+    /* un jeu a 30 images/s : a son image neuve, on montre d'abord le milieu du chemin depuis la precedente, puis l'image elle-meme */
+    int mid = interp && fresh && last_gap >= 2 && last_gap <= 3 && interp_midpoint();
+    int finish = !fresh && final_pending;
+    final_pending = mid;
+    if (!fresh && !finish && w == last_w && h == last_h) return color_buf;
     last_w = w;
     last_h = h;
     cur_state = &list_state[list_shown];
-    Raster ra = {w, h, k, margin, polys[list_shown], poly_count[list_shown]};
+    Raster ra = {w, h, k, margin, polys[mid ? LIST_MID : list_shown], poly_count[mid ? LIST_MID : list_shown]};
     for (int i = 0; i < 32; i++) {
         u32 c = cur_state->toon[i];
         toon8[i] = ((c & 31) * 255 / 31) | (((c >> 5) & 31) * 255 / 31) << 8 | (((c >> 10) & 31) * 255 / 31) << 16;
@@ -943,10 +1033,13 @@ const u32 *gx_render(int w, int h, int k, int margin) {
     return color_buf;
 }
 
+u32 nds_swaps;
+
 /* appele a chaque VBlank par le fil du jeu : si le jeu a demande l'echange, sa liste part au dessin */
 void gx_begin_frame(void) {
     if (!swap_pending) return;
     swap_pending = 0;
+    nds_swaps++;
     ListState *st = &list_state[build];
     for (int i = 0; i < 4; i++) {
         u8 *src = vram_tex_slot(i);

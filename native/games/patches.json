@@ -1,0 +1,27 @@
+{
+ "AL7E": {
+  "names": {
+   "0x020d78c0": "WM_StartMP",
+   "0x020d7d48": "WM_EndDataSharing"
+  },
+  "hooks": {
+   "0x020ace50": "nds_hook_camera",
+   "0x020aaeb4": "nds_hook_camera_yaw",
+   "0x020ce868": "nds_hook_spin",
+   "0x020ad310": "nds_hook_spin",
+   "0x020b01bc": "nds_hook_spin"
+  },
+  "values": {
+   "nds_fp_camera": "0x02109cd4",
+   "nds_fp_players": "0x02109358",
+   "nds_fp_index": "0x02102822",
+   "nds_fp_matrix": "0x8c",
+   "nds_fp_yaw": "0x02109cca",
+   "nds_net_screens": "0x02102900",
+   "nds_net_menu_screen": "0x20"
+  },
+  "functions": {
+   "nds_open_screen": "func_0205ecc4"
+  }
+ }
+}

@@ -17,14 +17,16 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use bevy::asset::RenderAssetUsages;
 use bevy::image::ImageSampler;
+use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use bevy::window::{CursorGrabMode, CursorOptions};
 
 use crate::activity::{self, What};
 use crate::i18n::{t, tr};
 use crate::input::{DsButton, DsInput, Stylus};
 use crate::link::ShowToast;
-use crate::screens::{Aspect, Engine, RenderStyle, Screen, ScreenLayout, ScreenPlaces};
+use crate::screens::{Aspect, DsScreens, Engine, RenderStyle, Screen, ScreenLayout, ScreenPlaces};
 use crate::settings::PlayerSettings;
 use crate::studio::{in_game, ActiveGame, ActiveRom, AppGameExt, StudioState};
 
@@ -449,11 +451,14 @@ impl Plugin for NativeGamesPlugin {
             let spec = format!("id = \"native-{code}\"\nname = \"{code}\"\ngame_code = \"{code}\"\n");
             app.add_ds_game(&spec, start_module);
         }
-        app.add_systems(Update, (show_frames, send_input).run_if(resource_exists::<Running>))
+        app.add_systems(Update, (show_frames, mouse_look, send_input).chain().run_if(resource_exists::<Running>))
             .add_systems(Update, poll_generation.run_if(resource_exists::<Generating>))
             .add_systems(OnExit(StudioState::Playing), stop_module);
     }
 }
+
+/// Le paquet de commandes, comme `native/nitro-pc/present.c`.
+const PACKET: usize = 16;
 
 #[derive(Resource)]
 struct Running {
@@ -464,7 +469,12 @@ struct Running {
     seq: u32,
     top: Handle<Image>,
     bottom: Handle<Image>,
-    sent: [u8; 12],
+    sent: [u8; PACKET],
+    /// Un mod dirige la caméra à la souris : le curseur est retenu, F7 le rend.
+    mouse_look: bool,
+    captured: bool,
+    /// Cumul des mouvements de la souris, envoyé au module.
+    mouse: (i16, i16),
 }
 
 #[derive(Component)]
@@ -555,8 +565,10 @@ fn launch(commands: &mut Commands, images: &mut Assets<Image>, code: &str, rom: 
         commands.set_state(StudioState::Menu);
         return;
     };
+    let mod_args = crate::mod_packs::native_args(code);
+    let mouse_look = mod_args.iter().any(|arg| arg == "--first-person");
     let mut command = Command::new(module);
-    command.arg(rom).arg("--pipe").arg("--shm").arg(&name).arg("--save").arg(saves.join("backup.sav")).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(log);
+    command.arg(rom).arg("--pipe").arg("--shm").arg(&name).arg("--save").arg(saves.join("backup.sav")).args(mod_args).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(log);
     if std::env::var_os("NDSGS_NATIVE_MUTE").is_some() {
         command.arg("--mute");
     }
@@ -583,7 +595,7 @@ fn launch(commands: &mut Commands, images: &mut Assets<Image>, code: &str, rom: 
         commands.spawn((Sprite { image: image.clone(), custom_size: Some(size), ..default() }, NativeScreen, engine.layers(), in_game()));
     }
     let stdin = child.stdin.take();
-    commands.insert_resource(Running { code: code.to_string(), child, stdin, frames, seq: 0, top, bottom, sent: [0xFF; 12] });
+    commands.insert_resource(Running { code: code.to_string(), child, stdin, frames, seq: 0, top, bottom, sent: [0xFF; PACKET], mouse_look, captured: mouse_look, mouse: (0, 0) });
 }
 
 fn show_frames(mut commands: Commands, mut running: ResMut<Running>, mut images: ResMut<Assets<Image>>, mut sprites: Query<&mut Sprite, With<NativeScreen>>) {
@@ -622,6 +634,31 @@ fn show_frames(mut commands: Commands, mut running: ResMut<Running>, mut images:
     }
 }
 
+/// La souris dirige la caméra : le curseur reste dans la fenêtre, F7 le rend pour toucher l'écran du bas ou la barre de titre.
+fn mouse_look(mut running: ResMut<Running>, motion: Res<AccumulatedMouseMotion>, keys: Res<ButtonInput<KeyCode>>, screens: Res<DsScreens>, mut windows: Query<(&Window, &mut CursorOptions)>, mut toasts: MessageWriter<ShowToast>, mut told: Local<bool>) {
+    if !running.mouse_look {
+        return;
+    }
+    if !*told {
+        *told = true;
+        toasts.write(ShowToast(tr("The mouse moves the camera. F7 frees the cursor.", "La souris dirige la camera. F7 libere le curseur.").to_string()));
+    }
+    if keys.just_pressed(KeyCode::F7) {
+        running.captured = !running.captured;
+    }
+    let Ok((window, mut cursor)) = windows.get_mut(screens.main_window()) else { return };
+    let held = running.captured && window.focused;
+    let (grab, visible) = if held { (CursorGrabMode::Locked, false) } else { (CursorGrabMode::None, true) };
+    if cursor.grab_mode != grab || cursor.visible != visible {
+        cursor.grab_mode = grab;
+        cursor.visible = visible;
+    }
+    if held {
+        let (x, y) = running.mouse;
+        running.mouse = (x.wrapping_add(motion.delta.x.round() as i16), y.wrapping_add(motion.delta.y.round() as i16));
+    }
+}
+
 fn send_input(mut running: ResMut<Running>, input: Res<DsInput>, stylus: Res<Stylus>, places: Res<ScreenPlaces>, style: Res<RenderStyle>, windows: Query<&Window>) {
     // Bits du registre KEYINPUT du DS, puis X et Y
     const ORDER: [DsButton; 12] = [
@@ -644,7 +681,8 @@ fn send_input(mut running: ResMut<Running>, input: Res<DsInput>, stylus: Res<Sty
             keys |= 1 << bit;
         }
     }
-    let touch = stylus.touch().filter(|p| p.x >= 0.0 && p.y >= 0.0 && p.x < W as f32 && p.y < H as f32);
+    // Curseur retenu par la caméra : il n'est nulle part, il ne touche donc pas l'écran
+    let touch = stylus.touch().filter(|p| !running.captured && p.x >= 0.0 && p.y >= 0.0 && p.x < W as f32 && p.y < H as f32);
     let (down, x, y) = touch.map_or((0u16, 0u16, 0u16), |p| (1, p.x as u16, p.y as u16));
     // La définition suit la fenêtre : un pixel d'image par pixel d'écran, ou 1 en rendu DS
     let mut ds_width = W as u16;
@@ -660,13 +698,15 @@ fn send_input(mut running: ResMut<Running>, input: Res<DsInput>, stylus: Res<Sty
     if scale == 3 {
         scale = 4;
     }
-    let mut packet = [0u8; 12];
+    let mut packet = [0u8; PACKET];
     packet[0..2].copy_from_slice(&keys.to_le_bytes());
     packet[2..4].copy_from_slice(&down.to_le_bytes());
     packet[4..6].copy_from_slice(&x.to_le_bytes());
     packet[6..8].copy_from_slice(&y.to_le_bytes());
     packet[8..10].copy_from_slice(&ds_width.to_le_bytes());
     packet[10..12].copy_from_slice(&scale.to_le_bytes());
+    packet[12..14].copy_from_slice(&running.mouse.0.to_le_bytes());
+    packet[14..16].copy_from_slice(&running.mouse.1.to_le_bytes());
     if packet != running.sent {
         running.sent = packet;
         if let Some(stdin) = running.stdin.as_mut() {
@@ -675,7 +715,13 @@ fn send_input(mut running: ResMut<Running>, input: Res<DsInput>, stylus: Res<Sty
     }
 }
 
-fn stop_module(mut commands: Commands) {
+fn stop_module(mut commands: Commands, mut cursors: Query<&mut CursorOptions>) {
+    for mut cursor in &mut cursors {
+        if cursor.grab_mode != CursorGrabMode::None || !cursor.visible {
+            cursor.grab_mode = CursorGrabMode::None;
+            cursor.visible = true;
+        }
+    }
     commands.remove_resource::<Running>();
     commands.remove_resource::<Generating>();
 }

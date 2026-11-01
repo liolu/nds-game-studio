@@ -87,6 +87,7 @@ void present_init(void);
 void present_frame(void);
 u32 present_keys(void);
 void present_touch(int *down, int *x, int *y);
+void present_mouse(int *x, int *y);
 void present_config(int *scale, int *ds_width);
 void present_back(u32 **top, u32 **bottom);
 void present_flip(int w, int h, u32 frame);

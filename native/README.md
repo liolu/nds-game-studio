@@ -56,7 +56,19 @@ plante aujourd'hui sur Tom et Jerry (`func_0203e3f4`). Le C matché est correct 
 - 2D : pas de mosaïque ni de capture d'écran ; effets ligne par ligne absents, l'image est dessinée entière au VBlank.
 - Pas de préemption : un thread passe la main sur une attente, une interruption ou un accès registre.
 - Son : séquenceur et mixeur simplifiés (portamento et valeurs aléatoires du SSEQ ignorés).
-- Wi-Fi et micro absents. Pas de cartouche GBA.
+- Micro absent. Pas de cartouche GBA. La liaison sans fil passe par TCP (ci-dessous) ; Internet Wi-Fi du DS (DWC) absent.
+
+## Fonctions demandées par les mods
+
+Un mod ne contient pas de code : son `native.json` demande une de ces fonctions, que le launcher traduit en option du module (`mod_packs::native_args`).
+
+- `--interpolate` (`gx3d.c`) : un jeu qui dessine à 30 images/s en montre 60. À chaque nouvelle liste de polygones, une image intermédiaire est calculée entre la précédente et la nouvelle ; les polygones se retrouvent par leurs sommets d'origine, avant le découpage. Rien ne change dans le code du jeu, sa vitesse reste la même. Coût : une image de retard à 60 images/s.
+- `--first-person` (`first_person.c`) : la caméra du jeu est remplacée juste avant le calcul de sa vue, et dirigée par la souris (le launcher envoie le cumul de ses mouvements et retient le curseur, F7 le rend ; `--look "image:x:y,..."` pour les essais). Le jeu oriente les touches d'après son propre cap : il reçoit le nôtre, donc haut avance dans le regard et gauche, droite vont sur les côtés. Il faut un jeu décrit dans `games/patches.json`.
+- `--net-port n`, `--net-join adresse[:port]` (`net.c`) : les fonctions `WM_*` du SDK remplacées par du TCP. Le partage de données image par image est gardé tel quel : l'hôte attend l'envoi de chaque invité et renvoie le lot à tous. `Select + X` ouvre le menu multijoueur du jeu. `--net-log` trace les échanges, `--net-menu image` ouvre ce menu à une image donnée.
+
+Pas de partie téléchargée (une seule carte) : le jeu de l'invité y est un autre programme de la rom, sans recette.
+
+`games/patches.json` donne, par jeu, ce que la recette ne dit pas : noms de fonctions du SDK (`names`), accroches du runtime à l'entrée d'une fonction (`hooks`), adresses (`values`) et fonctions du jeu appelées par le runtime (`functions`). `nds_hook_spin` sert aux boucles d'attente du jeu qui ne touchent aucun registre : sur le DS une interruption les débloque, ici elle n'arrive que si on lui laisse la place.
 
 ## Essais sans fenêtre
 
@@ -64,6 +76,7 @@ plante aujourd'hui sur Tom et Jerry (`func_0203e3f4`). Le C matché est correct 
 bash native/tools/run_game.sh AJTP "<rom>" 60 --mute --save test.sav --dump captures --every 300 --frames 3000 --keys "2700:0/128/150,2710:0"
 ```
 
+- `--peek "image:adresse:taille:fichier,..."` copie de la mémoire dans un fichier ; `--poke "image:adresse:valeur,..."` y écrit un mot ; `--dumpfrom image` commence les captures plus tard.
 - `--keys "image:masque[/x/y],..."` : touches (bits de KEYINPUT : A=1, B=2, Select=4, Start=8, droite=16, gauche=32,
   haut=64, bas=128, R=256, L=512, X=1024, Y=2048) et stylet.
 
