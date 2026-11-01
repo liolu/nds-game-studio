@@ -659,7 +659,7 @@ fn mouse_look(mut running: ResMut<Running>, motion: Res<AccumulatedMouseMotion>,
     }
 }
 
-fn send_input(mut running: ResMut<Running>, input: Res<DsInput>, stylus: Res<Stylus>, places: Res<ScreenPlaces>, style: Res<RenderStyle>, windows: Query<&Window>) {
+fn send_input(mut running: ResMut<Running>, input: Res<DsInput>, mouse_buttons: Res<ButtonInput<MouseButton>>, stylus: Res<Stylus>, places: Res<ScreenPlaces>, style: Res<RenderStyle>, windows: Query<&Window>) {
     // Bits du registre KEYINPUT du DS, puis X et Y
     const ORDER: [DsButton; 12] = [
         DsButton::A,
@@ -681,7 +681,11 @@ fn send_input(mut running: ResMut<Running>, input: Res<DsInput>, stylus: Res<Sty
             keys |= 1 << bit;
         }
     }
-    // Curseur retenu par la caméra : il n'est nulle part, il ne touche donc pas l'écran
+    // Curseur retenu par la caméra : le clic gauche tire (bouton L)
+    if running.captured && mouse_buttons.pressed(MouseButton::Left) {
+        keys |= 1 << 9;
+    }
+    // Il n'est nulle part, il ne touche donc pas l'écran
     let touch = stylus.touch().filter(|p| !running.captured && p.x >= 0.0 && p.y >= 0.0 && p.x < W as f32 && p.y < H as f32);
     let (down, x, y) = touch.map_or((0u16, 0u16, 0u16), |p| (1, p.x as u16, p.y as u16));
     // La définition suit la fenêtre : un pixel d'image par pixel d'écran, ou 1 en rendu DS

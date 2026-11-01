@@ -10,7 +10,7 @@
 //! donner ces dossiers. Une release (tag `v<version>`) peut porter `<id>-<version>.zip` et `SHA256SUMS` : l'archive est alors contrôlée.
 //!
 //! ```json
-//! { "format": 1, "id": "mon-mod", "name": "Mon mod", "version": "1.0.0", "author": "...", "description": "...", "games": ["AL7E"] }
+//! { "format": 1, "id": "my-mod", "name": "My mod", "name_fr": "Mon mod", "version": "1.0.0", "author": "...", "description": "...", "description_fr": "...", "games": ["AL7E"] }
 //! ```
 //!
 //! Dans le dossier d'un mod, un dossier par code de jeu (`AL7E/`) garde ce qui ne vaut que pour ce jeu : seul celui du jeu est installé. Un
@@ -25,7 +25,7 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
-use crate::i18n::{t, tr};
+use crate::i18n::{lang, t, tr, Lang};
 use crate::mods;
 
 const PACKS: &str = "paquets";
@@ -64,6 +64,11 @@ struct Manifest {
     author: String,
     #[serde(default)]
     description: String,
+    /// Le français, s'il existe : l'anglais sert sinon.
+    #[serde(default)]
+    name_fr: String,
+    #[serde(default)]
+    description_fr: String,
     /// Codes des jeux ; vide = tout jeu.
     #[serde(default)]
     games: Vec<String>,
@@ -99,6 +104,21 @@ pub struct Pack {
     pub source: String,
 }
 
+impl Manifest {
+    /// Le nom et la description dans la langue du launcher.
+    fn translate(mut self) -> Self {
+        if lang() == Lang::Fr {
+            if !self.name_fr.is_empty() {
+                self.name = std::mem::take(&mut self.name_fr);
+            }
+            if !self.description_fr.is_empty() {
+                self.description = std::mem::take(&mut self.description_fr);
+            }
+        }
+        self
+    }
+}
+
 fn packs_dir(mod_dir: &Path) -> PathBuf {
     mod_dir.join(PACKS)
 }
@@ -119,7 +139,7 @@ pub fn list(code: &str) -> Vec<Pack> {
         .into_iter()
         .filter(|entry| packs_dir(&dir).join(&entry.id).is_dir())
         .map(|entry| {
-            let manifest: Manifest = std::fs::read(packs_dir(&dir).join(&entry.id).join(MANIFEST)).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default();
+            let manifest = std::fs::read(packs_dir(&dir).join(&entry.id).join(MANIFEST)).ok().and_then(|bytes| serde_json::from_slice::<Manifest>(&bytes).ok()).unwrap_or_default().translate();
             let name = if manifest.name.is_empty() { entry.id.clone() } else { manifest.name };
             let network = pack_features(&packs_dir(&dir).join(&entry.id)).iter().any(|f| f == "network");
             Pack { network, id: entry.id, name, version: manifest.version, author: manifest.author, description: manifest.description, enabled: entry.enabled, source: entry.source }
@@ -152,6 +172,7 @@ pub fn native_args(code: &str) -> Vec<OsString> {
         match feature.as_str() {
             "interpolate" => args.push("--interpolate".into()),
             "first_person" => args.push("--first-person".into()),
+            "skip_intro" => args.push("--skip-intro".into()),
             "network" => {
                 args.push("--net-port".into());
                 args.push(NET_PORT.to_string().into());
@@ -723,12 +744,12 @@ fn is_newer(new: &str, old: &str) -> bool {
 fn read_manifest(folder: &Path, name: &str) -> Option<Manifest> {
     let bytes = std::fs::read(folder.join(name)).ok()?;
     if name == MANIFEST {
-        return serde_json::from_slice(&bytes).ok();
+        return serde_json::from_slice::<Manifest>(&bytes).ok().map(Manifest::translate);
     }
     // OpenRAC écrit ses jeux autrement : seuls son nom et sa description servent ici
     let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
     let text = |key: &str| value.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string();
-    Some(Manifest { id: text("id"), name: text("name"), version: text("version"), author: text("author"), description: text("description"), games: Vec::new() })
+    Some(Manifest { id: text("id"), name: text("name"), version: text("version"), author: text("author"), description: text("description"), ..Default::default() })
 }
 
 /// Les mods d'un dossier, ceux qui ne vont pas compris, avec la raison.
@@ -781,13 +802,19 @@ pub fn find(code: &str, text: &str) {
         let temp = dir.join(PREVIEW_DIR);
         let link = parse_link(&text)?;
         let fetched = fetch(&link, &temp)?;
-        let found = scan(&fetched.root, &code, &dir, fetched.plain_name.as_deref());
+        let all = scan(&fetched.root, &code, &dir, fetched.plain_name.as_deref());
+        let any = !all.is_empty();
+        // Ce qui ne va pas avec ce jeu n'a rien à faire dans sa liste
+        let found: Vec<Found> = all.into_iter().filter(|f| f.refused.is_none()).collect();
         if found.is_empty() {
             let _ = std::fs::remove_dir_all(&temp);
-            return Err(t!("No mod in this repository: {MANIFEST} is missing.", "Aucun mod dans ce depot : {MANIFEST} manque."));
+            // Le dépôt de base n'a simplement rien pour ce jeu : il n'y a rien à dire
+            if text == BASE_REPOSITORY {
+                return Ok(());
+            }
+            return Err(if any { tr("This repository has no mod for this game.", "Ce depot n'a aucun mod pour ce jeu.").to_string() } else { t!("No mod in this repository: {MANIFEST} is missing.", "Aucun mod dans ce depot : {MANIFEST} manque.") });
         }
-        let fitting = found.iter().filter(|f| f.refused.is_none()).count();
-        mods::say(t!("{} mods found, {fitting} for this game.", "{} mods trouves, {fitting} pour ce jeu.", found.len()));
+        mods::say(t!("{} mods for this game.", "{} mods pour ce jeu.", found.len()));
         *PREVIEW.lock().unwrap() = Some(Preview { code: code.clone(), source: text.clone(), tag: fetched.tag, mods: found, assets: fetched.assets });
         Ok(())
     });
