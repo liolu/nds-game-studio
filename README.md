@@ -229,7 +229,11 @@ xattr -dr com.apple.quarantine "<dossier du zip>"
 
 Sur Mac :
 
-- les jeux natifs ne tournent pas encore : ce sont des programmes Windows ;
+- les jeux natifs se préparent aussi sur Mac (Apple Silicon et Intel), mais **c'est expérimental** : le launcher traduit
+  la rom avec `clang`, qui vient des outils en ligne de commande de Xcode. S'ils manquent, la page du jeu le dit ;
+  les installer avec `xcode-select --install` (pas besoin de Xcode lui-même). Le premier module met de 30 s à
+  1 min 30. Seul Lego Star Wars II (AL7E) a été essayé jusqu'à son écran titre, et sans fenêtre : le chemin complet
+  jusqu'à l'écran du launcher n'est pas encore vérifié. Détail dans [native/README.md](native/README.md) ;
 - F1, F5, F6, F8 et F9 demandent la touche `fn`, sauf si « Utiliser F1, F2... comme touches de fonction
   standard » est activé dans les réglages du clavier ;
 - en cas de problème, le journal est `log/launcher.log` dans le dossier du studio.

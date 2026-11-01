@@ -18,6 +18,11 @@ NATIVE = HERE.parent
 INSTALL = NATIVE.parent / "target" / "release" / "native"
 IDLE = 0x4000  # BELOW_NORMAL_PRIORITY_CLASS
 ROM_CODE_AT = 12
+# Colonne macOS de GAMES.md : le releve ci-dessous tourne sous Windows, il ne dit rien du Mac. Seuls les jeux essayes
+# a la main sur un Mac sont ici ; tous les autres restent « pas essaye ».
+MACOS = {
+    "AL7E": "demarre sans fenetre jusqu'a l'ecran titre (arm64 et x86_64) ; ecran du launcher : pas verifie",
+}
 
 
 def rom_index(rom_dir):
@@ -78,10 +83,11 @@ def try_game(project, roms, secs, seen):
 def write(rows):
     out = ["# Jeux natifs : ce que donne chaque jeu", "",
            "Relevé automatique de `native/tools/build_all.py`, sans aucune touche pressée : un essai court ne dit pas qu'un jeu est jouable.",
-           "Les modules restent sur le PC (`target/release/native`), jamais dans git.", "",
-           "| Jeu | Code | Overlays | Construction | Essai |", "|---|---|---|---|---|"]
+           "Les modules restent sur le PC (`target/release/native`), jamais dans git.",
+           "La colonne « Essai » vient d'un relevé sous Windows ; la colonne « macOS » est tenue à la main (`MACOS` dans `build_all.py`).", "",
+           "| Jeu | Code | Overlays | Construction | Essai (Windows) | macOS |", "|---|---|---|---|---|---|"]
     for r in sorted(rows, key=lambda r: r["game"]):
-        out.append("| %s | %s | %d | %s | %s |" % (r["game"], r["code"], r["overlays"], r["build"].replace("|", "/"), r["run"].replace("|", "/")))
+        out.append("| %s | %s | %d | %s | %s | %s |" % (r["game"], r["code"], r["overlays"], r["build"].replace("|", "/"), r["run"].replace("|", "/"), MACOS.get(r["code"], "pas essaye")))
     (NATIVE / "GAMES.md").write_text("\n".join(out) + "\n", encoding="utf8", newline="\n")
 
 
