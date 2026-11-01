@@ -812,7 +812,7 @@ fn mouse_look(mut running: ResMut<Running>, motion: Res<AccumulatedMouseMotion>,
             running.captured = running.free_camera != FreeCamera::Off || running.mouse_look;
             toasts.write(ShowToast(match running.free_camera {
                 FreeCamera::Off => tr("Free camera off", "Camera libre coupee"),
-                FreeCamera::Moving => tr("Free camera: mouse, arrows, Q and W. V freezes the scene.", "Camera libre : souris, fleches, Q et W. V gele la scene."),
+                FreeCamera::Moving => tr("Free camera: mouse, arrows, L and R. V freezes the scene.", "Camera libre : souris, fleches, L et R. V gele la scene."),
                 FreeCamera::Frozen => tr("Scene frozen. V resumes, C leaves.", "Scene gelee. V reprend, C quitte."),
             }.to_string()));
         }
