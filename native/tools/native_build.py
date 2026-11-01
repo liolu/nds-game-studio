@@ -12,6 +12,7 @@ le runtime trouve les donnees qu'il nomme dans nds_addr_<nom> au lieu de symbole
 """
 import argparse
 import hashlib
+import json
 import os
 import platform
 import re
@@ -158,6 +159,16 @@ class Game:
         return None
 
 
+def game_patches(code):
+    """Ce que le depot sait d'un jeu en plus de sa recette : noms de fonctions du SDK, accroches du runtime, adresses."""
+    path = HERE.parent / "games" / "patches.json"
+    return json.loads(path.read_text(encoding="utf8")).get(code, {}) if path.exists() else {}
+
+
+# Toujours definies : les autres jeux gardent 0, et le runtime sait que la fonction n'existe pas pour eux
+PATCH_VALUES = ["nds_fp_camera", "nds_fp_players", "nds_fp_index", "nds_fp_matrix", "nds_fp_yaw", "nds_net_screens", "nds_net_menu_screen"]
+
+
 def has_asm(text):
     return re.search(r"^\s*(asm|__asm)\b|\basm\s+\w", text, re.M) is not None
 
@@ -233,6 +244,10 @@ def main():
     if not a.recipe:
         game = Game(root, version)
     force = set(filter(None, a.lift.split(",")))
+    patches = game_patches(code)
+    for addr, name in patches.get("names", {}).items():
+        addr = int(addr, 16)
+        game.functions[addr] = (name, *game.functions[addr][1:])
 
     # 1. runtime : ce qu'il definit remplace le jeu
     rt_srcs = runtime_sources()
@@ -310,6 +325,7 @@ def main():
     lifter = arm2c.Lifter(game.memory, symbols, None, code_ptr)
     lifter.debug_pc = a.instrument
     lifter.sizes = {addr: game.functions[addr][1] for addr in by_addr}
+    lifter.hooks = {int(addr, 16): fn for addr, fn in patches.get("hooks", {}).items()}
     # plusieurs passes : les fonctions qui renvoient des drapeaux se decouvrent chez leurs appelants
     for _ in range(4):
         before = len(lifter.flag_funcs) + len(lifter.gosub_funcs)
@@ -365,6 +381,14 @@ def main():
     gen.append("extern char %s[]; void *const nds_entry_fn = %s;" % (names[game.entry], names[game.entry]))
     gen.append("const u32 nds_build_info_offset = 0x%x;" % game.build_info)
     gen.append("const int nds_has_c = %d;" % (1 if good else 0))
+    gen += ["const u32 %s = %s;" % (name, patches.get("values", {}).get(name, "0")) for name in PATCH_VALUES]
+    # des fonctions du jeu que le runtime appelle : leur vrai nom seulement pour le jeu qui les decrit
+    open_screen = patches.get("functions", {}).get("nds_open_screen")
+    if open_screen:
+        open_screen = open_screen if WIN32 else HOST_PREFIX + open_screen
+        gen.append("extern char %s[]; void *const nds_open_screen = %s;" % (open_screen, open_screen))
+    else:
+        gen.append("void *const nds_open_screen = 0;")
     gen_path = out / "lift" / "tables.c"
     gen_path.write_text("\n".join(gen) + "\n")
     gobj = out / "obj" / "tables.o"
@@ -411,6 +435,8 @@ def main():
         run(["dlltool", "-m", "i386", "--as-flags=--32", "-k", "-d", RUNTIME / "kernel32.def", "-l", k32])
         w32 = out / "libwinmm.a"
         run(["dlltool", "-m", "i386", "--as-flags=--32", "-k", "-d", RUNTIME / "winmm.def", "-l", w32])
+        ws2 = out / "libws2_32.a"
+        run(["dlltool", "-m", "i386", "--as-flags=--32", "-k", "-d", RUNTIME / "ws2_32.def", "-l", ws2])
     exe = out / (code + EXE)
     objs = rt_objs + game_objs + [lobj, gobj, aobj]
     rsp = out / "link.rsp"
@@ -419,7 +445,7 @@ def main():
         if WIN32:
             return run(["ld", "-m", "i386pe", "-e", "_nds_start", "--stack", "0x40000","--image-base", "0x10000000",
                         "--subsystem", "console", "--disable-dynamicbase", "--disable-reloc-section",
-                        "@" + str(rsp), k32, w32, "-o", exe])
+                        "@" + str(rsp), k32, w32, ws2, "-o", exe])
         # clang + ld64 : libSystem, AudioToolbox pour le son ; dyld entre dans main (os_posix.c), ld64 signe ad hoc la sortie arm64
         return run([*CC, "@" + str(rsp), "-framework", "AudioToolbox", "-o", exe])
     p = link([])

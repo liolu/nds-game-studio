@@ -17,13 +17,20 @@ Un texte s'écrit là où il sert, les deux langues côte à côte : `tr("Play",
 
 La fenêtre du studio s'ouvre sur le launcher, la bibliothèque des jeux de l'utilisateur.
 
-- **Ajouter un jeu** : glisser une rom DS (`.nds`, `.dsi`) dans la fenêtre. Elle est copiée dans le dossier
+- **Ajouter un jeu** : glisser une rom DS (`.nds`, `.dsi`) dans la fenêtre, ou en choisir une ou plusieurs avec
+  le bouton « Ajouter des jeux » (l'explorateur de fichiers de Windows, macOS ou Linux). Elle est copiée dans le dossier
   `rom`, à côté du launcher (le déposer soi-même dans ce dossier marche aussi). Le nom, l'éditeur et
   l'icône viennent de la rom. Sans rom, aucun jeu n'est montré : seulement un message qui explique ça.
 - **Journal** : `log/launcher.log`, à côté du launcher (le lancement précédent dans `launcher.old.log`) ;
   à joindre quand quelque chose ne marche pas.
 - **A gauche** : le logo, le bouton à 4 carrés (la vue de tous les jeux) et les jeux favoris.
 - **Vue des jeux** : en grille ou en liste avec les infos (éditeur, code, région, taille).
+  - **Dossiers** : glisser un jeu sur un dossier (ou sur Retour) l'y range.
+  - **Recherche** (Ctrl+F) : dans tous les dossiers, sur le nom, l'éditeur, le développeur, l'année, le genre, les tags,
+    la région et le code, sans tenir compte des accents.
+  - **Tri** : nom, éditeur, développeur, année, genre, tag, région, taille, décompilation ; un second clic inverse.
+    L'année, le genre et le développeur viennent de GameTDB, avec les jaquettes (même option). Les tags sont ceux
+    de l'utilisateur, posés dans les Parametres du jeu.
 - **Page d'un jeu** : son image, son nom, l'étoile des favoris et quatre boutons pour la zone du bas :
   - **Jouer** : lance le module natif du jeu, reconnu par le `game_code` de son `game.toml`. Il n'y a
     pas d'émulation : un jeu devient jouable avec sa décompilation et le runtime (étape 6 de la

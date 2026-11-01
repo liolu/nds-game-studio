@@ -182,6 +182,15 @@ extern u64 OS_SaveContext();
 extern u64 OS_LoadContext();
 typedef u64 (*Fn)();
 
+void net_irq(void);
+
+/* Accroche : le jeu attend ici en boucle qu'une interruption change une variable. Sur la console l'interruption arrive d'elle-meme ; ici elle
+ * n'arrive que si le code touche un registre, il faut donc lui laisser la place. */
+void nds_hook_spin(u32 r0) {
+    io_poll();
+    if (!in_irq && !(nds_cpsr & 0x80)) irq_deliver();
+}
+
 void irq_deliver(void) {
     OPEN();
     while (!in_irq && !(nds_cpsr & 0x80) && (REG32(IO + 0x208) & 1) && (REG32(IO + 0x210) & if_state)) {
@@ -193,6 +202,7 @@ void irq_deliver(void) {
         nds_cpsr |= 0x80;
         REG32(IO + 0x214) = if_state;
         CLOSE();
+        net_irq();
         vec(0, 0, 0, 0);
         OPEN();
         nds_cpsr = saved;

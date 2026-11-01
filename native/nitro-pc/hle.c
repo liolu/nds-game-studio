@@ -79,6 +79,8 @@ u32 RTC_GetDateTime(u32 d, u32 t) {
     date_time(d ? (RTCDate *)DS(d) : 0, t ? (RTCTime *)DS(t) : 0);
     return 0;
 }
+u32 RTC_GetTime(u32 t) { return RTC_GetDateTime(0, t); }
+u32 RTC_GetDate(u32 d) { return RTC_GetDateTime(d, 0); }
 u32 RTC_GetDateTimeAsync(u32 d, u32 t, u32 cb, u32 arg) {
     RTC_GetDateTime(d, t);
     if (cb) ((Fn)nds_call_target(cb))(0, arg);

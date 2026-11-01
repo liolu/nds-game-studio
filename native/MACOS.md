@@ -307,10 +307,12 @@ Done (code written, and checked where stated):
 
 Left:
 
-- **Windows has not been rebuilt or run** since steps 1-3 (and 4-8, which touch the shared runtime files): no GCC build
-  of the runtime, no golden frames (4.2), `arm2c_test.py` not run with WinLibs. Until that is done, "steps 1-3 change
-  nothing on Windows" is the intent and the result of `clang -target i686-w64-mingw32` checks (lifted code
-  byte-identical), not a measurement.
+- **Windows was rebuilt and run after merging the base mods** (2026-11-01): AL7E, AJTP and AR5E built from their recipes,
+  3600 headless frames each with and without `--interpolate`, `arm2c_test.py` passes with WinLibs (118 checks, linked with
+  `ld`, no 32-bit CRT needed). No golden-frame comparison: `9b83098` changes frames on purpose.
+- **Base mods on macOS:** `--interpolate`, `--first-person` and `net.c` go through `DS()` and `os.h` (`os_tcp_*`, BSD sockets in
+  `os_posix.c`). They compile on the Mac CI jobs, but none of them has been run on a Mac. Without its option, the 60 fps code
+  computes nothing (`interp_on` in `gx3d.c`).
 - `--with-c` on Windows lost its function pointers with step 3 (3.5). Translated mode, the default, is not affected.
 - **On-screen path through the launcher** (step 7): `native_check` gives an entirely black screenshot on macOS, with the
   packaged toolchain and the dev one alike. The module itself dumps the right frames, so the fault is between the shared

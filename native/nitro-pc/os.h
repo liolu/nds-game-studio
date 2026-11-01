@@ -1,5 +1,5 @@
 /* Couche systeme : tout ce que le runtime demande a la plateforme (memoire, fichiers, fils, temps, son).
- * os_win32.c est la seule source qui appelle Win32 (kernel32.def, winmm.def) ; sur macOS, os_posix.c (libSystem) et
+ * os_win32.c est la seule source qui appelle Win32 (kernel32.def, winmm.def, ws2_32.def) ; sur macOS, os_posix.c (libSystem) et
  * audio_coreaudio.c (AudioToolbox). Le reste du runtime ne voit que ceci. */
 #ifndef OS_H
 #define OS_H
@@ -75,6 +75,19 @@ void os_local_time(OsTime *t);
 /* ------------------------------------------------------------------ memoire partagee avec le launcher */
 /* Ouvre la memoire d'images creee par le launcher sous ce nom et la projette. 0 si introuvable. */
 void *os_shm_open(const char *name);
+
+/* ------------------------------------------------------------------ reseau TCP sans attente (net.c) */
+#define OS_NO_SOCKET 0xFFFFFFFFu
+/* Ecoute sur ce port. OS_NO_SOCKET si le port ne s'ouvre pas. */
+u32 os_tcp_listen(u32 port);
+/* OS_NO_SOCKET tant que personne n'arrive. */
+u32 os_tcp_accept(u32 listener);
+/* Commence la connexion, sans l'attendre. Le nom de l'hote, lui, est resolu tout de suite. OS_NO_SOCKET si c'est impossible. */
+u32 os_tcp_connect(const char *host, u32 port);
+void os_tcp_send(u32 s, const void *data, u32 size);
+/* Octets lus, 0 si la connexion est perdue, -1 s'il n'y a rien pour l'instant (ou si elle n'est pas encore etablie). */
+int os_tcp_recv(u32 s, void *buf, u32 max);
+void os_tcp_close(u32 s);
 
 /* ------------------------------------------------------------------ exceptions du processeur (registres a effets, --with-c) */
 enum { OS_FAULT_OTHER = 0, OS_FAULT_ACCESS, OS_FAULT_STEP };

@@ -116,6 +116,7 @@ def add_sources(z):
         z.write(HERE / name, "native/tools/" + name)
     for f in sorted((NATIVE / "nitro-pc").iterdir()):
         z.write(f, "native/nitro-pc/" + f.name)
+    z.write(NATIVE / "games" / "patches.json", "native/games/patches.json")
     for f in sorted((NATIVE / "games").glob("*.json.gz")):
         z.write(f, "native/games/" + f.name, zipfile.ZIP_STORED)
 

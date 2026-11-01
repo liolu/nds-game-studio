@@ -12,9 +12,15 @@
 //! ```json
 //! { "format": 1, "id": "mon-mod", "name": "Mon mod", "version": "1.0.0", "author": "...", "description": "...", "games": ["AL7E"] }
 //! ```
+//!
+//! Dans le dossier d'un mod, un dossier par code de jeu (`AL7E/`) garde ce qui ne vaut que pour ce jeu : seul celui du jeu est installé. Un
+//! `native.json`, `{"features": ["interpolate"]}`, demande au runtime natif une fonction qu'il a déjà : un mod ne lui apporte toujours aucun code.
+//! Le dépôt de base de l'app ([`BASE_REPOSITORY`]) est lu de la même façon, si l'option est active.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
@@ -35,6 +41,14 @@ const TEMP: &str = ".temporaire";
 /// Au-delà, ce n'est plus un mod : une archive piégée qui remplirait le disque.
 const MAX_UNPACKED: u64 = 4 << 30;
 const MAX_DEPTH: usize = 4;
+const NATIVE: &str = "native.json";
+/// L'adresse de l'hôte pour une partie en réseau.
+const HOST_FILE: &str = "hote.txt";
+const BASE_FILE: &str = "depot-de-base.txt";
+/// Les mods de l'app : Options > Launcher les montre ou non dans l'onglet Moding.
+pub const BASE_REPOSITORY: &str = "https://github.com/liolu/nds-game-studio-mods";
+/// Le port des parties en réseau.
+pub const NET_PORT: u16 = 27016;
 /// Les extensions que propose le choix d'un fichier.
 pub const ARCHIVES: [&str; 8] = ["zip", "7z", "rar", "tar", "gz", "tgz", "xz", "bz2"];
 
@@ -74,6 +88,8 @@ struct State {
 
 /// Un mod installé, pour la page du jeu.
 pub struct Pack {
+    /// Ce mod active les parties en réseau : la page demande l'adresse de l'hôte.
+    pub network: bool,
     pub id: String,
     pub name: String,
     pub version: String,
@@ -105,12 +121,109 @@ pub fn list(code: &str) -> Vec<Pack> {
         .map(|entry| {
             let manifest: Manifest = std::fs::read(packs_dir(&dir).join(&entry.id).join(MANIFEST)).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default();
             let name = if manifest.name.is_empty() { entry.id.clone() } else { manifest.name };
-            Pack { id: entry.id, name, version: manifest.version, author: manifest.author, description: manifest.description, enabled: entry.enabled, source: entry.source }
+            let network = pack_features(&packs_dir(&dir).join(&entry.id)).iter().any(|f| f == "network");
+            Pack { network, id: entry.id, name, version: manifest.version, author: manifest.author, description: manifest.description, enabled: entry.enabled, source: entry.source }
         })
         .collect()
 }
 
-/// Active ou coupe un mod, puis refait la copie de la rom.
+/// Ce que ce mod demande au runtime natif.
+fn pack_features(pack: &Path) -> Vec<String> {
+    #[derive(Deserialize)]
+    struct Native {
+        #[serde(default)]
+        features: Vec<String>,
+    }
+    std::fs::read(pack.join(NATIVE)).ok().and_then(|bytes| serde_json::from_slice::<Native>(&bytes).ok()).map_or(Vec::new(), |n| n.features)
+}
+
+/// Les arguments du module natif d'après les mods actifs. Seules les fonctions connues passent : un mod ne choisit pas la ligne de commande.
+/// « Les originaux » coupe aussi ces fonctions.
+pub fn native_args(code: &str) -> Vec<OsString> {
+    if mods::has_modded_rom(code) && !mods::is_on(code) {
+        return Vec::new();
+    }
+    let dir = mods::mod_dir(code);
+    let mut args: Vec<OsString> = Vec::new();
+    let mut features: Vec<String> = load_state(&dir).packs.iter().filter(|p| p.enabled).flat_map(|p| pack_features(&packs_dir(&dir).join(&p.id))).collect();
+    features.sort();
+    features.dedup();
+    for feature in features {
+        match feature.as_str() {
+            "interpolate" => args.push("--interpolate".into()),
+            "first_person" => args.push("--first-person".into()),
+            "network" => {
+                args.push("--net-port".into());
+                args.push(NET_PORT.to_string().into());
+                let host = host_address(code);
+                if !host.is_empty() {
+                    args.push("--net-join".into());
+                    args.push(host.into());
+                }
+            }
+            _ => {}
+        }
+    }
+    args
+}
+
+pub fn host_address(code: &str) -> String {
+    std::fs::read_to_string(mods::mod_dir(code).join(HOST_FILE)).unwrap_or_default().trim().to_string()
+}
+
+/// Seuls des chiffres, des lettres, `.`, `-`, `:` : l'adresse devient un argument du module.
+pub fn set_host_address(code: &str, address: &str) {
+    let clean: String = address.trim().chars().filter(|c| c.is_ascii_alphanumeric() || ".-:".contains(*c)).collect();
+    let dir = mods::mod_dir(code);
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(dir.join(HOST_FILE), clean);
+}
+
+static BASE_ENABLED: AtomicU8 = AtomicU8::new(2);
+
+/// Le dépôt de base est montré dans l'onglet Moding : oui tant que l'utilisateur ne l'a pas coupé.
+pub fn base_enabled() -> bool {
+    match BASE_ENABLED.load(Ordering::Relaxed) {
+        2 => {
+            let on = std::fs::read_to_string(crate::save::data_dir().join("mods").join(BASE_FILE)).map_or(true, |text| text.trim() != "0");
+            BASE_ENABLED.store(on as u8, Ordering::Relaxed);
+            on
+        }
+        value => value == 1,
+    }
+}
+
+pub fn set_base_enabled(on: bool) {
+    BASE_ENABLED.store(on as u8, Ordering::Relaxed);
+    let dir = crate::save::data_dir().join("mods");
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(dir.join(BASE_FILE), if on { "1" } else { "0" });
+}
+
+/// Une fois par jeu depuis le démarrage : ouvrir l'onglet Moding lit le dépôt de base, s'il est actif.
+pub fn offer_base(code: &str) {
+    static ASKED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    if !base_enabled() || mods::running() || preview(code).is_some() {
+        return;
+    }
+    let mut asked = ASKED.lock().unwrap();
+    if !asked.iter().any(|c| c == code) {
+        asked.push(code.to_string());
+        find(code, BASE_REPOSITORY);
+    }
+}
+
+/// Un mod qui ne fait que demander une fonction au runtime n'a pas besoin de l'outil de mod.
+fn has_files(pack: &Path) -> bool {
+    is_structured(pack)
+}
+
+fn any_files(code: &str) -> bool {
+    let dir = mods::mod_dir(code);
+    load_state(&dir).packs.iter().any(|p| has_files(&packs_dir(&dir).join(&p.id))) || mods::exported(code)
+}
+
+/// Active ou coupe un mod, puis refait la copie de la rom si ce mod y change quelque chose.
 pub fn set_enabled(code: &str, rom: &Path, id: &str, enabled: bool) {
     let dir = mods::mod_dir(code);
     let mut state = load_state(&dir);
@@ -118,7 +231,9 @@ pub fn set_enabled(code: &str, rom: &Path, id: &str, enabled: bool) {
         entry.enabled = enabled;
     }
     let _ = save_state(&dir, &state);
-    mods::apply(code, rom);
+    if has_files(&packs_dir(&dir).join(id)) {
+        mods::apply(code, rom);
+    }
 }
 
 /// Retire un mod installé : sa copie, jamais le fichier d'où il vient. La copie de la rom est refaite.
@@ -127,8 +242,11 @@ pub fn remove(code: &str, rom: &Path, id: &str) {
     let mut state = load_state(&dir);
     state.packs.retain(|p| p.id != id);
     let _ = save_state(&dir, &state);
+    let had_files = has_files(&packs_dir(&dir).join(id));
     let _ = std::fs::remove_dir_all(packs_dir(&dir).join(id));
-    mods::apply(code, rom);
+    if had_files {
+        mods::apply(code, rom);
+    }
 }
 
 // --------------------------------------------------------------------------------------------
@@ -324,11 +442,13 @@ fn clean_id(text: &str) -> String {
 
 fn not_meta(name: &str) -> bool {
     let lower = name.to_lowercase();
-    name != MANIFEST && !lower.starts_with("readme") && !lower.starts_with("license") && !lower.starts_with("licence") && !lower.ends_with(".md") && !lower.starts_with(".git")
+    name != MANIFEST && name != NATIVE && !lower.starts_with("readme") && !lower.starts_with("license") && !lower.starts_with("licence") && !lower.ends_with(".md") && !lower.starts_with(".git")
 }
 
-/// Met un mod dans `paquets/<id>` sous sa forme habituelle. Rend le nombre de fichiers.
-fn install_one(mod_dir: &Path, from: &Path, id: &str) -> Result<u64, String> {
+/// Met un mod dans `paquets/<id>` sous sa forme habituelle : son dossier pour ce jeu s'il en a un, sinon tout. Rend le nombre de fichiers.
+fn install_one(mod_dir: &Path, code: &str, top: &Path, id: &str) -> Result<u64, String> {
+    let for_game = top.join(code);
+    let from = if for_game.is_dir() { for_game.as_path() } else { top };
     let target = packs_dir(mod_dir).join(id);
     let new = packs_dir(mod_dir).join(format!("{id}{TEMP}"));
     let _ = std::fs::remove_dir_all(&new);
@@ -343,8 +463,12 @@ fn install_one(mod_dir: &Path, from: &Path, id: &str) -> Result<u64, String> {
     } else {
         copied += copy_tree(from, &new.join(FILES), &not_meta)?;
     }
-    if from.join(MANIFEST).is_file() {
-        std::fs::copy(from.join(MANIFEST), new.join(MANIFEST)).map_err(|e| e.to_string())?;
+    if top.join(MANIFEST).is_file() {
+        std::fs::copy(top.join(MANIFEST), new.join(MANIFEST)).map_err(|e| e.to_string())?;
+    }
+    if from.join(NATIVE).is_file() {
+        std::fs::copy(from.join(NATIVE), new.join(NATIVE)).map_err(|e| e.to_string())?;
+        copied += 1;
     }
     if copied == 0 {
         let _ = std::fs::remove_dir_all(&new);
@@ -389,7 +513,7 @@ fn install_tree(mod_dir: &Path, root: &Path, code: &str, source: &str, fallback_
     let mut names = Vec::new();
     for (folder, manifest) in found {
         let id = clean_id(if manifest.id.is_empty() { &manifest.name } else { &manifest.id });
-        install_one(mod_dir, &folder, &id)?;
+        install_one(mod_dir, code, &folder, &id)?;
         match state.packs.iter_mut().find(|p| p.id == id) {
             Some(entry) => entry.source = source.to_string(),
             None => state.packs.push(Entry { id: id.clone(), enabled: enable_new, source: source.to_string(), tag: String::new() }),
@@ -409,6 +533,9 @@ fn stem_of(path: &Path) -> String {
 
 fn finish(code: &str, rom: &Path, names: Vec<String>) -> Result<(), String> {
     mods::say(t!("Installed: {}", "Installe : {}", names.join(", ")));
+    if !any_files(code) {
+        return Ok(());
+    }
     if !mods::installed() {
         mods::say(tr("Download the mod tools to play with it.", "Telechargez les outils de mod pour jouer avec.").to_string());
         return Ok(());
@@ -712,7 +839,7 @@ pub fn install_found(code: &str, rom: &Path, id: &str) {
             let _ = std::fs::remove_dir_all(&temp);
             mods::say(t!("Installing {}...", "Installation de {}...", found.name));
             let from = from_release(&preview, found, &temp);
-            let installed = from.and_then(|asset| install_one(&dir, asset.as_deref().unwrap_or(&found.folder), &found.id));
+            let installed = from.and_then(|asset| install_one(&dir, &code, asset.as_deref().unwrap_or(&found.folder), &found.id));
             let _ = std::fs::remove_dir_all(&temp);
             installed?;
             let mut state = load_state(&dir);
@@ -882,6 +1009,32 @@ mod tests {
         install_tree(&mods, &source, "AL7E", "o/r", "r").unwrap();
         assert!(!load_state(&mods).packs[0].enabled);
         assert!(mods.join("paquets/m/fichiers/new.png").is_file() && !mods.join("paquets/m/fichiers/old.png").exists());
+    }
+
+    #[test]
+    fn a_mod_folder_gives_only_this_games_part() {
+        let (source, mods_dir) = (temp("games-s"), temp("games-m"));
+        write(source.join("fps/nds-mod.json"), r#"{"id":"fps","games":["AL7E","AR5E"]}"#);
+        write(source.join("fps/AL7E/native.json"), r#"{"features":["first_person"]}"#);
+        write(source.join("fps/AL7E/fichiers/a.png"), "a");
+        write(source.join("fps/AR5E/fichiers/b.png"), "b");
+        install_tree(&mods_dir, &source, "AL7E", "o/r", "r").unwrap();
+        let pack = mods_dir.join("paquets/fps");
+        assert!(pack.join("fichiers/a.png").is_file() && !pack.join("fichiers/b.png").exists());
+        assert!(pack.join(MANIFEST).is_file());
+        assert_eq!(pack_features(&pack), ["first_person"]);
+    }
+
+    #[test]
+    fn a_mod_with_only_runtime_features_needs_no_tool() {
+        let (source, mods_dir) = (temp("feat-s"), temp("feat-m"));
+        write(source.join("nds-mod.json"), r#"{"id":"m"}"#);
+        write(source.join("native.json"), r#"{"features":["interpolate"]}"#);
+        install_tree(&mods_dir, &source, "AL7E", "o/r", "r").unwrap();
+        let pack = mods_dir.join("paquets/m");
+        assert!(!has_files(&pack));
+        assert_eq!(pack_features(&pack), ["interpolate"]);
+        assert!(!pack.join(FILES).join(NATIVE).exists());
     }
 
     #[test]

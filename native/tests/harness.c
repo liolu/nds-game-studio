@@ -374,6 +374,11 @@ static void *run_tests(void *arg) {
 #if NDS_IDENTITY
 __declspec(dllimport) void *__stdcall VirtualAlloc(void *addr, unsigned long size, unsigned long type, unsigned long prot);
 
+/* lien sans CRT (link_win32 de arm2c_test.py) : exit vide le tampon de printf */
+int main(void);
+void __main(void) {}
+void harness_start(void) { exit(main()); }
+
 int main(void) {
     void *ram = (void *)0x02000000u;
     if (VirtualAlloc(ram, 0x400000, 0x3000 /* MEM_COMMIT | MEM_RESERVE */, 0x04 /* PAGE_READWRITE */) != ram) {

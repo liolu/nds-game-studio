@@ -322,3 +322,84 @@ void os_audio_submit(OsAudio *a) {
     waveOutWrite(a->dev, &a->hdr[a->cur], sizeof(WaveHdr));
     a->cur = (a->cur + 1) % BUFFERS;
 }
+
+/* ------------------------------------------------------------------ reseau TCP */
+typedef struct { u16 family, port; u32 addr; u8 zero[8]; } SockAddr;
+typedef struct { u32 name, aliases; u16 type, length; u32 **list; } HostEnt;
+IMPORT int WINAPI WSAStartup(u16, void *);
+IMPORT u32 WINAPI socket(int, int, int);
+IMPORT int WINAPI bind(u32, const SockAddr *, int);
+IMPORT int WINAPI listen(u32, int);
+IMPORT u32 WINAPI accept(u32, SockAddr *, int *);
+IMPORT int WINAPI connect(u32, const SockAddr *, int);
+IMPORT int WINAPI send(u32, const void *, int, int);
+IMPORT int WINAPI recv(u32, void *, int, int);
+IMPORT int WINAPI closesocket(u32);
+IMPORT int WINAPI ioctlsocket(u32, long, u32 *);
+IMPORT int WINAPI setsockopt(u32, int, int, const void *, int);
+IMPORT int WINAPI WSAGetLastError(void);
+IMPORT u32 WINAPI inet_addr(const char *);
+IMPORT HostEnt *WINAPI gethostbyname(const char *);
+#define FIONBIO 0x8004667Eu
+#define WSA_WOULD_BLOCK 10035
+#define WSA_NOT_CONNECTED 10057
+
+static void tcp_start(void) {
+    static int ready;
+    static u8 wsa[512];
+    if (!ready) WSAStartup(0x0202, wsa);
+    ready = 1;
+}
+
+static void tcp_setup(u32 s) {
+    u32 on = 1;
+    ioctlsocket(s, FIONBIO, &on);
+    setsockopt(s, 6, 1, &on, 4); /* TCP_NODELAY */
+}
+
+u32 os_tcp_listen(u32 port) {
+    tcp_start();
+    u32 s = socket(2, 1, 6), on = 1;
+    if (s == OS_NO_SOCKET) return s;
+    setsockopt(s, 0xFFFF, 4, &on, 4); /* SO_REUSEADDR */
+    SockAddr at = {2, (u16)(port << 8 | port >> 8), 0, {0}};
+    if (bind(s, &at, sizeof at) || listen(s, 4)) {
+        closesocket(s);
+        return OS_NO_SOCKET;
+    }
+    ioctlsocket(s, FIONBIO, &on);
+    return s;
+}
+
+u32 os_tcp_accept(u32 listener) {
+    u32 s = accept(listener, 0, 0);
+    if (s != OS_NO_SOCKET) tcp_setup(s);
+    return s;
+}
+
+u32 os_tcp_connect(const char *host, u32 port) {
+    tcp_start();
+    u32 addr = inet_addr(host);
+    if (addr == 0xFFFFFFFFu) {
+        HostEnt *found = gethostbyname(host);
+        if (!found || !found->list || !found->list[0]) return OS_NO_SOCKET;
+        addr = *found->list[0];
+    }
+    u32 s = socket(2, 1, 6);
+    if (s == OS_NO_SOCKET) return s;
+    tcp_setup(s);
+    SockAddr at = {2, (u16)(port << 8 | port >> 8), addr, {0}};
+    connect(s, &at, sizeof at);
+    return s;
+}
+
+void os_tcp_send(u32 s, const void *data, u32 size) { send(s, data, (int)size, 0); }
+
+int os_tcp_recv(u32 s, void *buf, u32 max) {
+    int got = recv(s, buf, (int)max, 0);
+    if (got >= 0) return got;
+    int error = WSAGetLastError();
+    return error == WSA_WOULD_BLOCK || error == WSA_NOT_CONNECTED ? -1 : 0;
+}
+
+void os_tcp_close(u32 s) { closesocket(s); }

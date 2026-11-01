@@ -111,6 +111,7 @@ class Lifter:
         self.th = Cs(CS_ARCH_ARM, CS_MODE_THUMB)
         self.arm.detail = self.th.detail = True
         self.new_subs = {}
+        self.hooks = {}  # adresse -> fonction du runtime appelee a l'entree, avec r0
         self.unhandled = []
         self.flag_funcs = set()  # fonctions dont l'appelant lit les drapeaux au retour
         self.flag_pass = True
@@ -660,6 +661,8 @@ class Lifter:
         ]
         if name in self.gosub_funcs:
             head.append("  static void *const gs_[] = { %s0 };" % "".join("&&L%08x, " % a for a in self.gosub_labels))
+        if entry in self.hooks:
+            head.append("  { extern void %s(u32); %s(r0); }" % (self.hooks[entry], self.hooks[entry]))
         body = "\n".join(head) + "\n" + text + "\n  " + RET + "\n}\n"
         if name in self.flag_funcs:
             body = body.replace(RET, "{ SAVEF(); " + RET + " }")

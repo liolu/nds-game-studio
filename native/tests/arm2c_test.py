@@ -203,6 +203,19 @@ def toolchain():
     return [cc], lift_flags, rt, harness, ["-lpthread"], ""
 
 
+def link_win32(objs, exe, out):
+    """WinLibs n'a pas de CRT 32 bits (-lmingw32, -lgcc) : comme les modules des jeux, ld et des bibliotheques d'import."""
+    defs = out / "msvcrt.def"
+    write(defs, "LIBRARY msvcrt.dll\nEXPORTS\nexit\nmemset\nprintf\nputchar\nputs\nvprintf\n_setjmp3\nlongjmp\n")
+    libs = []
+    for path in (defs, RUNTIME / "kernel32.def"):
+        lib = out / ("lib%s.a" % path.stem)
+        subprocess.run(["dlltool", "-m", "i386", "--as-flags=--32", "-k", "-d", str(path), "-l", str(lib)], check=True)
+        libs.append(str(lib))
+    return subprocess.run(["ld", "-m", "i386pe", "-e", "_harness_start", "--image-base", "0x10000000", "--disable-dynamicbase", "--subsystem", "console", *objs, *libs, "-o", str(exe)],
+                          capture_output=True, text=True)
+
+
 def build_and_run(out, variant, arch=None):
     cc, lift_flags, rt_flags, harness_flags, link_flags, exe_suffix = toolchain()
     if arch:
@@ -221,7 +234,10 @@ def build_and_run(out, variant, arch=None):
             sys.exit("%s : erreur de compilation (%s)" % (src.name, variant))
         objs.append(str(obj))
     exe = out / ("harness-%s%s" % (variant, exe_suffix))
-    p = subprocess.run(cc + [*objs, "-o", str(exe)] + link_flags, capture_output=True, text=True)
+    if sys.platform == "win32":
+        p = link_win32(objs, exe, out)
+    else:
+        p = subprocess.run(cc + [*objs, "-o", str(exe)] + link_flags, capture_output=True, text=True)
     if p.returncode:
         sys.exit(p.stderr[:4000] + "\nedition de liens : erreur (%s)" % variant)
     p = subprocess.run([str(exe)], capture_output=True, text=True)

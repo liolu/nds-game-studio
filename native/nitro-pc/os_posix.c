@@ -12,12 +12,16 @@
 #include <limits.h>
 #include <mach/mach.h>
 #include <mach/mach_time.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <pthread.h>
 #include <sched.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -385,3 +389,54 @@ static void no_trap(void) {
 }
 void os_fault_set_step(OsFault *f, int on) { if (on) no_trap(); }
 void os_fault_call(OsFault *f, void (*fn)(void)) { no_trap(); }
+
+/* ------------------------------------------------------------------ reseau TCP */
+static void tcp_setup(int s) {
+    int on = 1;
+    fcntl(s, F_SETFL, fcntl(s, F_GETFL, 0) | O_NONBLOCK);
+    setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &on, sizeof on);
+    setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof on); /* sans cela, ecrire a un joueur parti arrete le jeu */
+}
+
+u32 os_tcp_listen(u32 port) {
+    int s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP), on = 1;
+    if (s < 0) return OS_NO_SOCKET;
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &on, sizeof on);
+    struct sockaddr_in at = {.sin_family = AF_INET, .sin_port = htons((u16)port), .sin_addr.s_addr = htonl(INADDR_ANY)};
+    if (bind(s, (struct sockaddr *)&at, sizeof at) || listen(s, 4)) {
+        close(s);
+        return OS_NO_SOCKET;
+    }
+    fcntl(s, F_SETFL, fcntl(s, F_GETFL, 0) | O_NONBLOCK);
+    return (u32)s;
+}
+
+u32 os_tcp_accept(u32 listener) {
+    int s = accept((int)listener, 0, 0);
+    if (s < 0) return OS_NO_SOCKET;
+    tcp_setup(s);
+    return (u32)s;
+}
+
+u32 os_tcp_connect(const char *host, u32 port) {
+    struct addrinfo want = {.ai_family = AF_INET, .ai_socktype = SOCK_STREAM}, *found = 0;
+    if (getaddrinfo(host, 0, &want, &found) || !found) return OS_NO_SOCKET;
+    struct sockaddr_in at = *(struct sockaddr_in *)found->ai_addr;
+    freeaddrinfo(found);
+    at.sin_port = htons((u16)port);
+    int s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (s < 0) return OS_NO_SOCKET;
+    tcp_setup(s);
+    connect(s, (struct sockaddr *)&at, sizeof at);
+    return (u32)s;
+}
+
+void os_tcp_send(u32 s, const void *data, u32 size) { (void)!send((int)s, data, size, 0); }
+
+int os_tcp_recv(u32 s, void *buf, u32 max) {
+    ssize_t got = recv((int)s, buf, max, 0);
+    if (got >= 0) return (int)got;
+    return errno == EAGAIN || errno == EWOULDBLOCK || errno == ENOTCONN || errno == EINPROGRESS || errno == EINTR ? -1 : 0;
+}
+
+void os_tcp_close(u32 s) { close((int)s); }
