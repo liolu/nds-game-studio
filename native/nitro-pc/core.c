@@ -1,4 +1,4 @@
-/* Demarrage : memoire aux adresses DS, chargement de la rom, exceptions pour les registres, BIOS, threads. */
+/* Demarrage : memoire DS (fenetre nds_mem), chargement de la rom, exceptions pour les registres, BIOS, threads. */
 #include "nitro.h"
 
 /* sans en-tete systeme : la boite a outils du launcher n'en livre aucun */
@@ -11,20 +11,24 @@ u32 nds_cpsr = 0x1F;
 u32 nds_pc, nds_r[6]; /* derniere instruction ARM et registres, dans les versions de debug */
 u8 *nds_rom;
 u32 nds_rom_size;
+#if !NDS_IDENTITY
+uptr nds_mem; /* base de la fenetre DS, fixee par nds_start */
+#endif
 
-extern const struct { u32 arm; void *x86; } nds_fn_table[];
-extern const unsigned nds_fn_count;
-extern const struct { u32 at; void *x86; } nds_fixups[];
-extern const unsigned nds_fixup_count;
 extern void *const nds_entry_fn;
 
 /* ------------------------------------------------------------------ petites fonctions sans libc */
+#if defined(__i386__)
 void nds_copy(void *dst, const void *src, u32 n) {
     __asm__ volatile("rep movsb" : "+D"(dst), "+S"(src), "+c"(n) : : "memory");
 }
 void nds_zero(void *dst, u32 n) {
     __asm__ volatile("rep stosb" : "+D"(dst), "+c"(n) : "a"(0) : "memory");
 }
+#else /* 64 bits : libSystem fournit memcpy/memset */
+void nds_copy(void *dst, const void *src, u32 n) { __builtin_memcpy(dst, src, n); }
+void nds_zero(void *dst, u32 n) { __builtin_memset(dst, 0, n); }
+#endif
 
 static int fmt_u(char *o, u32 v, int base, int width) {
     char tmp[16];
@@ -53,8 +57,7 @@ static void vlog(const char *fmt, va_list ap) {
         else buf[w++] = *fmt;
     }
     buf[w++] = '\n';
-    unsigned long written;
-    WriteFile(GetStdHandle((unsigned long)-12), buf, w, &written, 0);
+    os_stderr_write(buf, w);
 }
 
 void nds_log(const char *fmt, ...) { va_list ap; va_start(ap, fmt); vlog(fmt, ap); va_end(ap); }
@@ -64,7 +67,7 @@ void nds_fatal(const char *fmt, ...) {
     va_start(ap, fmt);
     vlog(fmt, ap);
     va_end(ap);
-    ExitProcess(3);
+    os_exit(3);
 }
 
 void nds_unhandled(const char *f, u32 pc) { nds_fatal("instruction non traduite %s @%x", f, pc); }
@@ -75,21 +78,7 @@ static const char *argv_[32];
 static int argc_;
 
 static void parse_args(void) {
-    static char line[2048];
-    const char *c = GetCommandLineA();
-    int n = 0;
-    while (*c && n < 2047) line[n++] = *c++;
-    line[n] = 0;
-    char *p = line;
-    while (*p && argc_ < 32) {
-        while (*p == ' ') p++;
-        if (!*p) break;
-        char end = ' ';
-        if (*p == '"') { end = '"'; p++; }
-        argv_[argc_++] = p;
-        while (*p && *p != end) p++;
-        if (*p) *p++ = 0;
-    }
+    argc_ = os_get_args(argv_, 32);
 }
 
 int nds_arg(const char *name, const char **value) {
@@ -112,24 +101,17 @@ void nds_watch_hit(u32 a, u32 v) {
     if (hits++ < 12) nds_log("ecriture %x = %x par arm=%x, r0=%x r1=%x r2=%x r3=%x image %u", a, v, nds_pc, nds_r[0], nds_r[1], nds_r[2], nds_r[3], nds_frame);
 }
 u32 nds_ring[4096], nds_ring_pos;
-void __cyg_profile_func_enter(void *f, void *c) { nds_ring[nds_ring_pos++ & 4095] = (u32)f; }
+void __cyg_profile_func_enter(void *f, void *c) { nds_ring[nds_ring_pos++ & 4095] = (u32)(uptr)f; } /* 64 bits : 32 bits bas */
 void __cyg_profile_func_exit(void *f, void *c) {}
-#endif
-
-/* ------------------------------------------------------------------ pointeurs de fonctions ARM -> x86 */
-u32 nds_call_target(u32 a) {
-    u32 key = a & ~1u;
-    if (key < 0x01000000u || key >= 0x03000000u) return a; /* deja une adresse x86 */
-    unsigned lo = 0, hi = nds_fn_count;
-    while (lo < hi) {
-        unsigned mid = (lo + hi) / 2;
-        if (nds_fn_table[mid].arm < key) lo = mid + 1;
-        else hi = mid;
-    }
-    if (lo < nds_fn_count && nds_fn_table[lo].arm == key) return (u32)nds_fn_table[lo].x86;
-    nds_fatal("saut vers une adresse DS sans fonction : %x", a);
-    return 0;
+#if !NDS_IDENTITY
+/* HOST2DS des versions instrumentees : un pointeur hors de la fenetre veut dire du code du jeu sur une pile etrangere */
+u32 nds_host2ds(const volatile void *p) {
+    uptr d = (uptr)p - nds_mem;
+    if (d > 0xFFFFFFFFu) nds_fatal("pointeur hors de la memoire DS : %x%8x (fenetre %x%8x) arm=%x", (u32)((u64)(uptr)p >> 32), (u32)(uptr)p, (u32)((u64)nds_mem >> 32), (u32)nds_mem, nds_pc);
+    return (u32)d;
 }
+#endif
+#endif
 
 /* ------------------------------------------------------------------ CP15 */
 static u32 cp15_dtcm = 0x027E000Au, cp15_ctrl = 0x00052078u;
@@ -156,29 +138,30 @@ void nds_cpsr_changed(void) {
 }
 
 /* ------------------------------------------------------------------ BIOS (swi) */
+/* src, dst : adresses DS */
 static u32 lz77(u32 src, u32 dst, int vram) {
-    u32 head = *(u32 *)src;
+    u32 head = *(u32 *)DS(src);
     u32 left = head >> 8, s = src + 4, d = dst;
     while (left) {
-        u8 flags = *(u8 *)s++;
+        u8 flags = *DS(s++);
         for (int i = 0; i < 8 && left; i++, flags <<= 1) {
             if (flags & 0x80) {
-                u32 b = (*(u8 *)s << 8) | *(u8 *)(s + 1);
+                u32 b = (*DS(s) << 8) | *DS(s + 1);
                 s += 2;
                 u32 n = (b >> 12) + 3, off = (b & 0xFFF) + 1;
                 for (u32 k = 0; k < n && left; k++, left--, d++) {
-                    u8 v = *(u8 *)(d - off);
+                    u8 v = *DS(d - off);
                     if (vram) {
-                        u16 *p = (u16 *)(d & ~1u);
+                        u16 *p = (u16 *)DS(d & ~1u);
                         *p = (d & 1) ? (*p & 0xFF) | (v << 8) : (*p & 0xFF00) | v;
-                    } else *(u8 *)d = v;
+                    } else *DS(d) = v;
                 }
             } else {
-                u8 v = *(u8 *)s++;
+                u8 v = *DS(s++);
                 if (vram) {
-                    u16 *p = (u16 *)(d & ~1u);
+                    u16 *p = (u16 *)DS(d & ~1u);
                     *p = (d & 1) ? (*p & 0xFF) | (v << 8) : (*p & 0xFF00) | v;
-                } else *(u8 *)d = v;
+                } else *DS(d) = v;
                 d++; left--;
             }
         }
@@ -187,41 +170,41 @@ static u32 lz77(u32 src, u32 dst, int vram) {
 }
 
 static void rl_uncomp(u32 src, u32 dst, int vram) {
-    u32 left = *(u32 *)src >> 8, s = src + 4, d = dst;
+    u32 left = *(u32 *)DS(src) >> 8, s = src + 4, d = dst;
     while (left) {
-        u8 c = *(u8 *)s++;
+        u8 c = *DS(s++);
         u32 n = (c & 0x80) ? (c & 0x7F) + 3 : (c & 0x7F) + 1;
-        u8 rep = (c & 0x80) ? *(u8 *)s++ : 0;
+        u8 rep = (c & 0x80) ? *DS(s++) : 0;
         for (u32 k = 0; k < n && left; k++, left--, d++) {
-            u8 v = (c & 0x80) ? rep : *(u8 *)s++;
+            u8 v = (c & 0x80) ? rep : *DS(s++);
             if (vram) {
-                u16 *p = (u16 *)(d & ~1u);
+                u16 *p = (u16 *)DS(d & ~1u);
                 *p = (d & 1) ? (*p & 0xFF) | (v << 8) : (*p & 0xFF00) | v;
-            } else *(u8 *)d = v;
+            } else *DS(d) = v;
         }
     }
 }
 
 static void huff_uncomp(u32 src, u32 dst) {
-    u32 head = *(u32 *)src;
+    u32 head = *(u32 *)DS(src);
     u32 left = head >> 8, bits = head & 15;
-    u8 *tree = (u8 *)(src + 4);
-    u32 *in = (u32 *)(src + 4 + (tree[0] + 1) * 2);
+    u32 tree = src + 4; /* noeuds : adresses DS (l'alignement porte sur l'adresse DS) */
+    u32 *in = (u32 *)DS(src + 4 + (*DS(tree) + 1) * 2);
     u32 acc = 0, acc_bits = 0, node = 0;
-    u8 *cur = tree + 1;
+    u32 cur = tree + 1;
     (void)node;
     u32 out = 0, out_bits = 0;
-    u8 *d = (u8 *)dst;
+    u8 *d = DS(dst);
     while (left) {
         u32 word = *in++;
         for (int i = 31; i >= 0 && left; i--) {
             u32 b = (word >> i) & 1;
-            u8 v = *cur;
-            u8 *next = (u8 *)(((u32)cur & ~1u) + (v & 0x3F) * 2 + 2);
+            u8 v = *DS(cur);
+            u32 next = (cur & ~1u) + (v & 0x3F) * 2 + 2;
             u32 is_leaf = b ? (v & 0x40) : (v & 0x80);
             cur = next + b;
             if (is_leaf) {
-                out |= (u32)*cur << out_bits;
+                out |= (u32)*DS(cur) << out_bits;
                 out_bits += bits;
                 cur = tree + 1;
                 if (out_bits >= 8) { *d++ = (u8)out; out >>= 8; out_bits -= 8; left--; }
@@ -232,20 +215,20 @@ static void huff_uncomp(u32 src, u32 dst) {
 }
 
 static void bit_unpack(u32 src, u32 dst, u32 info) {
-    u16 len = *(u16 *)info;
-    u8 sw = *(u8 *)(info + 2), dw = *(u8 *)(info + 3);
-    u32 off = *(u32 *)(info + 4);
+    u16 len = *(u16 *)DS(info);
+    u8 sw = *DS(info + 2), dw = *DS(info + 3);
+    u32 off = *(u32 *)DS(info + 4);
     int zero = off >> 31;
     off &= 0x7FFFFFFF;
     u32 acc = 0, acc_bits = 0, out = dst;
     for (u32 i = 0; i < len; i++) {
-        u8 b = *(u8 *)(src + i);
+        u8 b = *DS(src + i);
         for (u32 k = 0; k < 8; k += sw) {
             u32 v = (b >> k) & ((1u << sw) - 1);
             if (v || zero) v += off;
             acc |= v << acc_bits;
             acc_bits += dw;
-            if (acc_bits >= 32) { *(u32 *)out = acc; out += 4; acc = 0; acc_bits = 0; }
+            if (acc_bits >= 32) { *(u32 *)DS(out) = acc; out += 4; acc = 0; acc_bits = 0; }
         }
     }
 }
@@ -269,7 +252,7 @@ void nds_swi(u32 n, u32 *r0, u32 *r1, u32 *r2, u32 *r3) {
     case 0x03: break;                                     /* WaitByLoop */
     case 0x04: case 0x05: {                               /* IntrWait, VBlankIntrWait */
         u32 mask = n == 5 ? 1 : *r1;
-        volatile u32 *check = (volatile u32 *)0x027E3FF8u;
+        volatile u32 *check = (volatile u32 *)DS(0x027E3FF8u);
         if (n == 5 || *r0) *check &= ~mask;
         u32 saved = nds_cpsr;
         nds_cpsr &= ~0x80u;
@@ -289,26 +272,26 @@ void nds_swi(u32 n, u32 *r0, u32 *r1, u32 *r2, u32 *r3) {
     case 0x0B: {                                          /* CpuSet */
         u32 s = *r0, d = *r1, c = *r2, count = c & 0x1FFFFF;
         if (c & (1 << 26)) {
-            u32 v = c & (1 << 24) ? *(u32 *)s : 0;
-            for (u32 i = 0; i < count; i++, d += 4, s += (c & (1 << 24)) ? 0 : 4) *(u32 *)d = (c & (1 << 24)) ? v : *(u32 *)s;
+            u32 v = c & (1 << 24) ? *(u32 *)DS(s) : 0;
+            for (u32 i = 0; i < count; i++, d += 4, s += (c & (1 << 24)) ? 0 : 4) *(u32 *)DS(d) = (c & (1 << 24)) ? v : *(u32 *)DS(s);
         } else {
-            u16 v = *(u16 *)s;
-            for (u32 i = 0; i < count; i++, d += 2, s += (c & (1 << 24)) ? 0 : 2) *(u16 *)d = (c & (1 << 24)) ? v : *(u16 *)s;
+            u16 v = *(u16 *)DS(s);
+            for (u32 i = 0; i < count; i++, d += 2, s += (c & (1 << 24)) ? 0 : 2) *(u16 *)DS(d) = (c & (1 << 24)) ? v : *(u16 *)DS(s);
         }
         break;
     }
     case 0x0C: {                                          /* CpuFastSet */
         u32 s = *r0, d = *r1, c = *r2, count = (c & 0x1FFFFF);
         count = (count + 7) & ~7u;
-        u32 v = *(u32 *)s;
-        for (u32 i = 0; i < count; i++, d += 4, s += 4) *(u32 *)d = (c & (1 << 24)) ? v : *(u32 *)s;
+        u32 v = *(u32 *)DS(s);
+        for (u32 i = 0; i < count; i++, d += 4, s += 4) *(u32 *)DS(d) = (c & (1 << 24)) ? v : *(u32 *)DS(s);
         break;
     }
     case 0x0D: *r0 = isqrt(*r0); break;                   /* Sqrt */
     case 0x0E: {                                          /* GetCRC16 */
         static const u16 tab[16] = {0x0000,0xCC01,0xD801,0x1400,0xF001,0x3C00,0x2800,0xE401,0xA001,0x6C00,0x7800,0xB401,0x5000,0x9C01,0x8801,0x4400};
         u32 crc = *r0 & 0xFFFF;
-        u8 *p = (u8 *)*r1;
+        u8 *p = DS(*r1);
         for (u32 i = 0; i < *r2; i += 2) {
             u32 w = p[i] | (p[i + 1] << 8);
             for (int k = 0; k < 4; k++, w >>= 4) {
@@ -329,97 +312,32 @@ void nds_swi(u32 n, u32 *r0, u32 *r1, u32 *r2, u32 *r3) {
     }
 }
 
-/* ------------------------------------------------------------------ threads : contexte x86 a cote de l'OSContext du SDK */
-typedef struct {
-    u32 ctx, esp, cpsr, func, fresh, ebp, ebx, esi, edi, eip;
-} Slot;
-static Slot slots[64];
-static u32 last_load_esp;
-
-static Slot *slot_of(u32 ctx) {
-    for (int i = 0; i < 64; i++)
-        if (slots[i].ctx == ctx) return &slots[i];
-    for (int i = 0; i < 64; i++)
-        if (!slots[i].ctx) { slots[i].ctx = ctx; return &slots[i]; }
-    nds_fatal("trop de threads");
-    return 0;
-}
-
-Slot *nds_save_slot(u32 ctx) {
-    Slot *s = slot_of(ctx);
-    s->cpsr = nds_cpsr;
-    s->fresh = 0;
-    return s;
-}
-
-Slot *nds_load_slot(u32 ctx) {
-    Slot *s = slot_of(ctx);
-    nds_cpsr = s->cpsr;
-    if (!s->esp) nds_fatal("contexte sans sauvegarde %x", ctx);
-    last_load_esp = s->esp;
-    return s;
-}
-
-/* comme setjmp/longjmp : les registres vont dans le Slot, pas sur la pile que l'appelant reutilise ensuite */
-__asm__(
-    ".globl _OS_SaveContext\n_OS_SaveContext:\n"
-    "  mov 4(%esp), %eax\n  push %eax\n  call _nds_save_slot\n  add $4, %esp\n"
-    "  mov %ebp, 20(%eax)\n  mov %ebx, 24(%eax)\n  mov %esi, 28(%eax)\n  mov %edi, 32(%eax)\n"
-    "  mov (%esp), %ecx\n  mov %ecx, 36(%eax)\n  lea 4(%esp), %ecx\n  mov %ecx, 4(%eax)\n"
-    "  xor %eax, %eax\n  ret\n"
-    ".globl _OS_LoadContext\n_OS_LoadContext:\n"
-    "  mov 4(%esp), %eax\n  push %eax\n  call _nds_load_slot\n"
-    "  mov 4(%eax), %esp\n  mov 20(%eax), %ebp\n  mov 24(%eax), %ebx\n  mov 28(%eax), %esi\n  mov 32(%eax), %edi\n"
-    "  mov 36(%eax), %ecx\n  mov $1, %eax\n  jmp *%ecx\n");
-
+/* ------------------------------------------------------------------ threads : contexte de l'hote dans context.c */
 typedef u64 (*Fn)();
 
-void nds_dump_threads(void) {
-    for (int i = 0; i < 64; i++) {
-        if (!slots[i].ctx || !slots[i].esp) continue;
-        u32 state = *(u32 *)(slots[i].ctx + 0x64);
-        nds_log("  thread ctx=%x etat=%u eip=%8x", slots[i].ctx, state, slots[i].eip);
-        nds_log("    %8x", slots[i].eip);
-        u32 *st = (u32 *)slots[i].esp;
-        int k = 0;
-        for (int j = 0; j < 60 && k < 8; j++)
-            if (st[j] >= 0x10000000u && st[j] < 0x11000000u) { nds_log("    %8x", st[j]); k++; }
-    }
-}
-
-/* piles x86 au-dessus de la zone DS, jamais sous 0x01000000 que le code traduit reserve au miroir ITCM */
-static u32 next_stack = 0x20000000u;
+/* piles de l'hote dans la fenetre, au-dessus de la zone DS, jamais sous 0x01000000 que le code traduit reserve au miroir ITCM.
+ * Le code traduit y prend sp = HOST2DS(&stack_[n]) : tout code du jeu doit tourner sur une de ces piles. */
+static u32 next_stack = 0x20000000u; /* adresse DS */
 static u8 *stack_alloc(u32 size) {
-    u8 *p = VirtualAlloc((void *)next_stack, size, 0x3000, 4);
+    u8 *p = os_mem_alloc(DS(next_stack), size);
     if (!p) nds_fatal("pile impossible a %x", next_stack);
     next_stack += (size + 0xFFFF) & ~0xFFFFu;
     return p;
 }
 
 static void thread_tramp(u32 ctx) {
-    Slot *s = slot_of(ctx);
-    u32 *c = (u32 *)ctx;
+    u32 *c = (u32 *)DS(ctx);
     /* OSContext : cpsr, r0..r12, sp, lr, pc+4 */
     u32 arg = c[1], lr = c[15];
-    ((Fn)s->func)(arg, 0, 0, 0);
+    ((Fn)nds_call_target(nds_ctx_func(ctx)))(arg, 0, 0, 0);
     if (lr) ((Fn)nds_call_target(lr))(0, 0, 0, 0);
     nds_fatal("fin de thread sans suite");
 }
 
 void OS_InitContext(u32 ctx, u32 pc, u32 sp) {
-    Slot *s = slot_of(ctx);
-    u32 *c = (u32 *)ctx;
+    u32 *c = (u32 *)DS(ctx);
     enum { STACK = 1 << 20 };
-    u8 *stack = stack_alloc(STACK);
-    u32 *top = (u32 *)(stack + STACK - 64);
-    top[1] = ctx;     /* argument de thread_tramp */
-    top[0] = 0;       /* adresse de retour fictive */
-    s->esp = (u32)top;
-    s->eip = (u32)thread_tramp;
-    s->ebp = s->ebx = s->esi = s->edi = 0;
-    s->func = pc;
-    s->cpsr = 0x1F;
-    s->fresh = 1;
+    nds_ctx_init(ctx, stack_alloc(STACK), STACK, thread_tramp, pc);
     nds_zero(c, 0x48);
     c[0] = 0x1F;
     c[14] = sp;
@@ -427,45 +345,32 @@ void OS_InitContext(u32 ctx, u32 pc, u32 sp) {
 }
 
 /* ------------------------------------------------------------------ exceptions : registres a effets */
-#define EXC_ACCESS 0xC0000005u
-#define EXC_STEP 0x80000004u
-#define EXC_CONTINUE (-1)
-#define EXC_NEXT 0
-#define PAGE_RW 4
-#define PAGE_NONE 1
-
-typedef struct { u32 code, flags; void *rec; void *addr; u32 nparams; u32 info[15]; } ExcRecord;
-/* CONTEXT x86 : seuls Esp (196), Eip (184), EFlags (192) servent */
-typedef struct { ExcRecord *rec; u8 *ctx; } ExcPointers;
-#define CTX_U32(c, off) (*(u32 *)((c) + (off)))
-#define CTX_EIP 184
-#define CTX_EFLAGS 192
-#define CTX_ESP 196
-
 int nds_trace;
 u32 nds_trace_count, nds_trace_eip, nds_trace_addr, nds_trace_stack[13];
 static u32 pending_page, pending_addr, pending_write;
 void nds_irq_tramp(void);
+#if defined(__i386__)
 __asm__(".globl _nds_irq_tramp\n_nds_irq_tramp:\n  pushf\n  pusha\n  cld\n  call _irq_deliver\n  popa\n  popf\n  ret\n");
+#else /* seulement pour --with-c (piege des registres), 32 bits seulement : MACOS.md 3.5 */
+void nds_irq_tramp(void) { nds_fatal("piege des registres sans version 64 bits"); }
+#endif
 
 static void io_protect(u32 page, int on) {
-    unsigned long old;
-    VirtualProtect((void *)page, 0x1000, on ? PAGE_NONE : PAGE_RW, &old);
+    os_mem_protect(DS(page), 0x1000, on ? OS_NOACCESS : OS_RW);
 }
 
-static long WINAPI on_exception(ExcPointers *e) {
-    ExcRecord *r = e->rec;
-    if (r->code == EXC_ACCESS) {
-        u32 addr = r->info[1];
+static int on_exception(OsFault *e) {
+    if (e->kind == OS_FAULT_ACCESS) {
+        u32 addr = (u32)(e->addr - nds_mem); /* adresse DS ; hors fenetre, la valeur ne sert qu'au journal */
         u32 page = addr & ~0xFFFu;
         if (page == IO || page == 0x04100000u) {
             io_protect(IO, 0);
             io_protect(0x04100000u, 0);
             if (nds_trace) {
                 nds_trace_count++;
-                nds_trace_eip = (u32)r->addr;
+                nds_trace_eip = (u32)e->ip;
                 nds_trace_addr = addr;
-                u32 *st = (u32 *)CTX_U32(e->ctx, CTX_ESP);
+                u32 *st = (u32 *)os_fault_reg(e, OS_REG_SP);
                 int k = 0;
                 for (int i = 0; i < 200 && k < 12; i++)
                     if (st[i] >= 0x10000000u && st[i] < 0x11000000u) nds_trace_stack[k++] = st[i];
@@ -473,23 +378,24 @@ static long WINAPI on_exception(ExcPointers *e) {
             }
             pending_page = page;
             pending_addr = addr;
-            pending_write = r->info[0] == 1;
+            pending_write = e->access == 1;
             if (!pending_write) io_before_read(addr);
-            CTX_U32(e->ctx, CTX_EFLAGS) |= 0x100;
-            return EXC_CONTINUE;
+            os_fault_set_step(e, 1);
+            return OS_FAULT_RESUME;
         }
-        nds_log("acces memoire invalide %x (%s) eip=%x esp=%x arm=%x", addr, r->info[0] ? "ecriture" : "lecture", (u32)r->addr, CTX_U32(e->ctx, CTX_ESP), nds_pc);
+        nds_log("acces memoire invalide %x (%s) eip=%x esp=%x arm=%x", addr, e->access ? "ecriture" : "lecture", (u32)e->ip, (u32)os_fault_reg(e, OS_REG_SP), nds_pc);
 #ifdef NDS_INSTRUMENT
         nds_log("  r0=%x r1=%x r2=%x r3=%x r4=%x r5=%x", nds_r[0], nds_r[1], nds_r[2], nds_r[3], nds_r[4], nds_r[5]);
         for (int k = 0; k < 6; k++) {
             u32 a = nds_r[k] & ~3u;
             if (a >= 0x02000000u && a < 0x02400000u) {
-                nds_log("  [r%d] %8x %8x %8x %8x %8x %8x %8x %8x", k, ((u32 *)a)[0], ((u32 *)a)[1], ((u32 *)a)[2], ((u32 *)a)[3], ((u32 *)a)[4], ((u32 *)a)[5], ((u32 *)a)[6], ((u32 *)a)[7]);
+                const u32 *m = (const u32 *)DS(a);
+                nds_log("  [r%d] %8x %8x %8x %8x %8x %8x %8x %8x", k, m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7]);
             }
         }
 #endif
-        u32 *st = (u32 *)CTX_U32(e->ctx, CTX_ESP);
-        u32 *bp = (u32 *)CTX_U32(e->ctx, 180);
+        u32 *st = (u32 *)os_fault_reg(e, OS_REG_SP);
+        u32 *bp = (u32 *)os_fault_reg(e, OS_REG_BP);
 #ifdef NDS_INSTRUMENT
         {
             extern u32 nds_ring[4096], nds_ring_pos;
@@ -497,11 +403,11 @@ static long WINAPI on_exception(ExcPointers *e) {
             for (int i = 4096 - 1500; i < 4096; i++) nds_log("    %8x", nds_ring[(nds_ring_pos + i) & 4095]);
         }
 #endif
-        nds_log("  ebp=%x retours :", (u32)bp);
-        if (last_load_esp) {
-            nds_log("  pile du dernier contexte charge %x :", last_load_esp);
+        nds_log("  ebp=%x retours :", (u32)(uptr)bp);
+        if (nds_last_load_sp) {
+            nds_log("  pile du dernier contexte charge %x :", (u32)nds_last_load_sp);
             for (int i = 0; i < 400; i++) {
-                u32 v = ((u32 *)last_load_esp)[i];
+                u32 v = ((u32 *)nds_last_load_sp)[i];
                 if (v >= 0x10000000u && v < 0x11000000u) nds_log("    %8x", v);
             }
             nds_log("  fin");
@@ -510,54 +416,44 @@ static long WINAPI on_exception(ExcPointers *e) {
             u32 v = st[i];
             if (v >= 0x10000000u && v < 0x11000000u) nds_log("    %x", v);
         }
-        ExitProcess(4);
+        os_exit(4);
     }
-    if (r->code == EXC_STEP && pending_page) {
+    if (e->kind == OS_FAULT_STEP && pending_page) {
         u32 page = pending_page, addr = pending_addr;
         pending_page = 0;
         if (pending_write) io_after_write(addr);
         int ready = io_irq_ready();
         io_protect(IO, 1);
         io_protect(0x04100000u, 1);
-        CTX_U32(e->ctx, CTX_EFLAGS) &= ~0x100u;
-        if (ready) {
-            u32 esp = CTX_U32(e->ctx, CTX_ESP) - 4;
-            *(u32 *)esp = CTX_U32(e->ctx, CTX_EIP);
-            CTX_U32(e->ctx, CTX_ESP) = esp;
-            CTX_U32(e->ctx, CTX_EIP) = (u32)nds_irq_tramp;
-        }
-        return EXC_CONTINUE;
+        os_fault_set_step(e, 0);
+        if (ready) os_fault_call(e, nds_irq_tramp);
+        return OS_FAULT_RESUME;
     }
-    nds_log("exception %x a %x", r->code, (u32)r->addr);
-    ExitProcess(5);
-    return EXC_NEXT;
+    nds_log("exception %x a %x", e->code, e->ip);
+    os_exit(5);
+    return OS_FAULT_PASS;
 }
 
 /* ------------------------------------------------------------------ chargement */
 static void reserve(u32 addr, u32 size) {
-    void *p = VirtualAlloc((void *)addr, size, 0x3000, PAGE_RW);
-    if (p != (void *)addr) nds_fatal("memoire DS indisponible a %x", addr);
+    void *p = os_mem_alloc(DS(addr), size);
+    if (p != (void *)DS(addr)) nds_fatal("memoire DS indisponible a %x", addr);
 }
 
 static void load_file(const char *path) {
-    void *h = CreateFileA(path, 0x80000000u, 1, 0, 3, 0, 0);
-    if (h == (void *)-1) nds_fatal("rom introuvable : %s", path);
-    nds_rom_size = GetFileSize(h, 0);
-    nds_rom = VirtualAlloc(0, nds_rom_size, 0x3000, PAGE_RW);
-    unsigned long got;
-    ReadFile(h, nds_rom, nds_rom_size, &got, 0);
-    CloseHandle(h);
+    nds_rom = os_file_load(path, &nds_rom_size);
+    if (!nds_rom) nds_fatal("rom introuvable : %s", path);
 }
 
 /* decompression BLZ de arm9 (identique au MIi_UncompressBackward du SDK, faite ici car le module charge avant _start) */
 static void blz_uncompress(u32 end) {
-    u32 sizes = *(u32 *)(end - 8), extra = *(u32 *)(end - 4);
+    u32 sizes = *(u32 *)DS(end - 8), extra = *(u32 *)DS(end - 4);
     u32 start = end - (sizes >> 24);
     u32 stop = end - (sizes & 0xFFFFFF);
-    u8 *src = (u8 *)start, *dst = (u8 *)(end + extra);
-    while (src > (u8 *)stop) {
+    u8 *src = DS(start), *dst = DS(end + extra), *lim = DS(stop);
+    while (src > lim) {
         u8 flags = *--src;
-        for (int i = 0; i < 8 && src > (u8 *)stop; i++, flags <<= 1) {
+        for (int i = 0; i < 8 && src > lim; i++, flags <<= 1) {
             if (flags & 0x80) {
                 u32 b = *--src << 8;
                 b |= *--src;
@@ -573,46 +469,29 @@ extern const u32 nds_build_info_offset;
 static void load_arm9(void) {
     u8 *h = nds_rom;
     u32 off = *(u32 *)(h + 0x20), ram = *(u32 *)(h + 0x28), size = *(u32 *)(h + 0x2C);
-    nds_copy((void *)ram, nds_rom + off, size);
-    nds_copy((void *)0x027FFE00u, h, 0x170); /* en-tete de carte, lu par le SDK pour la FAT */
-    u32 *info = (u32 *)(ram + nds_build_info_offset);
+    nds_copy(DS(ram), nds_rom + off, size);
+    nds_copy(DS(0x027FFE00u), h, 0x170); /* en-tete de carte, lu par le SDK pour la FAT */
+    u32 *info = (u32 *)DS(ram + nds_build_info_offset);
     if (info[5]) {
         blz_uncompress(info[5]);
         info[5] = 0;
     }
-    /* _start recopie ITCM/DTCM depuis cette source : les pointeurs de fonctions sont corriges dans la source */
-    u32 *list = (u32 *)info[0], *end = (u32 *)info[1];
-    for (unsigned i = 0; i < nds_fixup_count; i++) {
-        u32 at = nds_fixups[i].at, src = info[2];
-        /* SDK des jeux DSi : entrees de 16 octets au lieu de 12 */
-        u32 step = ((u32)end - (u32)list) % 12 == 0 ? 3 : 4;
-        for (u32 *e = list; e < end; e += step) {
-            if (at >= e[0] && at < e[0] + e[1]) { at = src + (at - e[0]); break; }
-            src += e[1];
-        }
-        *(u32 *)at = (u32)nds_fixups[i].x86;
-    }
+    /* les pointeurs de fonctions du jeu restent des adresses ARM : nds_call_target les resout a l'appel */
 }
 
 /* profil par echantillons (--prof) : ou le jeu passe son temps */
-IMPORT unsigned long WINAPI SuspendThread(void *);
-IMPORT unsigned long WINAPI ResumeThread(void *);
-IMPORT int WINAPI GetThreadContext(void *, void *);
-IMPORT int WINAPI DuplicateHandle(void *, void *, void *, void **, unsigned long, int, unsigned long);
-IMPORT void *WINAPI GetCurrentProcess(void);
 static void *main_thread;
 
-static unsigned long WINAPI prof_thread(void *arg) {
-    static u32 addrs[256], counts[256];
-    static u32 ctx[256];
+static void prof_thread(void *arg) {
+    static uptr addrs[256];
+    static u32 counts[256];
     u32 total = 0;
+    uptr sp = 0;
     for (;;) {
-        Sleep(5);
-        ctx[0] = 0x10001;
-        SuspendThread(main_thread);
-        GetThreadContext(main_thread, ctx);
-        ResumeThread(main_thread);
-        u32 eip = ctx[184 / 4] & ~0xFu;
+        os_sleep(5);
+        uptr eip;
+        os_thread_sample(main_thread, &eip, &sp);
+        eip &= ~0xFu;
         total++;
         for (int i = 0; i < 256; i++) {
             if (addrs[i] == eip) { counts[i]++; break; }
@@ -628,7 +507,7 @@ static unsigned long WINAPI prof_thread(void *arg) {
             }
 #endif
             {
-                u32 *st = (u32 *)ctx[196 / 4];
+                u32 *st = (u32 *)sp;
                 int shown = 0;
                 for (u32 i = 0; i < 4000 && shown < 24; i++)
                     if (st[i] >= 0x10000000u && st[i] < 0x11000000u) { nds_log("  pile %8x", st[i]); shown++; }
@@ -637,13 +516,12 @@ static unsigned long WINAPI prof_thread(void *arg) {
                 int best = -1;
                 for (int i = 0; i < 256; i++) if (counts[i] && (best < 0 || counts[i] > counts[best])) best = i;
                 if (best < 0) break;
-                nds_log("  %u %8x", counts[best], addrs[best]);
+                nds_log("  %u %8x", counts[best], (u32)addrs[best]);
                 counts[best] = 0;
             }
             for (int i = 0; i < 256; i++) { addrs[i] = 0; counts[i] = 0; }
         }
     }
-    return 0;
 }
 
 static void run_game(void) {
@@ -653,7 +531,11 @@ static void run_game(void) {
 
 void nds_start(void) {
     parse_args();
-    AddVectoredExceptionHandler(1, on_exception);
+    os_fault_install(on_exception);
+#if !NDS_IDENTITY
+    nds_mem = (uptr)os_mem_window();
+    if (!nds_mem) nds_fatal("fenetre de memoire DS impossible a reserver");
+#endif
     reserve(0x01FF0000u, 0x10000);   /* ITCM (0x01FF8000), reservation alignee sur 64 Ko */
     reserve(0x02000000u, 0x02000000u); /* RAM principale, miroirs, WRAM partagee et ARM7 */
     reserve(0x04000000u, 0x00200000u); /* registres */
@@ -664,6 +546,7 @@ void nds_start(void) {
     const char *rom = argc_ > 1 ? argv_[1] : 0;
     if (!rom) nds_fatal("usage : jeu.exe <rom.nds>");
     load_file(rom);
+    nds_code_map_init();
     load_arm9();
     arm7_init();
     io_init();
@@ -675,7 +558,7 @@ void nds_start(void) {
             io_protect(0x04100000u, 1);
         }
     }
-    nds_log("demarrage %x", (u32)nds_entry_fn);
+    nds_log("demarrage %x", (u32)(uptr)nds_entry_fn);
 #ifdef NDS_INSTRUMENT
     {
         const char *w;
@@ -687,12 +570,12 @@ void nds_start(void) {
     }
 #endif
     if (nds_arg("--prof", 0)) {
-        DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &main_thread, 0, 0, 2);
-        CreateThread(0, 0x10000, prof_thread, 0, 0, 0);
+        main_thread = os_thread_self();
+        os_thread_start(prof_thread, 0, 0x10000);
     }
     /* grande pile, allouee apres la memoire DS pour ne pas la gener */
     enum { MAIN_STACK = 16 << 20 };
     u8 *stack = stack_alloc(MAIN_STACK);
-    __asm__ volatile("mov %0, %%esp\n  call *%1\n" : : "r"(stack + MAIN_STACK - 64), "r"(run_game));
+    nds_run_on_stack(stack + MAIN_STACK - 64, run_game);
     nds_fatal("le jeu s'est termine");
 }

@@ -6,6 +6,13 @@ typedef struct { s32 m[16]; } Mtx;
 typedef struct { float x, y, z, w, r, g, b, s, t; u32 id; int slot; } Vtx;
 typedef struct { Vtx v[10]; int n; u32 attr, tex, pal; int translucent; float ysort; Vtx src[4]; int src_n; u32 id; } Poly;
 
+/* --interpolate, le mod 60 images/s : sans lui, rien de ce qu'il demande n'est calcule */
+static inline int interp_on(void) {
+    static int on = -1;
+    if (on < 0) on = nds_arg("--interpolate", 0);
+    return on;
+}
+
 #define MAX_POLYS 8192
 static Poly polys[5][MAX_POLYS]; /* 3 listes qui tournent, la precedente pour l'interpolation, et l'image intermediaire */
 static int poly_count[5];
@@ -117,7 +124,7 @@ static void vertex(void) {
         o.t = cur_t / 16.0f;
     }
     /* ce que le jeu a donne, avant les matrices : un meme sommet garde cette valeur d'une image a l'autre */
-    o.id = ((u32)x * 0x9E3779B1u) ^ ((u32)y * 0x85EBCA77u) ^ ((u32)z * 0xC2B2AE3Du) ^ ((u32)raw_s * 0x27D4EB2Fu) ^ ((u32)raw_t * 0x165667B1u);
+    if (interp_on()) o.id = ((u32)x * 0x9E3779B1u) ^ ((u32)y * 0x85EBCA77u) ^ ((u32)z * 0xC2B2AE3Du) ^ ((u32)raw_s * 0x27D4EB2Fu) ^ ((u32)raw_t * 0x165667B1u);
     if (prim < 0) return;
     prim_v[prim_count++] = o;
     switch (prim) {
@@ -223,18 +230,20 @@ static void emit_poly(const Vtx *in, int n) {
         if (!front && !(cur_attr & 0x40)) return;
     }
     Vtx source[4];
-    for (int i = 0; i < n; i++) source[i] = a[i];
+    if (interp_on()) for (int i = 0; i < n; i++) source[i] = a[i];
     na = clip_poly(a, n);
     if (!na) return;
     if (poly_count[build] >= MAX_POLYS) return;
     Poly *q = &polys[build][poly_count[build]++];
     q->n = na;
     for (int i = 0; i < na; i++) q->v[i] = a[i];
-    q->src_n = n;
-    q->id = cur_attr ^ (cur_tex * 31u) ^ (cur_pal * 131u);
-    for (int i = 0; i < n; i++) {
-        q->src[i] = source[i];
-        q->id += source[i].id * source[i].id; /* sans ordre : une bande retourne un triangle sur deux */
+    if (interp_on()) {
+        q->src_n = n;
+        q->id = cur_attr ^ (cur_tex * 31u) ^ (cur_pal * 131u);
+        for (int i = 0; i < n; i++) {
+            q->src[i] = source[i];
+            q->id += source[i].id * source[i].id; /* sans ordre : une bande retourne un triangle sur deux */
+        }
     }
     q->attr = cur_attr;
     q->tex = cur_tex;
@@ -997,7 +1006,7 @@ static int interp_midpoint(void) {
     for (int i = 0; i < now_n; i++) scene_w += abs_f(now[i].v[0].w);
     if (now_n) scene_w /= now_n;
     for (int i = 0; i < now_n; i++) {
-        out[i] = now[i];
+        nds_copy(&out[i], &now[i], sizeof out[i]); /* pas d'affectation : gcc y appellerait memcpy, absent de certains jeux */
         int *link = &head[now[i].id & (INTERP_BUCKETS - 1)];
         while (*link >= 0 && !same_poly(&old[*link], &now[i])) link = &next[*link];
         if (*link < 0) continue;
@@ -1012,14 +1021,14 @@ static int interp_midpoint(void) {
 const u32 *gx_render(int w, int h, int k, int margin) {
     static int last_w, last_h;
     if (!color_buf) {
-        color_buf = VirtualAlloc(0, MAX_W * MAX_H * 4, 0x3000, 4);
-        z_buf = VirtualAlloc(0, MAX_W * MAX_H * 4, 0x3000, 4);
-        id_buf = VirtualAlloc(0, MAX_W * MAX_H, 0x3000, 4);
-        tex_arena = VirtualAlloc(0, TEX_ARENA * 4, 0x3000, 4);
+        color_buf = os_mem_alloc(0, MAX_W * MAX_H * 4);
+        z_buf = os_mem_alloc(0, MAX_W * MAX_H * 4);
+        id_buf = os_mem_alloc(0, MAX_W * MAX_H);
+        tex_arena = os_mem_alloc(0, TEX_ARENA * 4);
     }
-    static int interp = -1, calls_since, last_gap, final_pending;
-    if (interp < 0) interp = nds_arg("--interpolate", 0);
-    while (__sync_lock_test_and_set(&list_lock, 1)) Sleep(0);
+    static int calls_since, last_gap, final_pending;
+    int interp = interp_on();
+    while (__sync_lock_test_and_set(&list_lock, 1)) os_yield();
     int fresh = list_fresh;
     if (fresh) {
         int t = interp ? list_old : list_shown;
@@ -1083,14 +1092,14 @@ void gx_begin_frame(void) {
     st->cdepth = REG16(IO + 0x354) & 0x7FFF;
     st->aref = REG8(IO + 0x340) & 31;
     st->flags = swap_flags;
-    nds_copy(st->toon, (void *)(IO + 0x380), 64);
-    nds_copy(st->edge, (void *)(IO + 0x330), 16);
+    nds_copy(st->toon, DS(IO + 0x380), 64);
+    nds_copy(st->edge, DS(IO + 0x330), 16);
     st->vx1 = vp_x1;
     st->vy1 = vp_y1;
     st->vx2 = vp_x2;
     st->vy2 = vp_y2;
     REG16(IO + 0x604) = (u16)poly_count[build];
-    while (__sync_lock_test_and_set(&list_lock, 1)) Sleep(0);
+    while (__sync_lock_test_and_set(&list_lock, 1)) os_yield();
     int t = list_ready;
     list_ready = build;
     build = t;

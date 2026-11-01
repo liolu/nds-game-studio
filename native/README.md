@@ -1,6 +1,7 @@
 # Jeux DS natifs : traduction + runtime nitro-pc
 
-Un jeu DS tourne ici comme un programme Windows, sans émulateur : pas d'interpréteur ARM au moment de jouer.
+Un jeu DS tourne ici comme un programme natif, sans émulateur : pas d'interpréteur ARM au moment de jouer. Le module est
+un programme Windows 32 bits (GCC) ou, sur Mac, un programme arm64 ou x86_64 (clang).
 
 ```
 rom de l'utilisateur ──► chargée en mémoire, aux adresses du DS (données, autoload)
@@ -9,16 +10,34 @@ nitro-pc/ (registres, BIOS, threads, 2D, 3D, son, sauvegarde) ──────
                                                                           lancé par le launcher (Jouer)
 ```
 
+Sur Mac, la même chaîne donne `native/build/<code>/<code>` (sans `.exe`) avec `clang -arch arm64` ou `-arch x86_64`.
+
+## Plateformes
+
+| | Windows | macOS |
+|---|---|---|
+| Module | x86 32 bits, `gcc -m32` (WinLibs, dans la boîte) | arm64 ou x86_64, `clang` d'Apple (outils en ligne de commande de Xcode, **hors de la boîte** : le SDK d'Apple ne peut pas être redistribué) |
+| Mémoire DS | adresse DS = adresse de l'hôte (`nds_mem = 0`, code identique à avant) | fenêtre de 4 Go + 64 Ko réservée n'importe où : l'adresse DS `a` est à `nds_mem + a` (macros `DS()` et `HOST2DS()`) |
+| Couche système | `os_win32.c` | `os_posix.c` + `audio_coreaudio.c` (AudioQueue) |
+| Mode traduit | oui | oui |
+| `--with-c` | oui | **non** (pointeurs 64 bits ; le piège d'E/S n'existe qu'en Win32) |
+| Boîte à outils | `native-toolchain-<v>.zip` (100 Mo) | `native-toolchain-<v>-macos-<arch>.zip` (22 Mo : traducteur, runtime, recettes, Python, capstone) |
+
+La conception, ce qui est fait et ce qui reste : [MACOS.md](MACOS.md). Sur Mac, seul AL7E a démarré (sans fenêtre,
+jusqu'à son écran titre) ; voir la colonne macOS de [GAMES.md](GAMES.md).
+
 ## Chez le joueur : le launcher génère le module
 
 Les outils sont livrés avec le studio (`native-toolchain` à côté de l'exécutable, 100 Mo). Dès qu'il voit une rom, le
 launcher prépare son module en tâche de fond, un jeu à la fois et jamais pendant une partie : il vérifie le SHA-1 de la
 rom, traduit, compile (de 30 s à 1 min 30 selon le jeu) et garde le résultat dans `native/<code>-<n>.exe` du dossier des
-données. Le bouton Jouer s'active quand c'est prêt. Les jeux expérimentaux ne se préparent que sur demande (bouton Préparer).
+données (sans `.exe` sur Mac). Le bouton Jouer s'active quand c'est prêt. Les jeux expérimentaux ne se préparent que sur demande (bouton Préparer).
 
 Sans ce dossier (compilation locale), la boîte est téléchargée une fois (release `native-toolchain`).
+Sur Mac, le launcher vérifie d'abord `xcrun --find clang` et, s'il manque, explique `xcode-select --install`
+avant de télécharger quoi que ce soit.
 
-**Rien de publié ne contient de code de jeu.** La boîte à outils contient le traducteur, le runtime, GCC, Python et les
+**Rien de publié ne contient de code de jeu.** La boîte à outils contient le traducteur, le runtime, GCC (Windows seulement), Python et les
 recettes `games/<code>.json.gz` (positions des fonctions, pointeurs et noms, pas d'instructions). Les modules, eux,
 contiennent le code du jeu : ils ne doivent être ni commités ni publiés. `native/build/` est ignoré par git.
 
@@ -26,7 +45,8 @@ Quand le runtime, le traducteur ou les recettes changent, augmenter `TOOLCHAIN` 
 ce script : le numéro passe dans `games/index.json`, la CI publie la nouvelle boîte, et les modules sont régénérés.
 
 Une rom d'une autre version que celle de la recette est refusée. Un `native/<code>.exe` à côté du studio passe avant
-le module généré ; `NDSGS_TOOLCHAIN_ZIP` donne une boîte locale au lieu de la télécharger.
+le module généré ; `NDSGS_TOOLCHAIN_ZIP` donne une boîte locale au lieu de la télécharger (sur Mac aussi : `NDSGS_TOOLCHAIN_DIR` donne
+un dossier, que `native/tools/dev_toolchain.sh` prépare depuis le dépôt).
 
 ## Pour le développement
 
@@ -37,14 +57,29 @@ python native/tools/build_all.py "<projets>" "<roms>"           # essaie tous le
 python native/tools/make_toolchain.py --gcc ... --python ... --capstone ... --out x.zip
 ```
 
+Sur Mac :
+
+```bash
+python3 native/tools/native_build.py "<dossier du projet>" [--arch arm64|x86_64] [--instrument]
+python3 native/tools/make_toolchain.py --platform macos-arm64 --python <python-build-standalone> --capstone <roue> --out x.zip
+pip install capstone==5.0.7 && python3 native/tests/arm2c_test.py   # sans rom : traducteur, appels indirects, threads
+sh native/tests/audio_smoke.sh [--arch x86_64] [--mute]               # 2 s de sinus par CoreAudio
+python3 native/tests/runtime_check.py                                 # compile tout le runtime avec -Werror, comme la CI
+```
+
+`arm2c_test.py` et `runtime_check.py` ne demandent aucune rom ; la CI les exécute
+(`.github/workflows/native-toolchain.yml`, tâches `runtime-macos` et `runtime-windows`).
+
 Il faut un jeu avec ses symboles SDK nommés (`OS_SaveContext`, `OS_SelectThread`, `FSi_ReadRomCallback`…) pour qu'il
 se lance : les autres sont proposés comme expérimentaux, voir [GAMES.md](GAMES.md).
 
 ## Le code vient de l'ARM, pas encore du C décompilé
 
-Par défaut tout le jeu est traduit depuis la rom. `--with-c` compile aussi le C matché, mais ce C compte sur le
+Par défaut tout le jeu est traduit depuis la rom. Sur Mac, c'est le seul mode. `--with-c` (Windows) compile aussi le C matché, mais ce C compte sur le
 compilateur d'origine : appels `f()` qui gardent r0-r3, retours par drapeaux, variables propres à un fichier. Ce mode
 plante aujourd'hui sur Tom et Jerry (`func_0203e3f4`). Le C matché est correct pour mwcc, pas forcément pour gcc.
+Depuis que la mémoire du jeu garde ses vrais pointeurs de fonctions (plus de `nds_fixups`), `--with-c` ne peut plus
+appeler un pointeur lu dans les données du jeu : à reprendre si ce mode doit revivre.
 
 ## Limites connues
 
@@ -57,6 +92,8 @@ plante aujourd'hui sur Tom et Jerry (`func_0203e3f4`). Le C matché est correct 
 - Pas de préemption : un thread passe la main sur une attente, une interruption ou un accès registre.
 - Son : séquenceur et mixeur simplifiés (portamento et valeurs aléatoires du SSEQ ignorés).
 - Micro absent. Pas de cartouche GBA. La liaison sans fil passe par TCP (ci-dessous) ; Internet Wi-Fi du DS (DWC) absent.
+- Mac : pas de `--with-c` ; les outils de Xcode sont requis ; le chemin jusqu'à l'écran du launcher n'est pas encore
+  vérifié (la capture de `native_check` est noire) ; vitesse en jeu non mesurée.
 
 ## Fonctions demandées par les mods
 
@@ -98,4 +135,5 @@ Limites : les ombres (mode 3 des polygones) ne sont pas dessinées. Un objet que
 - `cargo run --release -p nds-engine --example native_check -- <code> <rom> <capture.png> <s> [enter@s] [touch@s]` :
   passe par le vrai moteur, sans focus (`NDSGS_NATIVE_MUTE=1`, `NDSGS_NATIVE_DIR`).
 
-Essayé jusqu'au jeu : Tom et Jerry Tales (AJTP), Rayman Raving Rabbids (AR5E), Lego Star Wars II (AL7E).
+Essayé jusqu'au jeu : Tom et Jerry Tales (AJTP), Rayman Raving Rabbids (AR5E), Lego Star Wars II (AL7E) sur Windows ;
+sur Mac, seulement AL7E, sans fenêtre.

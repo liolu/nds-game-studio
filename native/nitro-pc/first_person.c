@@ -137,7 +137,7 @@ void nds_hook_camera(u32 camera) {
         return;
     }
     /* matrice du personnage : axes X, Y, Z (son avant), puis position */
-    const s32 *body = (const s32 *)(hero + nds_fp_matrix);
+    const s32 *body = (const s32 *)DS(hero + nds_fp_matrix);
     int mouse_x, mouse_y;
     present_mouse(&mouse_x, &mouse_y);
     if (!started) {
@@ -155,12 +155,12 @@ void nds_hook_camera(u32 camera) {
     seen_x = mouse_x;
     seen_y = mouse_y;
     float look_x = sine(yaw), look_z = cosine(yaw), up = sine(pitch), level = cosine(pitch);
-    s32 *pos = (s32 *)camera;
+    s32 *pos = (s32 *)DS(camera);
     pos[0] = body[9] + fx(look_x * EYE_FORWARD);
     pos[1] = body[10] + fx(EYE_HEIGHT);
     pos[2] = body[11] + fx(look_z * EYE_FORWARD);
     /* lignes de la camera : droite, haut, arriere */
-    s32 *axes = (s32 *)(camera + CAM_ROTATION);
+    s32 *axes = (s32 *)DS(camera + CAM_ROTATION);
     axes[0] = fx(-look_z); axes[1] = 0; axes[2] = fx(look_x); axes[3] = 0;
     axes[4] = fx(-up * look_x); axes[5] = fx(level); axes[6] = fx(-up * look_z); axes[7] = 0;
     axes[8] = fx(-look_x * level); axes[9] = fx(-up); axes[10] = fx(-look_z * level); axes[11] = 0;

@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
-"""Compile un jeu DS decompile en programme natif Windows (32 bits) lie au runtime nitro-pc.
+"""Compile un jeu DS decompile en programme natif lie au runtime nitro-pc : Windows 32 bits ou macOS (arm64, x86_64).
 
   python native_build.py <dossier du projet de jeu> [--version eu] [--out dossier] [--lift f1,f2] [-j 4]
+  python native_build.py --recipe native/games/<code>.json.gz --rom <rom> [--out dossier]   (ce que fait le launcher)
 
 C du jeu (src/ sauf src/data) -> gcc -m32. Le reste (assembleur, fonctions non matchees, fichiers que gcc refuse)
 -> arm2c.py. Les donnees ne sont pas compilees : elles viennent de la rom de l'utilisateur, chargee aux adresses DS,
 et chaque symbole de donnees devient un symbole absolu. Rien de la rom n'entre dans l'exe.
+macOS (native/MACOS.md 3.6) : clang, code traduit seulement (pas de --with-c), memoire DS dans une fenetre (DS()) ;
+le runtime trouve les donnees qu'il nomme dans nds_addr_<nom> au lieu de symboles absolus.
 """
 import argparse
 import hashlib
 import json
 import os
+import platform
 import re
 import subprocess
 import sys
@@ -23,13 +27,27 @@ import recipe
 
 HERE = Path(__file__).resolve().parent
 RUNTIME = HERE.parent / "nitro-pc"
+WIN32 = sys.platform == "win32"
+DARWIN = sys.platform == "darwin"
 WINLIBS = r"C:\Users\thomr\AppData\Local\Microsoft\WinGet\Packages\BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe\mingw64\bin"
 # La boite a outils du launcher donne son compilateur ; sinon celui installe sur ce PC
 TOOLCHAIN_BIN = HERE.parent.parent / "mingw64" / "bin"
-for bin_dir in (str(TOOLCHAIN_BIN), WINLIBS):
+for bin_dir in (str(TOOLCHAIN_BIN), WINLIBS) if WIN32 else ():
     if os.path.isdir(bin_dir):
         os.environ["PATH"] = bin_dir + os.pathsep + os.environ["PATH"]
         break
+# Couche systeme du runtime (nitro-pc/os.h) : les sources propres a chaque plateforme, les autres sont communes
+OS_SOURCES = {"win32": ["os_win32.c"], "darwin": ["os_posix.c", "audio_coreaudio.c"]}
+PLATFORM_SOURCES = {name for names in OS_SOURCES.values() for name in names}
+
+
+def runtime_sources():
+    own = OS_SOURCES.get(sys.platform)
+    if not own:
+        sys.exit("pas de couche systeme nitro-pc pour la plateforme %s" % sys.platform)
+    return sorted(p for p in RUNTIME.glob("*.c") if p.name not in PLATFORM_SOURCES or p.name in own)
+
+
 IDLE = 0x4000 | 0x08000000  # priorite basse, le PC reste utilisable ; pas de console quand le launcher nous lance
 
 GAME_FLAGS = ["-m32", "-std=gnu89", "-O1", "-w", "-fwrapv", "-fno-strict-aliasing", "-fno-delete-null-pointer-checks",
@@ -42,10 +60,38 @@ KR_DECL = re.compile(r"^[A-Za-z_][\w \t*]*\b\w+\s*\(\s*\)\s*;", re.M)
 LIFT_FLAGS = ["-m32", "-std=gnu89", "-O1", "-w", "-fwrapv", "-fno-strict-aliasing", "-fno-builtin",
               "-fno-stack-protector", "-mno-stack-arg-probe", "-msse2", "-g1"]
 SYM = re.compile(r"^(\S+) kind:(\w+)(?:\(([^)]*)\))? addr:0x([0-9a-f]+)")
+CC = ["gcc", "-m32"]  # tables.c, missing.c
+HOST_PREFIX = "ds_"  # fonctions du jeu hors Windows 32 bits, GAME_FN de nitro.h
+MISSING = re.compile(r"undefined reference to `([^']+)'")  # GNU ld
+EXE = ".exe"
+
+if DARWIN:
+    # clang d'Apple (Xcode Command Line Tools) ; -arch choisi dans main(). -ffp-contract=off : sans lui clang fusionne
+    # a*b+c en FMA sur arm64, arrondi autrement que sur la DS. -std fige : CALLF passe 14 u32 par u64 (*)(), valable
+    # avec l'ABI arm64 d'Apple tant que les fonctions ne sont pas variadiques et que le dialecte reste avant C23.
+    LIFT_FLAGS = ["-std=gnu89", "-O1", "-w", "-fwrapv", "-fno-strict-aliasing", "-ffp-contract=off",
+                  "-fno-stack-protector", "-fno-omit-frame-pointer"]
+    GAME_FLAGS = list(LIFT_FLAGS)  # seulement avec --with-c, refuse sur cette plateforme
+    # les -Werror montrent toute supposition de pointeur 32 bits qui resterait dans le runtime
+    RUNTIME_FLAGS = ["-std=gnu11", "-O2", "-Wall", "-Wno-unused", "-fno-strict-aliasing", "-ffp-contract=off",
+                     "-fno-stack-protector", "-Werror=pointer-to-int-cast", "-Werror=int-to-pointer-cast"]
+    MISSING = re.compile(r'^\s*"_([^"]+)", referenced from:', re.M)  # ld64
+    EXE = ""
 
 
 def run(cmd, **kw):
-    return subprocess.run([str(c) for c in cmd], capture_output=True, text=True, errors="replace", creationflags=IDLE, **kw)
+    if WIN32:
+        kw["creationflags"] = IDLE
+    return subprocess.run([str(c) for c in cmd], capture_output=True, text=True, errors="replace", **kw)
+
+
+def low_priority():
+    """Le Mac reste utilisable pendant la compilation : nice, et qualite de service utility pour tous les fils."""
+    if DARWIN:
+        os.nice(10)
+        # -p n'accepte pas -c : on relance le compilateur sous taskpolicy (P-cores encore permis, contrairement a -b)
+        if subprocess.run(["taskpolicy", "-c", "utility", "true"], capture_output=True).returncode == 0:
+            CC[:0] = ["taskpolicy", "-c", "utility"]
 
 
 class Game:
@@ -135,7 +181,7 @@ def compile_one(args):
     src, obj, flags = args
     if obj.exists() and obj.stat().st_mtime >= src.stat().st_mtime:
         return src, True, ""
-    p = run(["gcc", *flags, "-c", src, "-o", obj])
+    p = run([*CC, *flags, "-c", src, "-o", obj])
     return src, p.returncode == 0, p.stderr
 
 
@@ -158,7 +204,19 @@ def main():
     ap.add_argument("-j", type=int, default=4)
     ap.add_argument("--with-c", action="store_true", help="compiler aussi le C decompile du jeu (registres par exceptions, plus lent)")
     ap.add_argument("--instrument", action="store_true", help="trace les entrees de fonctions (dernier appels au plantage)")
+    ap.add_argument("--arch", default=None, help="macOS : arm64 ou x86_64 (par defaut celle de ce Mac)")
     a = ap.parse_args()
+    if not WIN32 and a.with_c:
+        # le C matche utilise de vrais pointeurs, 64 bits ici : structures et pointeurs en memoire DS casses (MACOS.md 3.5)
+        sys.exit("--with-c : Windows 32 bits seulement")
+    if DARWIN:
+        arch = a.arch or platform.machine()
+        if arch not in ("arm64", "x86_64"):
+            sys.exit("--arch : arm64 ou x86_64, pas %s" % arch)
+        CC[:] = ["clang", "-arch", arch]
+        low_priority()
+    elif not WIN32:
+        sys.exit("pas de profil de compilation pour la plateforme %s" % sys.platform)
     if a.recipe:
         game = recipe.RecipeGame(a.recipe, a.rom)
         root, code = Path("."), game.code
@@ -169,10 +227,18 @@ def main():
     out = Path(a.out) if a.out else HERE.parent / "build" / (code + ("-c" if a.with_c else "") + ("-debug" if a.instrument else ""))
     if a.instrument:
         skip = "-finstrument-functions-exclude-function-list=LDRW,ROR,LSL,LSR,ASR,CLZ,SAT32"
+        if not WIN32:  # clang n'a pas cette liste : les petites fonctions du PRELUDE sont inlinees avant l'instrumentation
+            skip = "-finstrument-functions-after-inlining"
         GAME_FLAGS.extend(["-finstrument-functions", skip])
         LIFT_FLAGS.extend(["-finstrument-functions", skip, "-DNDS_INSTRUMENT"])
         RUNTIME_FLAGS.append("-DNDS_INSTRUMENT")
     (out / "obj").mkdir(parents=True, exist_ok=True)
+    # les objets ne sont refaits que si leur source change : un autre compilateur ou une autre -arch les refait tous
+    stamp = out / "obj" / "cc.txt"
+    if not stamp.exists() or stamp.read_text() != " ".join(CC):
+        for o in (out / "obj").glob("*.o"):
+            o.unlink()
+        stamp.write_text(" ".join(CC))
     (out / "lift").mkdir(exist_ok=True)
     print("jeu", code, "->", out, flush=True)
     if not a.recipe:
@@ -184,7 +250,7 @@ def main():
         game.functions[addr] = (name, *game.functions[addr][1:])
 
     # 1. runtime : ce qu'il definit remplace le jeu
-    rt_srcs = sorted(RUNTIME.glob("*.c"))
+    rt_srcs = runtime_sources()
     rt_flags = RUNTIME_FLAGS + ["-I", RUNTIME]
     with ThreadPoolExecutor(a.j) as e:
         res = list(e.map(compile_one, [(s, obj_for(out, s), rt_flags) for s in rt_srcs]))
@@ -194,11 +260,19 @@ def main():
     if fails:
         sys.exit("runtime : erreur de compilation")
     rt_objs = [obj_for(out, s) for s in rt_srcs]
-    rt_defs = {s[1:] for syms in nm_defined(rt_objs, a.j).values() for t, s in syms if t in "TDBR"}
+    rt_syms = nm_defined(rt_objs, a.j)
+    # la couche systeme (os_*.c) ne remplace rien du jeu : son main (macOS) n'est pas le main du jeu, que crt0 appelle
+    os_objs = {obj_for(out, s) for s in rt_srcs if s.name in PLATFORM_SOURCES}
+    rt_defs = {s[1:] for o, syms in rt_syms.items() if o not in os_objs for t, s in syms if t in "TDBR"}
 
     # 2. C du jeu
     by_addr = sorted(game.functions)
     names = {addr: game.functions[addr][0] for addr in by_addr}
+    if not WIN32:
+        # nom de l'hote : le jeu a ses memcpy, exit, sprintf... qui prennent des adresses DS ; sous leur vrai nom ils
+        # remplaceraient ceux de libSystem dans le runtime et dans les appels que clang ajoute. GAME_FN de nitro.h.
+        # Ce que le runtime remplace garde son nom.
+        names = {addr: n if n in rt_defs else HOST_PREFIX + n for addr, n in names.items()}
     srcs = []
     file_funcs = {}
     kr_files = 0
@@ -273,10 +347,9 @@ def main():
         if len(lifter.flag_funcs) + len(lifter.gosub_funcs) == before:
             break
     print("fonctions a retour par drapeaux :", " ".join(sorted(lifter.flag_funcs))[:600])
-    all_calls = set(re.findall(r"CALLF\((\w+)\)|\(u32\)&(\w+)", "\n".join(bodies)))
-    for pair in all_calls:
-        n = pair[0] or pair[1]
-        if n and not n.startswith("nds_"):
+    # les pointeurs de code sont des adresses DS (nds_call_target) : seuls les appels directs nomment une fonction
+    for n in set(re.findall(r"CALLF\((\w+)\)", "\n".join(bodies))):
+        if not n.startswith("nds_"):
             protos.add(n)
     lift_c = arm2c.PRELUDE + "\n".join("extern u64 %s();" % p for p in sorted(protos)) + "\n\n" + "\n".join(bodies)
     lift_path = out / "lift" / "lifted.c"
@@ -287,29 +360,25 @@ def main():
     # un seul gros fichier serait lent et fragile : gcc -O1 tient bien 2 Mo de C simple
     lobj = out / "obj" / "lifted.o"
     if not lobj.exists() or lobj.stat().st_mtime < lift_path.stat().st_mtime:
-        p = run(["gcc", *LIFT_FLAGS, "-c", lift_path, "-o", lobj])
+        p = run([*CC, *LIFT_FLAGS, "-c", lift_path, "-o", lobj])
         if p.returncode:
             print(p.stderr[:5000])
             sys.exit("lifted.c : erreur")
 
-    # 4. tables : pointeurs de fonctions dans les donnees, adresse ARM -> x86, symboles absolus
+    # 4. tables : adresse ARM -> fonction de l'hote (nds_call_target), entree, build_info.
+    # La memoire DS garde les pointeurs de fonctions du jeu tels quels (adresses ARM), rien n'y est corrige.
     game_objs = [obj_for(out, s) for s in good]
     defs = nm_defined(game_objs + [lobj], a.j)
     defined = {s[1:]: t for syms in defs.values() for t, s in syms}
     defined.update({s: "T" for s in rt_defs})
     fn_names = {n for n in names.values() if n in defined}
     table = sorted((addr, n) for addr, n in list(names.items()) + [(k, v) for k, v in lifter.new_subs.items()] if n in defined or n in lifter.new_subs.values())
-    fix = sorted((frm, to & ~1) for frm, (kind, to) in game.relocs.items() if kind == "load" and (to & ~1) in dict(table))
     gen = ["typedef unsigned int u32;"]
-    tname = dict(table)
     for _, n in table:
         gen.append("extern char %s[];" % n)
     gen.append("const struct { u32 arm; void *x86; } nds_fn_table[] = {")
     gen += ["  {0x%08x, %s}," % (addr, n) for addr, n in table]
     gen.append("}; const unsigned nds_fn_count = %d;" % len(table))
-    gen.append("const struct { u32 at; void *x86; } nds_fixups[] = {")
-    gen += ["  {0x%08x, %s}," % (frm, tname[to]) for frm, to in fix]
-    gen.append("}; const unsigned nds_fixup_count = %d;" % len(fix))
     gen.append("extern char %s[]; void *const nds_entry_fn = %s;" % (names[game.entry], names[game.entry]))
     gen.append("const u32 nds_build_info_offset = 0x%x;" % game.build_info)
     gen.append("const int nds_has_c = %d;" % (1 if good else 0))
@@ -317,13 +386,14 @@ def main():
     # des fonctions du jeu que le runtime appelle : leur vrai nom seulement pour le jeu qui les decrit
     open_screen = patches.get("functions", {}).get("nds_open_screen")
     if open_screen:
+        open_screen = open_screen if WIN32 else HOST_PREFIX + open_screen
         gen.append("extern char %s[]; void *const nds_open_screen = %s;" % (open_screen, open_screen))
     else:
         gen.append("void *const nds_open_screen = 0;")
     gen_path = out / "lift" / "tables.c"
     gen_path.write_text("\n".join(gen) + "\n")
     gobj = out / "obj" / "tables.o"
-    p = run(["gcc", "-m32", "-c", "-w", "-std=gnu89", gen_path, "-o", gobj])
+    p = run([*CC, "-c", "-w", "-std=gnu89", gen_path, "-o", gobj])
     if p.returncode:
         print(p.stderr[:3000])
         sys.exit("tables.c : erreur")
@@ -334,39 +404,53 @@ def main():
         for t, s in syms:
             if t in "DBRC" and s[1:] in game.data:
                 data_defs.setdefault(o, []).append(s)
+    if data_defs and not WIN32:
+        sys.exit("donnees definies hors du runtime : " + " ".join(s for v in data_defs.values() for s in v)[:600])
     for o, syms in data_defs.items():
         run(["objcopy", *sum((["-W", s] for s in syms), []), o])
     print("donnees definies par le C et rendues faibles :", sum(len(v) for v in data_defs.values()))
-    abs_lines = []
-    for n, addr in sorted(game.data.items()):
-        if n in rt_defs:
-            continue
-        abs_lines += [".globl _%s" % n, ".set _%s, 0x%08x" % (n, addr)]
-    abs_path = out / "lift" / "dsabs.s"
-    abs_path.write_text("\n".join(abs_lines) + "\n")
-    aobj = out / "obj" / "dsabs.o"
-    p = run(["as", "--32", abs_path, "-o", aobj])
+    data = [(n, addr) for n, addr in sorted(game.data.items()) if n not in rt_defs]
+    if WIN32:
+        abs_lines = []
+        for n, addr in data:
+            abs_lines += [".globl _%s" % n, ".set _%s, 0x%08x" % (n, addr)]
+        abs_path = out / "lift" / "dsabs.s"
+        abs_path.write_text("\n".join(abs_lines) + "\n")
+        aobj = out / "obj" / "dsabs.o"
+        p = run(["as", "--32", abs_path, "-o", aobj])
+    else:
+        # ld64 n'a pas de symboles absolus utilisables : le code traduit a les adresses en nombres, et le runtime lit
+        # celles qu'il nomme (GAME_SYM/GAME_ADDR de nitro.h) dans nds_addr_<nom>
+        abs_lines = ["const unsigned nds_addr_%s = 0x%08xu;" % (n, addr) for n, addr in data if re.fullmatch(r"[A-Za-z_]\w*", n)]
+        abs_path = out / "lift" / "dsaddr.c"
+        abs_path.write_text("\n".join(abs_lines) + "\n")
+        aobj = out / "obj" / "dsaddr.o"
+        p = run([*CC, "-c", "-w", "-std=gnu89", abs_path, "-o", aobj])
     if p.returncode:
         print(p.stderr[:3000])
-        sys.exit("dsabs : erreur")
+        sys.exit("adresses des donnees : erreur")
 
     # 6. edition de liens, avec bouchons pour les symboles introuvables
-    k32 = out / "libkernel32.a"
-    run(["dlltool", "-m", "i386", "--as-flags=--32", "-k", "-d", RUNTIME / "kernel32.def", "-l", k32])
-    w32 = out / "libwinmm.a"
-    run(["dlltool", "-m", "i386", "--as-flags=--32", "-k", "-d", RUNTIME / "winmm.def", "-l", w32])
-    ws2 = out / "libws2_32.a"
-    run(["dlltool", "-m", "i386", "--as-flags=--32", "-k", "-d", RUNTIME / "ws2_32.def", "-l", ws2])
-    exe = out / (code + ".exe")
+    if WIN32:
+        k32 = out / "libkernel32.a"
+        run(["dlltool", "-m", "i386", "--as-flags=--32", "-k", "-d", RUNTIME / "kernel32.def", "-l", k32])
+        w32 = out / "libwinmm.a"
+        run(["dlltool", "-m", "i386", "--as-flags=--32", "-k", "-d", RUNTIME / "winmm.def", "-l", w32])
+        ws2 = out / "libws2_32.a"
+        run(["dlltool", "-m", "i386", "--as-flags=--32", "-k", "-d", RUNTIME / "ws2_32.def", "-l", ws2])
+    exe = out / (code + EXE)
     objs = rt_objs + game_objs + [lobj, gobj, aobj]
     rsp = out / "link.rsp"
     def link(extra):
         rsp.write_text("\n".join('"%s"' % str(o).replace("\\", "/") for o in objs + extra))
-        return run(["ld", "-m", "i386pe", "-e", "_nds_start", "--stack", "0x40000","--image-base", "0x10000000",
-                    "--subsystem", "console", "--disable-dynamicbase", "--disable-reloc-section",
-                    "@" + str(rsp), k32, w32, ws2, "-o", exe])
+        if WIN32:
+            return run(["ld", "-m", "i386pe", "-e", "_nds_start", "--stack", "0x40000","--image-base", "0x10000000",
+                        "--subsystem", "console", "--disable-dynamicbase", "--disable-reloc-section",
+                        "@" + str(rsp), k32, w32, ws2, "-o", exe])
+        # clang + ld64 : libSystem, AudioToolbox pour le son ; dyld entre dans main (os_posix.c), ld64 signe ad hoc la sortie arm64
+        return run([*CC, "@" + str(rsp), "-framework", "AudioToolbox", "-o", exe])
     p = link([])
-    missing = sorted(set(re.findall(r"undefined reference to `([^']+)'", p.stderr)))
+    missing = sorted(set(MISSING.findall(p.stderr)))
     if missing:
         stub = out / "lift" / "missing.c"
         lines = ["void nds_missing(const char *);"]
@@ -376,7 +460,7 @@ def main():
             lines.append('unsigned long long %s(void) { nds_missing("%s"); return 0; }' % (m, m))
         stub.write_text("\n".join(lines) + "\n")
         sobj = out / "obj" / "missing.o"
-        run(["gcc", "-m32", "-w", "-std=gnu89", "-O1", "-fno-builtin", "-c", stub, "-o", sobj])
+        run([*CC, "-w", "-std=gnu89", "-O1", "-fno-builtin", "-c", stub, "-o", sobj])
         print("symboles sans definition (bouchons) :", len(missing), " ".join(missing[:60]))
         p = link([sobj])
     if p.returncode:

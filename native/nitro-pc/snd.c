@@ -1,10 +1,6 @@
 /* Son : le travail du firmware ARM7 (sequenceur SSEQ, banques SBNK, ondes SWAV, flux PCM) et le mixeur. */
 #include "nitro.h"
 
-IMPORT unsigned WINAPI waveOutOpen(void **, unsigned, const void *, unsigned long, unsigned long, unsigned long);
-IMPORT unsigned WINAPI waveOutPrepareHeader(void *, void *, unsigned);
-IMPORT unsigned WINAPI waveOutWrite(void *, void *, unsigned);
-
 #define RATE 32768
 #define CHANNELS 16
 #define PLAYERS 16
@@ -14,7 +10,7 @@ IMPORT unsigned WINAPI waveOutWrite(void *, void *, unsigned);
 volatile u32 *snd_shared(void);
 
 static volatile long lock_word;
-static void lock(void) { while (__sync_lock_test_and_set(&lock_word, 1)) Sleep(0); }
+static void lock(void) { while (__sync_lock_test_and_set(&lock_word, 1)) os_yield(); }
 static void unlock(void) { __sync_lock_release(&lock_word); }
 
 /* ------------------------------------------------------------------ tables */
@@ -23,9 +19,13 @@ static float pitch_table[768];   /* demi-ton / 64 -> rapport */
 static s16 vel_table[128];       /* volume 0..127 -> 1/10 dB */
 
 static double ln(double x) {
+#if defined(__i386__) /* sans libm sous Windows */
     double r;
     __asm__("fldln2\n fxch\n fyl2x" : "=t"(r) : "0"(x) : "st(1)");
     return r;
+#else
+    return __builtin_log(x);
+#endif
 }
 
 static void tables_init(void) {
@@ -219,9 +219,9 @@ static s16 global_var[16];
 static s16 *var_ptr(Player *pl, u32 n, s16 *fallback) {
     volatile u32 *sh = snd_shared();
     if (!sh) return fallback;
-    if (n >= 16) return (s16 *)((u32)sh + 0x20 + 16 * 0x24) + (n - 16);
+    if (n >= 16) return (s16 *)((volatile u8 *)sh + 0x20 + 16 * 0x24) + (n - 16);
     int p = (int)(pl - players);
-    return (s16 *)((u32)sh + 0x20 + p * 0x24) + n;
+    return (s16 *)((volatile u8 *)sh + 0x20 + p * 0x24) + n;
 }
 
 static u32 varlen(const u8 **pc) {
@@ -241,13 +241,15 @@ static u32 fall_rate(u32 v) {
     return 0x1E00 / (126 - v);
 }
 
+/* bank : banque en memoire DS ; ses archives d'ondes y sont rangees par adresse DS */
 static const u8 *arc_wave(const u8 *bank, u32 arc_slot, u32 wave) {
-    const u8 *arc = *(const u8 **)(bank + 0x18 + arc_slot * 8);
-    if (!arc) return 0;
+    u32 arc_addr = *(u32 *)(bank + 0x18 + arc_slot * 8);
+    if (!arc_addr) return 0;
+    const u8 *arc = DS(arc_addr);
     if (wave >= *(u32 *)(arc + 0x38)) return 0;
     u32 v = *(u32 *)(arc + 0x3C + wave * 4);
     if (!v) return 0;
-    return v < 0x02000000u ? arc + v : (const u8 *)v;
+    return v < 0x02000000u ? arc + v : DS(v);
 }
 
 /* trouve l'instrument et son ton pour une note */
@@ -608,7 +610,7 @@ static void seq_update(void) {
             }
             pl->ticks++;
             volatile u32 *sh = snd_shared();
-            if (sh) *(u32 *)((u32)sh + 0x20 + p * 0x24 + 0x20) = pl->ticks;
+            if (sh) *(u32 *)((volatile u8 *)sh + 0x20 + p * 0x24 + 0x20) = pl->ticks;
             if (!any) { player_stop(pl); break; }
             /* notes de duree limitee */
             for (int i = 0; i < CHANNELS; i++) {
@@ -676,7 +678,8 @@ void snd_command(u32 id, u32 *arg) {
     case 0: /* START_SEQ */
     case 2: /* PREPARE_SEQ */
         if (arg[0] < PLAYERS) {
-            player_start(&players[arg[0]], (const u8 *)arg[1], arg[2], (const u8 *)arg[3]);
+            /* sequence et banque : adresses DS ; banque 0 = aucune */
+            player_start(&players[arg[0]], DS(arg[1]), arg[2], arg[3] ? DS(arg[3]) : 0);
             if (id == 0) players[arg[0]].paused = 0;
         }
         break;
@@ -737,7 +740,7 @@ void snd_command(u32 id, u32 *arg) {
         u32 timer = arg[0] >> 16;
         u32 fmt = (arg[3] >> 24) & 3, loop = (arg[3] >> 26) & 3;
         u32 ls = (arg[3] & 0xFFFF) * 4, ll = (arg[2] & 0x3FFFFF) * 4;
-        chan_start_wave(c, (const u8 *)arg[1], fmt, loop, ls, ll);
+        chan_start_wave(c, DS(arg[1]), fmt, loop, ls, ll);
         c->seq = 0;
         c->player = 0xFF;
         c->started = 0;
@@ -852,68 +855,48 @@ static void mix(s16 *out, u32 frames) {
     }
 }
 
-typedef struct {
-    u16 tag, channels;
-    u32 rate, bytes;
-    u16 align, bits, extra;
-} __attribute__((packed)) WaveFmt;
-typedef struct {
-    void *data;
-    u32 len, recorded, user, flags, loops;
-    void *next;
-    u32 reserved;
-} WaveHdr;
-
-#define BUFFERS 6
 #define BUF_FRAMES 384
 
-static unsigned long WINAPI audio_thread(void *arg) {
-    static s16 buf[BUFFERS][BUF_FRAMES * 2];
-    static WaveHdr hdr[BUFFERS];
-    void *dev = 0;
-    WaveFmt fmt = {1, 2, RATE, RATE * 4, 4, 16, 0};
-    if (!nds_arg("--mute", 0) && waveOutOpen(&dev, 0xFFFFFFFFu, &fmt, 0, 0, 0)) {
-        nds_log("pas de sortie son");
-        dev = 0;
+static void audio_thread(void *arg) {
+    static s16 idle_buf[BUF_FRAMES * 2];
+    OsAudio *dev = 0;
+    if (!nds_arg("--mute", 0)) {
+        dev = os_audio_open(RATE, BUF_FRAMES);
+        if (!dev) nds_log("pas de sortie son");
     }
-    SetThreadPriority(GetCurrentThread(), 2);
-    for (int i = 0; i < BUFFERS; i++) {
-        hdr[i].data = buf[i];
-        hdr[i].len = sizeof(buf[i]);
-        if (dev) {
-            waveOutPrepareHeader(dev, &hdr[i], sizeof(WaveHdr));
-            mix(buf[i], BUF_FRAMES);
-            waveOutWrite(dev, &hdr[i], sizeof(WaveHdr));
+    os_thread_set_high_priority();
+    if (dev) {
+        /* amorce : tous les tampons sont remplis avant que la sortie ne commence a consommer */
+        for (u32 i = os_audio_depth(dev); i; i--) {
+            s16 *b = os_audio_acquire(dev);
+            mix(b, BUF_FRAMES);
+            os_audio_submit(dev);
         }
     }
-    int cur = 0;
     const char *wav_path = 0;
-    void *wav = (void *)-1;
+    OsFile wav = OS_BAD_FILE;
     u32 wav_bytes = 0;
     if (nds_arg("--wav", &wav_path) && wav_path) {
-        wav = CreateFileA(wav_path, 0x40000000u, 0, 0, 2, 0, 0);
+        wav = os_file_create(wav_path);
         master = 0.6f;
     }
     for (;;) {
-        if (wav != (void *)-1) {
-            unsigned long w;
-            Sleep(BUF_FRAMES * 1000 / RATE);
-            mix(buf[0], BUF_FRAMES);
-            WriteFile(wav, buf[0], sizeof(buf[0]), &w, 0);
-            wav_bytes += sizeof(buf[0]);
+        if (wav != OS_BAD_FILE) {
+            os_sleep(BUF_FRAMES * 1000 / RATE);
+            mix(idle_buf, BUF_FRAMES);
+            os_file_write(wav, idle_buf, sizeof(idle_buf));
+            wav_bytes += sizeof(idle_buf);
             (void)wav_bytes;
         } else if (dev) {
-            while (!(*(volatile u32 *)&hdr[cur].flags & 1)) Sleep(2);
-            mix(buf[cur], BUF_FRAMES);
-            waveOutWrite(dev, &hdr[cur], sizeof(WaveHdr));
-            cur = (cur + 1) % BUFFERS;
+            s16 *b = os_audio_acquire(dev);
+            mix(b, BUF_FRAMES);
+            os_audio_submit(dev);
         } else {
             /* sans sortie son (ou --mute), le sequenceur avance quand meme : les flux en dependent */
-            Sleep(BUF_FRAMES * 1000 / RATE);
-            mix(buf[0], BUF_FRAMES);
+            os_sleep(BUF_FRAMES * 1000 / RATE);
+            mix(idle_buf, BUF_FRAMES);
         }
     }
-    return 0;
 }
 
 void snd_start_output(void) {
@@ -922,5 +905,5 @@ void snd_start_output(void) {
         for (int t = 0; t < 16; t++) players[p].tracks[t] = 0xFF;
     for (int t = 0; t < TRACKS; t++) tracks[t].index = (u8)t;
     if (nds_arg("--mute", 0)) master = 0;
-    CreateThread(0, 0x40000, audio_thread, 0, 0, 0);
+    os_thread_start(audio_thread, 0, 0x40000);
 }

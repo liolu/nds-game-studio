@@ -10,7 +10,7 @@
 static const u32 bank_size[9] = {KB(128), KB(128), KB(128), KB(128), KB(64), KB(16), KB(16), KB(32), KB(16)};
 static const u32 lcdc_addr[9] = {0x06800000, 0x06820000, 0x06840000, 0x06860000, 0x06880000, 0x06890000, 0x06894000, 0x06898000, 0x068A0000};
 static u8 bank_store[9][KB(128)];
-static u32 bank_cpu[9];   /* adresse CPU actuelle de la banque, 0 si aucune */
+static u32 bank_cpu[9];   /* adresse CPU (DS) actuelle de la banque, 0 si aucune */
 static u8 bank_cnt[9];
 static u8 *tex_slot[4];
 static u8 *texpal_slot[6];
@@ -81,8 +81,8 @@ void vram_cnt_changed(void) {
         u8 v = REG8(IO + 0x200 + vram_reg[b]);
         if (v == bank_cnt[b]) continue;
         if (bank_cpu[b]) {
-            nds_copy(bank_store[b], (void *)bank_cpu[b], bank_size[b]);
-            nds_zero((void *)bank_cpu[b], bank_size[b]);
+            nds_copy(bank_store[b], DS(bank_cpu[b]), bank_size[b]);
+            nds_zero(DS(bank_cpu[b]), bank_size[b]);
             bank_cpu[b] = 0;
         }
         bank_cnt[b] = v;
@@ -96,7 +96,7 @@ void vram_cnt_changed(void) {
         u32 mst = v & 7, ofs = (v >> 3) & 3;
         u32 addr = map_cpu(b, mst, ofs);
         if (addr && !bank_cpu[b]) {
-            nds_copy((void *)addr, bank_store[b], bank_size[b]);
+            nds_copy(DS(addr), bank_store[b], bank_size[b]);
             bank_cpu[b] = addr;
         } else if (!addr) {
             map_special(b, mst, ofs);
@@ -118,17 +118,17 @@ typedef struct {
 } Snapshot;
 static Snapshot snap;
 static volatile int worker_busy;
-static void *worker_event;
+static OsEvent worker_event;
 
 static void snapshot_take(void) {
     Snapshot *s = &snap;
-    nds_copy(s->io, (void *)IO, 0x2000);
-    nds_copy(s->pal, (void *)0x05000000u, 0x800);
-    nds_copy(s->oam, (void *)0x07000000u, 0x800);
-    nds_copy(s->bg_a, (void *)0x06000000u, KB(512));
-    nds_copy(s->bg_b, (void *)0x06200000u, KB(128));
-    nds_copy(s->obj_a, (void *)0x06400000u, KB(256));
-    nds_copy(s->obj_b, (void *)0x06600000u, KB(128));
+    nds_copy(s->io, DS(IO), 0x2000);
+    nds_copy(s->pal, DS(0x05000000u), 0x800);
+    nds_copy(s->oam, DS(0x07000000u), 0x800);
+    nds_copy(s->bg_a, DS(0x06000000u), KB(512));
+    nds_copy(s->bg_b, DS(0x06200000u), KB(128));
+    nds_copy(s->obj_a, DS(0x06400000u), KB(256));
+    nds_copy(s->obj_b, DS(0x06600000u), KB(128));
     for (int i = 0; i < 4; i++) {
         s->has_bgext_a[i] = bgext_a[i] != 0;
         if (bgext_a[i]) nds_copy(s->bgext_a[i], bgext_a[i], KB(8));
@@ -143,7 +143,7 @@ static void snapshot_take(void) {
     u32 mode = (REG32(IO) >> 16) & 3;
     if (mode == 2) {
         u32 b = (REG32(IO) >> 18) & 3;
-        nds_copy(s->lcdc[b], bank_cpu[b] == lcdc_addr[b] ? (u8 *)lcdc_addr[b] : bank_store[b], KB(128));
+        nds_copy(s->lcdc[b], bank_cpu[b] == lcdc_addr[b] ? DS(lcdc_addr[b]) : bank_store[b], KB(128));
     }
     s->frame = nds_frame;
 }
@@ -507,27 +507,26 @@ static int render_engine(const Eng *base, u32 *screen) {
 #define MAX_THREADS 8
 typedef void (*BandFn)(void *arg, int band, int bands);
 static int pool_size;
-static void *pool_go[MAX_THREADS], *pool_done[MAX_THREADS];
+static OsEvent pool_go[MAX_THREADS], pool_done[MAX_THREADS];
 static volatile BandFn pool_fn;
 static void *volatile pool_arg;
 
-static unsigned long WINAPI pool_thread(void *param) {
-    int index = (int)(u32)param;
+static void pool_thread(void *param) {
+    int index = (int)(uptr)param;
     for (;;) {
-        WaitForSingleObject(pool_go[index], 0xFFFFFFFFu);
+        os_event_wait(pool_go[index]);
         pool_fn(pool_arg, index + 1, pool_size + 1);
-        SetEvent(pool_done[index]);
+        os_event_set(pool_done[index]);
     }
-    return 0;
 }
 
 /* appelle fn(arg, 0..n-1, n) ; le fil courant fait la bande 0 */
 void gfx_parallel(BandFn fn, void *arg) {
     pool_fn = fn;
     pool_arg = arg;
-    for (int i = 0; i < pool_size; i++) SetEvent(pool_go[i]);
+    for (int i = 0; i < pool_size; i++) os_event_set(pool_go[i]);
     fn(arg, 0, pool_size + 1);
-    for (int i = 0; i < pool_size; i++) WaitForSingleObject(pool_done[i], 0xFFFFFFFFu);
+    for (int i = 0; i < pool_size; i++) os_event_wait(pool_done[i]);
 }
 
 /* ------------------------------------------------------------------ assemblage */
@@ -642,9 +641,9 @@ static void engine_output(const Eng *e, int index, int k, int w, int h, int marg
 /* ------------------------------------------------------------------ boucle du fil de rendu */
 static u32 *back_top, *back_bottom;
 
-static unsigned long WINAPI render_thread(void *arg) {
+static void render_thread(void *arg) {
     for (;;) {
-        WaitForSingleObject(worker_event, 0xFFFFFFFFu);
+        os_event_wait(worker_event);
         int k, ds_width;
         present_config(&k, &ds_width);
         int w = ds_width * k, h = 192 * k;
@@ -666,7 +665,6 @@ static unsigned long WINAPI render_thread(void *arg) {
         present_flip(w, h, snap.frame);
         worker_busy = 0;
     }
-    return 0;
 }
 
 /* appele au VBlank par le fil du jeu */
@@ -675,19 +673,19 @@ void gfx_render(void) {
     if (!started) {
         started = 1;
         for (int i = 0; i < 32; i++) to8[i] = (u8)(i * 255 / 31);
-        int cores = (int)GetActiveProcessorCount(0xFFFF);
+        int cores = os_cpu_count();
         pool_size = cores > 4 ? (cores - 3 > MAX_THREADS - 1 ? MAX_THREADS - 1 : cores - 3) : 1;
         for (int i = 0; i < pool_size; i++) {
-            pool_go[i] = CreateEventA(0, 0, 0, 0);
-            pool_done[i] = CreateEventA(0, 0, 0, 0);
-            CreateThread(0, 0x40000, pool_thread, (void *)(u32)i, 0, 0);
+            pool_go[i] = os_event_create();
+            pool_done[i] = os_event_create();
+            os_thread_start(pool_thread, (void *)(uptr)i, 0x40000);
         }
-        worker_event = CreateEventA(0, 0, 0, 0);
-        CreateThread(0, 0x40000, render_thread, 0, 0, 0);
+        worker_event = os_event_create();
+        os_thread_start(render_thread, 0, 0x40000);
     }
     gx_begin_frame();
     if (worker_busy) return; /* le dessin precedent n'est pas fini : cette image n'est pas dessinee, le jeu continue */
     worker_busy = 1;
     snapshot_take();
-    SetEvent(worker_event);
+    os_event_set(worker_event);
 }

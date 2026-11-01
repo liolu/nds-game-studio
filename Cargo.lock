@@ -4533,6 +4533,7 @@ dependencies = [
  "dirs",
  "encoding_rs",
  "image",
+ "libc",
  "nds-nitro",
  "nds-video",
  "rfd",

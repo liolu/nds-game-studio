@@ -6,7 +6,7 @@ static const char *dump_dir;
 static u32 every = 60, max_frames, dump_from;
 static int pipe_mode;
 static const char *key_script;
-static unsigned long WINAPI input_thread(void *arg);
+static void input_thread(void *arg);
 static volatile u32 keys_now;
 static volatile int touch_down, touch_x, touch_y;
 static void script_step(void);
@@ -25,12 +25,11 @@ void present_init(void) {
     if (nds_arg("--scale", &v) && v) { cfg_scale = 0; while (*v) cfg_scale = cfg_scale * 10 + *v++ - '0'; }
     if (nds_arg("--dswidth", &v) && v) { cfg_width = 0; while (*v) cfg_width = cfg_width * 10 + *v++ - '0'; }
     if (nds_arg("--shm", &v) && v) {
-        void *map = OpenFileMappingA(0xF001F, 0, v);
-        if (map) shm = MapViewOfFile(map, 0xF001F, 0, 0, 0);
+        shm = os_shm_open(v);
         if (!shm) nds_fatal("memoire d'images introuvable : %s", v);
     }
     pipe_mode = nds_arg("--pipe", 0);
-    if (pipe_mode) CreateThread(0, 0x10000, input_thread, 0, 0, 0);
+    if (pipe_mode) os_thread_start(input_thread, 0, 0x10000);
 }
 
 /* Images partagees avec le launcher : en-tete, puis deux jeux de deux ecrans, RGBA 8 bits. */
@@ -58,14 +57,14 @@ void present_config(int *scale, int *ds_width) {
 }
 
 void present_back(u32 **top, u32 **bottom) {
-    if (!shm && !local_frames) local_frames = VirtualAlloc(0, 4u * MAX_W * MAX_H * 4, 0x3000, 4);
+    if (!shm && !local_frames) local_frames = os_mem_alloc(0, 4u * MAX_W * MAX_H * 4);
     *top = frame_ptr(back_set, 0);
     *bottom = frame_ptr(back_set, 1);
 }
 
 static void write_bmp(u32 frame, const u32 *top, const u32 *bottom, int w, int h) {
     static u8 *file;
-    if (!file) file = VirtualAlloc(0, 54 + MAX_W * MAX_H * 2 * 3 + MAX_H * 8, 0x3000, 4);
+    if (!file) file = os_mem_alloc(0, 54 + MAX_W * MAX_H * 2 * 3 + MAX_H * 8);
     int stride = (w * 3 + 3) & ~3;
     u32 size = 54 + stride * h * 2;
     u8 *d = file;
@@ -92,10 +91,7 @@ static void write_bmp(u32 frame, const u32 *top, const u32 *bottom, int w, int h
     u32 v = frame, div = 100000;
     while (div) { name[n++] = '0' + (v / div) % 10; div /= 10; }
     name[n++] = '.'; name[n++] = 'b'; name[n++] = 'm'; name[n++] = 'p'; name[n] = 0;
-    void *f = CreateFileA(name, 0x40000000u, 0, 0, 2, 0, 0);
-    unsigned long written;
-    WriteFile(f, file, size, &written, 0);
-    CloseHandle(f);
+    os_file_save(name, file, size);
 }
 
 /* Fin d'une image dans le fil de rendu : les lignes vont d'un seul tenant dans le jeu d'images, et le launcher lit le jeu termine */
@@ -130,8 +126,8 @@ void present_frame(void) {
         if (keys_now & (1 << 11)) xy &= ~(1u << 11);
         REG16(0x027FFFA8u) = (u16)xy;
         /* dernier releve du stylet pour le SDK : x 12 bits, y 12 bits, touche */
-        *(volatile u16 *)0x027FFFAAu = (u16)((touch_x & 0xFFF) | ((touch_y & 0xF) << 12));
-        *(volatile u16 *)0x027FFFACu = (u16)(((touch_y >> 4) & 0xFF) | (touch_down ? 0x100 : 0));
+        REG16(0x027FFFAAu) = (u16)((touch_x & 0xFFF) | ((touch_y & 0xF) << 12));
+        REG16(0x027FFFACu) = (u16)(((touch_y >> 4) & 0xFF) | (touch_down ? 0x100 : 0));
     }
     static int trace_on = -1;
     if (trace_on < 0) trace_on = nds_arg("--trace", 0);
@@ -163,7 +159,7 @@ void present_frame(void) {
     if (max_frames && nds_frame >= max_frames) {
         extern u32 nds_swaps;
         nds_log("%u images, %u dessinees, %u echanges 3D", nds_frame, flips, nds_swaps);
-        ExitProcess(0);
+        os_exit(0);
     }
 }
 
@@ -172,14 +168,13 @@ static volatile u32 keys_now;
 static volatile int touch_down, touch_x, touch_y;
 static volatile int mouse_x, mouse_y;
 
-static unsigned long WINAPI input_thread(void *arg) {
-    void *in = GetStdHandle((unsigned long)-10);
+static void input_thread(void *arg) {
     u16 packet[8];
-    unsigned long got;
     for (;;) {
         u32 have = 0;
         while (have < sizeof packet) {
-            if (!ReadFile(in, (u8 *)packet + have, sizeof packet - have, &got, 0) || !got) ExitProcess(0); /* launcher ferme */
+            u32 got = os_stdin_read((u8 *)packet + have, sizeof packet - have);
+            if (!got) os_exit(0); /* launcher ferme */
             have += got;
         }
         keys_now = packet[0];
@@ -191,7 +186,6 @@ static unsigned long WINAPI input_thread(void *arg) {
         mouse_x = (s16)packet[6];
         mouse_y = (s16)packet[7];
     }
-    return 0;
 }
 
 /* essais sans fenetre : --keys "600:8,620:0" = a l'image 600 le masque de touches 8 (Start), etc. */
@@ -283,10 +277,7 @@ static void peek_step(void) {
         int n = 0;
         while (*p && *p != ',' && n < 299) name[n++] = *p++;
         name[n] = 0;
-        void *f = CreateFileA(name, 0x40000000u, 0, 0, 2, 0, 0);
-        unsigned long written;
-        WriteFile(f, (void *)addr, size, &written, 0);
-        CloseHandle(f);
+        os_file_save(name, DS(addr), size);
         peeks = *p == ',' ? p + 1 : p;
     }
 }

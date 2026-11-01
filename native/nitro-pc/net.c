@@ -6,34 +6,13 @@
  * un DS seul. Pas de partie telechargee (MB, une seule carte) : le jeu de l'invite serait un autre programme, Multiboot/child.bin. */
 #include "nitro.h"
 
-typedef void (*WmCallback)(void *);
+typedef u64 (*Fn)();
 
 enum { WM_OK = 0, WM_FAILED = 1, WM_OPERATING = 2, WM_ILLEGAL = 3, WM_NO_DATASET = 5, WM_NO_CHILD = 7 };
 enum { ST_PARENT_START = 0, ST_SCAN_START = 3, ST_NOT_FOUND = 4, ST_FOUND = 5, ST_CONNECT_START = 6, ST_CONNECTED = 7, ST_DISCONNECTED = 9, ST_MP_START = 10 };
 enum { MSG_INFO = 1, MSG_CONNECT, MSG_WELCOME, MSG_STEP, MSG_SET };
 
-/* ------------------------------------------------------------------ winsock */
-typedef struct { u16 family, port; u32 addr; u8 zero[8]; } SockAddr;
-typedef struct { u32 name, aliases; u16 type, length; u32 **list; } HostEnt;
-IMPORT int WINAPI WSAStartup(u16, void *);
-IMPORT u32 WINAPI socket(int, int, int);
-IMPORT int WINAPI bind(u32, const SockAddr *, int);
-IMPORT int WINAPI listen(u32, int);
-IMPORT u32 WINAPI accept(u32, SockAddr *, int *);
-IMPORT int WINAPI connect(u32, const SockAddr *, int);
-IMPORT int WINAPI send(u32, const void *, int, int);
-IMPORT int WINAPI recv(u32, void *, int, int);
-IMPORT int WINAPI closesocket(u32);
-IMPORT int WINAPI ioctlsocket(u32, long, u32 *);
-IMPORT int WINAPI setsockopt(u32, int, int, const void *, int);
-IMPORT int WINAPI WSAGetLastError(void);
-IMPORT u32 WINAPI inet_addr(const char *);
-IMPORT HostEnt *WINAPI gethostbyname(const char *);
-#define NO_SOCKET 0xFFFFFFFFu
-#define FIONBIO 0x8004667Eu
-#define WOULD_BLOCK 10035
-#define TCP_NODELAY_OPT 1
-
+#define NO_SOCKET OS_NO_SOCKET
 #define MAX_PEERS 4 /* aid 1 a 3 chez l'hote ; l'hote lui-meme chez l'invite */
 #define BUF_SIZE 2048
 #define STEPS 16
@@ -56,7 +35,7 @@ static int ready, is_parent, my_aid;
 static u32 net_port;
 static const char *join_host;
 
-static WmCallback parent_cb, scan_cb, connect_cb;
+static u32 parent_cb, scan_cb, connect_cb;
 static u8 parent_param[0x40];
 static u8 own_bss[BSS_SIZE], host_bss[BSS_SIZE];
 static int have_host_bss;
@@ -73,12 +52,12 @@ static u8 set_buf[STEPS][4 + 4 * DS_MAX];
 static u32 set_r, set_w;
 
 /* ------------------------------------------------------------------ rappels : dans le contexte d'une interruption, comme sur la console */
-typedef struct { WmCallback cb; u16 data[0x80]; } Pending;
+typedef struct { u32 cb; u16 data[0x80]; } Pending;
 #define QUEUE 32
 static Pending queue[QUEUE];
 static u32 queue_r, queue_w;
 
-static u16 *post(WmCallback cb, u16 api, u16 err) {
+static u16 *post(u32 cb, u16 api, u16 err) {
     static u16 discard[0x80];
     if (!cb || queue_w - queue_r >= QUEUE) return discard;
     Pending *p = &queue[queue_w++ % QUEUE];
@@ -90,28 +69,20 @@ static u16 *post(WmCallback cb, u16 api, u16 err) {
     return p->data;
 }
 
-static void post_state(WmCallback cb, u16 api, u16 state) { post(cb, api, WM_OK)[4] = state; }
+static void post_state(u32 cb, u16 api, u16 state) { post(cb, api, WM_OK)[4] = state; }
 
 /* ------------------------------------------------------------------ sockets */
 static void net_start(void) {
-    static u8 wsa[512];
     if (ready) return;
     ready = 1;
     const char *value;
     if (nds_arg("--net-port", &value) && value) while (*value) net_port = net_port * 10 + (u32)(*value++ - '0');
     nds_arg("--net-join", &join_host);
     for (int i = 0; i < MAX_PEERS; i++) peers[i].sock = NO_SOCKET;
-    if (net_port || join_host) WSAStartup(0x0202, wsa);
-}
-
-static void socket_setup(u32 s) {
-    u32 on = 1;
-    ioctlsocket(s, FIONBIO, &on);
-    setsockopt(s, 6, TCP_NODELAY_OPT, &on, 4);
 }
 
 static void peer_close(Peer *p) {
-    if (p->sock != NO_SOCKET) closesocket(p->sock);
+    if (p->sock != NO_SOCKET) os_tcp_close(p->sock);
     p->sock = NO_SOCKET;
     p->have = 0;
     p->joined = 0;
@@ -126,14 +97,14 @@ static void peer_send(Peer *p, u8 type, const void *a, u32 a_len, const void *b,
     head[1] = (u8)(size >> 8);
     head[2] = type;
     /* peu d'octets a chaque fois : le tampon du systeme n'a pas le temps de se remplir */
-    send(p->sock, (const char *)head, 3, 0);
-    if (a_len) send(p->sock, a, (int)a_len, 0);
-    if (b_len) send(p->sock, b, (int)b_len, 0);
+    os_tcp_send(p->sock, head, 3);
+    if (a_len) os_tcp_send(p->sock, a, a_len);
+    if (b_len) os_tcp_send(p->sock, b, b_len);
 }
 
 static void close_all(void) {
     for (int i = 0; i < MAX_PEERS; i++) peer_close(&peers[i]);
-    if (listener != NO_SOCKET) closesocket(listener);
+    if (listener != NO_SOCKET) os_tcp_close(listener);
     listener = NO_SOCKET;
     is_parent = 0;
     ds_on = 0;
@@ -202,10 +173,8 @@ static void handle(Peer *p, int aid, u8 type, const u8 *data, u32 size) {
 static void peer_read(Peer *p, int aid) {
     if (p->sock == NO_SOCKET) return;
     for (;;) {
-        int got = recv(p->sock, (char *)p->buf + p->have, (int)(BUF_SIZE - p->have), 0);
-        if (got == 0 || (got < 0 && WSAGetLastError() != WOULD_BLOCK)) {
-            /* une connexion en cours n'est pas encore une perte : 10057 = pas encore connecte */
-            if (got < 0 && WSAGetLastError() == 10057) return;
+        int got = os_tcp_recv(p->sock, p->buf + p->have, BUF_SIZE - p->have);
+        if (got == 0) {
             int was_joined = p->joined || (!is_parent && my_aid);
             peer_close(p);
             if (was_joined) {
@@ -232,17 +201,16 @@ static void peer_read(Peer *p, int aid) {
 static void net_pump(void) {
     if (!ready) return;
     if (listener != NO_SOCKET) {
-        u32 s = accept(listener, 0, 0);
+        u32 s = os_tcp_accept(listener);
         if (s != NO_SOCKET) {
             int placed = 0;
             for (int aid = 1; aid < MAX_PEERS && !placed; aid++) {
                 if (peers[aid].sock != NO_SOCKET) continue;
-                socket_setup(s);
                 peers[aid].sock = s;
                 peer_send(&peers[aid], MSG_INFO, own_bss, BSS_SIZE, 0, 0);
                 placed = 1;
             }
-            if (!placed) closesocket(s);
+            if (!placed) os_tcp_close(s);
         }
     }
     for (int i = 0; i < MAX_PEERS; i++) peer_read(&peers[i], i);
@@ -301,8 +269,8 @@ void net_irq(void) {
     }
     if (scan_cb && scan_param) {
         if (have_host_bss) {
-            u8 *out = (u8 *)REG32(scan_param);
-            if (out) nds_copy(out, host_bss, BSS_SIZE);
+            u32 out = REG32(scan_param);
+            if (out) nds_copy(DS(out), host_bss, BSS_SIZE);
             u8 *d = (u8 *)post(scan_cb, 10, WM_OK);
             ((u16 *)d)[4] = ST_FOUND;
             nds_copy(d + 0xA, host_bss + 4, 6);
@@ -324,25 +292,28 @@ void net_irq(void) {
         Pending *p = &queue[queue_r % QUEUE];
         queue_r++;
         if (nds_arg("--net-log", 0)) nds_log("rappel api %u etat %u", p->data[0], p->data[4]);
-        p->cb(p->data);
+        /* le jeu lit ce message a une adresse DS : il passe par la pile, qui est dans la memoire DS (la file ne l'est pas) */
+        u16 data[0x80] __attribute__((aligned(4)));
+        nds_copy(data, p->data, sizeof data);
+        ((Fn)nds_call_target(p->cb))(HOST2DS(data), 0, 0, 0);
     }
 }
 
 /* ------------------------------------------------------------------ WM : demarrage et arret */
-u32 WM_Init(void *buf, u32 dma) { net_start(); return WM_OK; }
-u32 WM_Enable(WmCallback cb) { net_start(); post(cb, 3, WM_OK); return WM_OPERATING; }
-u32 WM_PowerOn(WmCallback cb) { post(cb, 5, WM_OK); return WM_OPERATING; }
-u32 WM_Reset(WmCallback cb) { close_all(); post(cb, 1, WM_OK); return WM_OPERATING; }
-u32 WM_End(WmCallback cb) { close_all(); post(cb, 2, WM_OK); return WM_OPERATING; }
+u32 WM_Init(u32 buf, u32 dma) { net_start(); return WM_OK; }
+u32 WM_Enable(u32 cb) { net_start(); post(cb, 3, WM_OK); return WM_OPERATING; }
+u32 WM_PowerOn(u32 cb) { post(cb, 5, WM_OK); return WM_OPERATING; }
+u32 WM_Reset(u32 cb) { close_all(); post(cb, 1, WM_OK); return WM_OPERATING; }
+u32 WM_End(u32 cb) { close_all(); post(cb, 2, WM_OK); return WM_OPERATING; }
 /* la partie telechargee n'est pas prise en charge : le jeu l'apprend ici et revient a son menu */
-u32 WM_Initialize(void *buf, WmCallback cb, u32 dma) { return WM_FAILED; }
+u32 WM_Initialize(u32 buf, u32 cb, u32 dma) { return WM_FAILED; }
 u32 WM_GetAllowedChannel(void) { return 0x2082; }
 u32 WM_GetLinkLevel(void) { return 3; }
 u32 WM_GetDispersionBeaconPeriod(void) { return 200; }
 u32 WM_GetDispersionScanPeriod(void) { return 30; }
 u32 WM_SetEntry(u32 enabled) { return WM_OPERATING; }
 
-u32 WM_MeasureChannel(WmCallback cb, u32 mode, u32 threshold, u32 channel, u32 time) {
+u32 WM_MeasureChannel(u32 cb, u32 mode, u32 threshold, u32 channel, u32 time) {
     u16 *d = post(cb, 40, WM_OK);
     d[4] = (u16)channel;
     d[5] = 0;
@@ -350,8 +321,8 @@ u32 WM_MeasureChannel(WmCallback cb, u32 mode, u32 threshold, u32 channel, u32 t
 }
 
 /* ------------------------------------------------------------------ hote */
-u32 WM_SetParentParameter(WmCallback cb, const void *param) {
-    nds_copy(parent_param, param, sizeof parent_param);
+u32 WM_SetParentParameter(u32 cb, u32 param) {
+    nds_copy(parent_param, DS(param), sizeof parent_param);
     post(cb, 7, WM_OK);
     return WM_OPERATING;
 }
@@ -380,10 +351,10 @@ static void make_own_bss(void) {
     info[0xB] = (u8)((*(const u16 *)(p + 0xE) & 1) | (*(const u16 *)(p + 0x12) & 1) << 1 | (*(const u16 *)(p + 0x14) & 1) << 2 | (*(const u16 *)(p + 0x16) & 1) << 3);
     *(u16 *)(info + 0xC) = *(const u16 *)(p + 0x34);
     *(u16 *)(info + 0xE) = *(const u16 *)(p + 0x36);
-    if (user && user_len) nds_copy(info + 0x10, (const void *)user, user_len);
+    if (user && user_len) nds_copy(info + 0x10, DS(user), user_len);
 }
 
-u32 WM_StartParent(WmCallback cb) {
+u32 WM_StartParent(u32 cb) {
     net_start();
     parent_cb = cb;
     is_parent = 1;
@@ -391,23 +362,14 @@ u32 WM_StartParent(WmCallback cb) {
     make_own_bss();
     post_state(cb, 8, ST_PARENT_START);
     if (net_port && listener == NO_SOCKET) {
-        listener = socket(2, 1, 6);
-        u32 on = 1;
-        setsockopt(listener, 0xFFFF, 4, &on, 4); /* SO_REUSEADDR */
-        SockAddr at = {2, (u16)(net_port << 8 | net_port >> 8), 0, {0}};
-        if (bind(listener, &at, sizeof at) || listen(listener, 4)) {
-            nds_log("reseau : le port %u n'a pas pu etre ouvert", net_port);
-            closesocket(listener);
-            listener = NO_SOCKET;
-        } else {
-            ioctlsocket(listener, FIONBIO, &on);
-            nds_log("reseau : hote sur le port %u", net_port);
-        }
+        listener = os_tcp_listen(net_port);
+        if (listener == NO_SOCKET) nds_log("reseau : le port %u n'a pas pu etre ouvert", net_port);
+        else nds_log("reseau : hote sur le port %u", net_port);
     }
     return WM_OPERATING;
 }
 
-u32 WM_EndParent(WmCallback cb) {
+u32 WM_EndParent(u32 cb) {
     close_all();
     post(cb, 9, WM_OK);
     return WM_OPERATING;
@@ -425,25 +387,16 @@ static void try_connect(void) {
         port = 0;
         for (t++; *t >= '0' && *t <= '9'; t++) port = port * 10 + (u32)(*t - '0');
     }
-    u32 addr = inet_addr(name);
-    if (addr == 0xFFFFFFFFu) {
-        HostEnt *found = gethostbyname(name);
-        if (!found || !found->list || !found->list[0]) return;
-        addr = *found->list[0];
-    }
-    u32 s = socket(2, 1, 6);
+    u32 s = os_tcp_connect(name, port);
     if (s == NO_SOCKET) return;
-    socket_setup(s);
-    SockAddr at = {2, (u16)(port << 8 | port >> 8), addr, {0}};
-    connect(s, &at, sizeof at);
     peers[0].sock = s;
     peers[0].have = 0;
 }
 
-u32 WM_StartScan(WmCallback cb, const void *param) {
+u32 WM_StartScan(u32 cb, u32 param) {
     net_start();
     scan_cb = cb;
-    scan_param = (u32)param;
+    scan_param = param;
     scan_end = nds_frame + SCAN_TIME;
     have_host_bss = have_host_bss && peers[0].sock != NO_SOCKET;
     post_state(cb, 10, ST_SCAN_START);
@@ -451,14 +404,14 @@ u32 WM_StartScan(WmCallback cb, const void *param) {
     return WM_OPERATING;
 }
 
-u32 WM_EndScan(WmCallback cb) {
+u32 WM_EndScan(u32 cb) {
     scan_cb = 0;
     scan_param = 0;
     post(cb, 11, WM_OK);
     return WM_OPERATING;
 }
 
-u32 WM_StartConnectEx(WmCallback cb, const void *bss, const void *ssid, u32 power_save, u32 auth) {
+u32 WM_StartConnectEx(u32 cb, u32 bss, u32 ssid, u32 power_save, u32 auth) {
     connect_cb = cb;
     if (peers[0].sock == NO_SOCKET) return WM_FAILED;
     post_state(cb, 12, ST_CONNECT_START);
@@ -466,7 +419,7 @@ u32 WM_StartConnectEx(WmCallback cb, const void *bss, const void *ssid, u32 powe
     return WM_OPERATING;
 }
 
-u32 WM_Disconnect(WmCallback cb, u32 aid) {
+u32 WM_Disconnect(u32 cb, u32 aid) {
     if (is_parent) {
         if (aid < MAX_PEERS) {
             int was = peers[aid].joined;
@@ -482,18 +435,18 @@ u32 WM_Disconnect(WmCallback cb, u32 aid) {
 }
 
 /* ------------------------------------------------------------------ echanges */
-u32 WM_StartMP(WmCallback cb, void *recv_buf, u32 recv_size, void *send_buf, u32 send_size, u32 freq) {
+u32 WM_StartMP(u32 cb, u32 recv_buf, u32 recv_size, u32 send_buf, u32 send_size, u32 freq) {
     u16 *d = post(cb, 14, WM_OK);
     d[2] = ST_MP_START;
     return WM_OPERATING;
 }
 
-u32 WM_EndMP(WmCallback cb) {
+u32 WM_EndMP(u32 cb) {
     post(cb, 16, WM_OK);
     return WM_OPERATING;
 }
 
-u32 WM_StartDataSharing(void *info, u32 port, u32 bitmap, u32 length, u32 twice) {
+u32 WM_StartDataSharing(u32 info, u32 port, u32 bitmap, u32 length, u32 twice) {
     if (length > DS_MAX) return WM_FAILED;
     ds_on = 1;
     ds_len = length;
@@ -502,7 +455,7 @@ u32 WM_StartDataSharing(void *info, u32 port, u32 bitmap, u32 length, u32 twice)
     return WM_OK;
 }
 
-u32 WM_EndDataSharing(void *info) {
+u32 WM_EndDataSharing(u32 info) {
     ds_on = 0;
     return WM_OK;
 }
@@ -510,7 +463,7 @@ u32 WM_EndDataSharing(void *info) {
 #define SET_BITMAP(set) (*(u16 *)(set))
 #define SET_SLOT(set, aid) ((u8 *)(set) + 4 + (u32)(aid) * ds_len)
 
-u32 WM_StepDataSharing(void *info, const void *send_data, void *receive) {
+u32 WM_StepDataSharing(u32 info, u32 send_data, u32 receive) {
     if (!ds_on) return WM_ILLEGAL;
     net_pump();
     if (is_parent) {
@@ -518,12 +471,12 @@ u32 WM_StepDataSharing(void *info, const void *send_data, void *receive) {
         for (int aid = 1; aid < MAX_PEERS; aid++) if (peers[aid].joined) joined |= 1u << aid;
         if (!joined) return WM_NO_CHILD;
         if (!own_stored) {
-            nds_copy(own_data, send_data, ds_len);
+            nds_copy(own_data, DS(send_data), ds_len);
             own_stored = 1;
         }
         for (int aid = 1; aid < MAX_PEERS; aid++)
             if ((joined >> aid & 1) && peers[aid].step_r == peers[aid].step_w) return WM_NO_DATASET;
-        u8 *set = receive;
+        u8 *set = DS(receive);
         SET_BITMAP(set) = (u16)(joined | 1);
         nds_zero(set + 4, 4 * ds_len);
         nds_copy(SET_SLOT(set, 0), own_data, ds_len);
@@ -539,18 +492,18 @@ u32 WM_StepDataSharing(void *info, const void *send_data, void *receive) {
     }
     if (!my_aid) return WM_ILLEGAL;
     if (!own_stored) {
-        peer_send(&peers[0], MSG_STEP, send_data, ds_len, 0, 0);
+        peer_send(&peers[0], MSG_STEP, DS(send_data), ds_len, 0, 0);
         own_stored = 1;
     }
     if (set_r == set_w) return WM_NO_DATASET;
-    nds_copy(receive, set_buf[set_r++ % STEPS], 4 + 4 * ds_len);
+    nds_copy(DS(receive), set_buf[set_r++ % STEPS], 4 + 4 * ds_len);
     own_stored = 0;
     ds_seq++;
     return WM_OK;
 }
 
-void *WM_GetSharedDataAddress(void *info, void *receive, u32 aid) {
-    u8 *set = receive;
+u32 WM_GetSharedDataAddress(u32 info, u32 receive, u32 aid) {
+    u8 *set = DS(receive);
     if (aid >= MAX_PEERS || !(SET_BITMAP(set) >> aid & 1)) return 0;
-    return SET_SLOT(set, aid);
+    return receive + 4 + aid * ds_len;
 }

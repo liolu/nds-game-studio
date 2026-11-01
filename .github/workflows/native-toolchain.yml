@@ -1,17 +1,65 @@
 # Boite a outils des jeux natifs, pour les versions du studio qui ne l'ont pas dans leur paquet.
 # Ne contient aucun code de jeu. Son numero vient de native/games/index.json ("toolchain").
+# Une archive par plateforme : Windows (avec GCC), macOS arm64 et Intel (sans compilateur : les Command Line Tools du joueur).
+# Les archives ne sont publiees (release native-toolchain) que depuis experimental ; ailleurs elles restent des artefacts du run.
 name: Native toolchain
 
 on:
   push:
-    branches: [experimental]
+    branches: [experimental, macos-native]
     paths:
       - 'native/**'
       - '.github/workflows/native-toolchain.yml'
   workflow_dispatch:
 
 jobs:
-  toolchain:
+  # Sans rom : le traducteur et le runtime compiles et essayes sur chaque plateforme (native/MACOS.md 4.1 et 3.8).
+  runtime-macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-latest, arch: arm64 }
+          - { runner: macos-15-intel, arch: x86_64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Capstone
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install capstone==5.0.7
+
+      - name: Runtime compile avec -Werror
+        run: '"$RUNNER_TEMP/venv/bin/python" native/tests/runtime_check.py --arch ${{ matrix.arch }}'
+
+      - name: Traducteur et fils verts (harnais)
+        run: '"$RUNNER_TEMP/venv/bin/python" native/tests/arm2c_test.py --arch ${{ matrix.arch }}'
+
+  runtime-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Le GCC de l'image n'a pas -m32 : meme WinLibs que ci_toolchain.ps1
+      - name: WinLibs
+        shell: pwsh
+        run: |
+          $zip = "https://github.com/brechtsanders/winlibs_mingw/releases/download/16.2.0posix-14.0.0-ucrt-r1/winlibs-x86_64-posix-seh-gcc-16.2.0-mingw-w64ucrt-14.0.0-r1.zip"
+          Invoke-WebRequest $zip -OutFile "$env:RUNNER_TEMP/winlibs.zip"
+          Expand-Archive "$env:RUNNER_TEMP/winlibs.zip" -DestinationPath "$env:RUNNER_TEMP/winlibs"
+          "$env:RUNNER_TEMP/winlibs/mingw64/bin" | Out-File -Append -Encoding ascii $env:GITHUB_PATH
+          python -m pip install capstone==5.0.7
+
+      - name: Runtime compile en -m32
+        shell: pwsh
+        run: python native/tests/runtime_check.py
+
+      - name: Traducteur et fils verts (harnais)
+        shell: pwsh
+        run: python native/tests/arm2c_test.py
+
+  toolchain-windows:
     runs-on: windows-latest
     permissions:
       contents: write
@@ -27,10 +75,49 @@ jobs:
           ./native/tools/ci_toolchain.ps1 -Out "native-toolchain-$version.zip"
 
       - name: Publier
+        if: github.ref == 'refs/heads/experimental'
         shell: bash
         run: |
           if ! gh release view native-toolchain > /dev/null 2>&1; then
             gh release create native-toolchain --prerelease --latest=false --title "Outils des jeux natifs" \
-              --notes "Telecharges par le launcher pour generer les jeux natifs depuis la rom du joueur. Aucun code de jeu."
+              --notes "Telecharges par le launcher pour generer les jeux natifs depuis la rom du joueur. Aucun code de jeu." || true
+          fi
+          gh release upload native-toolchain native-toolchain-*.zip --clobber
+
+  toolchain-macos:
+    needs: runtime-macos
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-latest, platform: macos-arm64 }
+          - { runner: macos-15-intel, platform: macos-x86_64 }
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Assembler
+        run: |
+          version=$(python3 -c "import json; print(json.load(open('native/games/index.json'))['toolchain'])")
+          ./native/tools/ci_toolchain.sh ${{ matrix.platform }} "native-toolchain-$version-${{ matrix.platform }}.zip"
+
+      - name: Garder l'archive
+        if: github.ref != 'refs/heads/experimental'
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-toolchain-${{ matrix.platform }}
+          path: native-toolchain-*.zip
+          if-no-files-found: error
+
+      - name: Publier
+        if: github.ref == 'refs/heads/experimental'
+        run: |
+          if ! gh release view native-toolchain > /dev/null 2>&1; then
+            gh release create native-toolchain --prerelease --latest=false --title "Outils des jeux natifs" \
+              --notes "Telecharges par le launcher pour generer les jeux natifs depuis la rom du joueur. Aucun code de jeu." || true
           fi
           gh release upload native-toolchain native-toolchain-*.zip --clobber
