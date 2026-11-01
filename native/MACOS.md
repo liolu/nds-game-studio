@@ -1,6 +1,7 @@
 # Native DS games on macOS: port plan
 
-Status: plan only. Nothing below is implemented yet. Branch `macos-native` on the fork `lasscat/nds-game-studio`.
+Status: steps 1-2 of section 5 are written, not yet built or run on Windows. Branch `macos-native` on the fork
+`lasscat/nds-game-studio`.
 
 The studio itself (launcher, engine, mod tools) already builds and ships for macOS: `build.yml` makes universal
 binaries and an `.app`. Only the **native game pipeline** is Windows-only: translating a game (`arm2c.py`), building its
@@ -39,9 +40,19 @@ Apple is winding Rosetta down after macOS 27. The port therefore needs a **memor
 - Reserve 4 GiB + 64 KiB as `PROT_NONE` at any address (`nds_mem`). Inside it, commit the same regions `nds_start`
   maps today (ITCM, main RAM and mirrors, IO, palettes, VRAM, OAM, GBA slot). Green-thread stacks stay at window offset
   `0x20000000+`, as `stack_alloc` does now.
-- `#define DS(a) ((u8 *)nds_mem + (u32)(a))` and `#define HOST2DS(p) ((u32)((u8 *)(p) - (u8 *)nds_mem))`.
-- **Windows 32-bit keeps `nds_mem` as the constant 0**, so the compiler folds it away: same generated code, no
-  regression risk for the current platform.
+- `nds_mem` is a `uptr` (`__UINTPTR_TYPE__`). `#define DS(a) ((u8 *)(nds_mem + (u32)(a)))` and
+  `#define HOST2DS(p) ((u32)((uptr)(p) - nds_mem))`, in `nitro.h` and in the `arm2c.py` PRELUDE. Integer arithmetic
+  rather than `(u8 *)0 + a`, which is undefined behavior.
+- **Windows 32-bit (`_WIN32 && __i386__`, `NDS_IDENTITY`) keeps `nds_mem` as the constant 0**, so the compiler folds
+  it away: same generated code, no regression risk for the current platform. Elsewhere `nds_start` gets the window
+  from `os_mem_window()` (new in `os.h`, to implement in step 5), and `reserve`/`stack_alloc` commit inside it with
+  `os_mem_alloc(DS(a), …)`.
+- `REG32/16/8(a)` go through `DS()`: every use in the runtime is a DS address.
+- Runtime functions that replace SDK functions (`hle.c`) take DS addresses as `u32`, as the translated caller passes
+  them, and callbacks go through `nds_call_target`.
+- Game data the runtime names (`OSi_ThreadInfo`, `OSi_IrqThreadQueue`) go through `GAME_SYM(name)` /
+  `GAME_ADDR(name)`: the absolute symbol of `dsabs.s` on Windows, a `const u32 nds_addr_<name>` that the darwin
+  build must emit in step 6.
 - Generated code: `RD*/WR*/P32` go through `DS()`. Frames become `sp = HOST2DS(&stack_[n])`. This is valid because
   all game code runs on stacks inside the window: the main stack is switched at startup and the SDK threads use
   `stack_alloc`. In instrumented builds, `HOST2DS` asserts that its pointer is inside the window, which catches game code
@@ -144,7 +155,7 @@ No ROM is, or ever will be, in the repo or the CI, so:
 | Step | Change | Done when |
 |---|---|---|
 | 1 | Extract `os.h` + `os_win32.c` (no behavior change). **Code done, not yet built or run on Windows** | Windows module builds and boots the same |
-| 2 | `DS()`/`HOST2DS()` in translator and runtime, `nds_mem = 0` on win32 | same golden frames on Windows |
+| 2 | `DS()`/`HOST2DS()` in translator and runtime, `nds_mem = 0` on win32. **Code done**: runtime passes `clang -target x86_64-apple-macos -fsyntax-only -Werror=pointer-to-int-cast -Werror=int-to-pointer-cast` (arm64: only the x86 inline asm of step 4 remains); with `clang -target i686-w64-mingw32`, lifted code is byte-identical and runtime code differs only where a call now goes through `nds_call_target`. Not yet built with GCC or run on Windows | same golden frames on Windows |
 | 3 | Code pointers as DS addresses, direct-mapped dispatch, no fixups, gosub tags | same golden frames on Windows |
 | 4 | 64-bit `Slot`, arm64/x86_64 context switch, no x86 inline asm on 64-bit | unit harness passes on macOS |
 | 5 | `os_posix.c` + CoreAudio + POSIX shm | runtime compiles with `-Werror` on macOS |

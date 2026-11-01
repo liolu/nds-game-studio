@@ -963,8 +963,8 @@ void gx_begin_frame(void) {
     st->cdepth = REG16(IO + 0x354) & 0x7FFF;
     st->aref = REG8(IO + 0x340) & 31;
     st->flags = swap_flags;
-    nds_copy(st->toon, (void *)(IO + 0x380), 64);
-    nds_copy(st->edge, (void *)(IO + 0x330), 16);
+    nds_copy(st->toon, DS(IO + 0x380), 64);
+    nds_copy(st->edge, DS(IO + 0x330), 16);
     st->vx1 = vp_x1;
     st->vy1 = vp_y1;
     st->vx2 = vp_x2;

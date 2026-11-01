@@ -169,7 +169,7 @@ void *os_thread_self(void) {
     return h;
 }
 
-int os_thread_sample(void *thread, u32 *ip, u32 *sp) {
+int os_thread_sample(void *thread, uptr *ip, uptr *sp) {
     /* CONTEXT x86 : ContextFlags = CONTEXT_CONTROL (0x10001) ; Eip (184) et Esp (196) servent */
     static u32 ctx[256];
     ctx[0] = 0x10001;
@@ -238,7 +238,7 @@ static long WINAPI on_exception(ExcPointers *e) {
     OsFault f;
     f.kind = r->code == EXC_ACCESS ? OS_FAULT_ACCESS : r->code == EXC_STEP ? OS_FAULT_STEP : OS_FAULT_OTHER;
     f.code = r->code;
-    f.ip = (u32)r->addr;
+    f.ip = (uptr)r->addr;
     f.addr = r->info[1];
     f.access = r->info[0];
     f.ctx = e->ctx;
@@ -250,7 +250,7 @@ void os_fault_install(OsFaultFn fn) {
     AddVectoredExceptionHandler(1, on_exception);
 }
 
-u32 os_fault_reg(const OsFault *f, int reg) {
+uptr os_fault_reg(const OsFault *f, int reg) {
     return CTX_U32((u8 *)f->ctx, reg == OS_REG_SP ? CTX_ESP : CTX_EBP);
 }
 

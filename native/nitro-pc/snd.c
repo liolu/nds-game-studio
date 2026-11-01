@@ -215,9 +215,9 @@ static s16 global_var[16];
 static s16 *var_ptr(Player *pl, u32 n, s16 *fallback) {
     volatile u32 *sh = snd_shared();
     if (!sh) return fallback;
-    if (n >= 16) return (s16 *)((u32)sh + 0x20 + 16 * 0x24) + (n - 16);
+    if (n >= 16) return (s16 *)((volatile u8 *)sh + 0x20 + 16 * 0x24) + (n - 16);
     int p = (int)(pl - players);
-    return (s16 *)((u32)sh + 0x20 + p * 0x24) + n;
+    return (s16 *)((volatile u8 *)sh + 0x20 + p * 0x24) + n;
 }
 
 static u32 varlen(const u8 **pc) {
@@ -237,13 +237,15 @@ static u32 fall_rate(u32 v) {
     return 0x1E00 / (126 - v);
 }
 
+/* bank : banque en memoire DS ; ses archives d'ondes y sont rangees par adresse DS */
 static const u8 *arc_wave(const u8 *bank, u32 arc_slot, u32 wave) {
-    const u8 *arc = *(const u8 **)(bank + 0x18 + arc_slot * 8);
-    if (!arc) return 0;
+    u32 arc_addr = *(u32 *)(bank + 0x18 + arc_slot * 8);
+    if (!arc_addr) return 0;
+    const u8 *arc = DS(arc_addr);
     if (wave >= *(u32 *)(arc + 0x38)) return 0;
     u32 v = *(u32 *)(arc + 0x3C + wave * 4);
     if (!v) return 0;
-    return v < 0x02000000u ? arc + v : (const u8 *)v;
+    return v < 0x02000000u ? arc + v : DS(v);
 }
 
 /* trouve l'instrument et son ton pour une note */
@@ -604,7 +606,7 @@ static void seq_update(void) {
             }
             pl->ticks++;
             volatile u32 *sh = snd_shared();
-            if (sh) *(u32 *)((u32)sh + 0x20 + p * 0x24 + 0x20) = pl->ticks;
+            if (sh) *(u32 *)((volatile u8 *)sh + 0x20 + p * 0x24 + 0x20) = pl->ticks;
             if (!any) { player_stop(pl); break; }
             /* notes de duree limitee */
             for (int i = 0; i < CHANNELS; i++) {
@@ -672,7 +674,8 @@ void snd_command(u32 id, u32 *arg) {
     case 0: /* START_SEQ */
     case 2: /* PREPARE_SEQ */
         if (arg[0] < PLAYERS) {
-            player_start(&players[arg[0]], (const u8 *)arg[1], arg[2], (const u8 *)arg[3]);
+            /* sequence et banque : adresses DS ; banque 0 = aucune */
+            player_start(&players[arg[0]], DS(arg[1]), arg[2], arg[3] ? DS(arg[3]) : 0);
             if (id == 0) players[arg[0]].paused = 0;
         }
         break;
@@ -733,7 +736,7 @@ void snd_command(u32 id, u32 *arg) {
         u32 timer = arg[0] >> 16;
         u32 fmt = (arg[3] >> 24) & 3, loop = (arg[3] >> 26) & 3;
         u32 ls = (arg[3] & 0xFFFF) * 4, ll = (arg[2] & 0x3FFFFF) * 4;
-        chan_start_wave(c, (const u8 *)arg[1], fmt, loop, ls, ll);
+        chan_start_wave(c, DS(arg[1]), fmt, loop, ls, ll);
         c->seq = 0;
         c->player = 0xFF;
         c->started = 0;

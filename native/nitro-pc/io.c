@@ -1,4 +1,4 @@
-/* Registres materiels : la memoire 0x04000000 est de la vraie memoire, les effets passent ici via les exceptions. */
+/* Registres materiels : la memoire DS 0x04000000 est de la vraie memoire, les effets passent ici via les exceptions. */
 #include "nitro.h"
 
 #define MS_FREQ 33513982ull /* horloge des timers */
@@ -39,8 +39,8 @@ extern const int nds_has_c;
 int nds_in_veh;
 static int open_depth;
 static void io_open(int on) {
-    os_mem_protect((void *)IO, 0x1000, on ? OS_RW : OS_NOACCESS);
-    os_mem_protect((void *)0x04100000u, 0x1000, on ? OS_RW : OS_NOACCESS);
+    os_mem_protect(DS(IO), 0x1000, on ? OS_RW : OS_NOACCESS);
+    os_mem_protect(DS(0x04100000u), 0x1000, on ? OS_RW : OS_NOACCESS);
 }
 /* le runtime touche aux registres sans passer par les exceptions */
 #define OPEN() do { if (!nds_in_veh && open_depth++ == 0) io_open(1); } while (0)
@@ -72,11 +72,11 @@ static void dma_run(int i) {
     if (src < 0x01FF0000u || dst < 0x01FF0000u) {
         /* MI_StopDma lance une copie vide pour arreter le canal */
     } else if (mode == 7|| (dst >= IO + 0x400 && dst < IO + 0x600)) {
-        for (u32 k = 0; k < n; k++, src += sstep) gx_fifo_word(*(u32 *)src);
+        for (u32 k = 0; k < n; k++, src += sstep) gx_fifo_word(*(u32 *)DS(src));
     } else if (w32) {
-        for (u32 k = 0; k < n; k++, src += sstep, dst += dstep) *(volatile u32 *)dst = *(volatile u32 *)src;
+        for (u32 k = 0; k < n; k++, src += sstep, dst += dstep) *(volatile u32 *)DS(dst) = *(volatile u32 *)DS(src);
     } else {
-        for (u32 k = 0; k < n; k++, src += sstep, dst += dstep) *(volatile u16 *)dst = *(volatile u16 *)src;
+        for (u32 k = 0; k < n; k++, src += sstep, dst += dstep) *(volatile u16 *)DS(dst) = *(volatile u16 *)DS(src);
     }
     if (((cnt >> 21) & 3) != 3) REG32(base + 4) = dst;
     REG32(base) = src;
@@ -150,7 +150,7 @@ extern u32 nds_trace_eip, nds_trace_addr, nds_trace_stack[13];
 
 void io_wait_irq(void) {
     if (nds_trace) {
-        u32 *st = (u32 *)__builtin_frame_address(0);
+        u32 *st = (u32 *)__builtin_frame_address(0); /* pile de l'hote */
         int k = 0;
         for (int i = 0; i < 300 && k < 12; i++)
             if (st[i] >= 0x10000000u && st[i] < 0x11000000u) nds_trace_stack[k++] = st[i];
@@ -170,8 +170,12 @@ void io_wait_irq(void) {
     }
 }
 
-extern struct { u16 need; u16 depth; u32 current; u32 list; u32 cb; } OSi_ThreadInfo;
-extern u32 OSi_IrqThreadQueue[2];
+/* donnees du SDK dans la memoire DS */
+typedef struct { u16 need; u16 depth; u32 current; u32 list; u32 cb; } ThreadInfo;
+GAME_SYM(OSi_ThreadInfo);
+GAME_SYM(OSi_IrqThreadQueue);
+#define thread_info ((ThreadInfo *)DS(GAME_ADDR(OSi_ThreadInfo)))
+#define irq_queue ((u32 *)DS(GAME_ADDR(OSi_IrqThreadQueue))) /* [2] */
 extern u64 OS_SelectThread();
 extern u64 OS_SaveContext();
 extern u64 OS_LoadContext();
@@ -181,8 +185,9 @@ void irq_deliver(void) {
     OPEN();
     while (!in_irq && !(nds_cpsr & 0x80) && (REG32(IO + 0x208) & 1) && (REG32(IO + 0x210) & if_state)) {
         u32 saved = nds_cpsr;
-        Fn vec = (Fn) * (u32 *)0x027E3FFCu;
-        if (!vec) break;
+        u32 handler = *(u32 *)DS(0x027E3FFCu); /* gestionnaire du SDK, ecrit par le jeu */
+        if (!handler) break;
+        Fn vec = (Fn)nds_call_target(handler);
         in_irq = 1;
         nds_cpsr |= 0x80;
         REG32(IO + 0x214) = if_state;
@@ -192,28 +197,28 @@ void irq_deliver(void) {
         nds_cpsr = saved;
         in_irq = 0;
         /* comme OS_IrqHandler_ThreadSwitch : reveiller ceux qui attendaient une interruption */
-        if (OSi_IrqThreadQueue[0]) {
-            u32 t = OSi_IrqThreadQueue[0];
+        if (irq_queue[0]) {
+            u32 t = irq_queue[0];
             while (t) {
-                u32 *th = (u32 *)t;
+                u32 *th = (u32 *)DS(t);
                 th[100 / 4] = 1;
                 th[120 / 4] = 0;
                 th[124 / 4] = 0;
                 t = th[128 / 4];
                 th[128 / 4] = 0;
             }
-            OSi_IrqThreadQueue[0] = 0;
-            OSi_IrqThreadQueue[1] = 0;
-            OSi_ThreadInfo.need = 1;
+            irq_queue[0] = 0;
+            irq_queue[1] = 0;
+            thread_info->need = 1;
         }
-        if (OSi_ThreadInfo.need) {
-            OSi_ThreadInfo.need = 0;
-            u32 cur = OSi_ThreadInfo.current;
+        if (thread_info->need) {
+            thread_info->need = 0;
+            u32 cur = thread_info->current;
             u32 next = (u32)OS_SelectThread();
             if (cur && next && cur != next) {
                 CLOSE();
                 if ((u32)OS_SaveContext(cur) == 0) {
-                    OSi_ThreadInfo.current = next;
+                    thread_info->current = next;
                     OS_LoadContext(next);
                 }
                 OPEN();

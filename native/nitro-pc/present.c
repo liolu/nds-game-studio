@@ -121,8 +121,8 @@ void present_frame(void) {
         if (keys_now & (1 << 11)) xy &= ~(1u << 11);
         REG16(0x027FFFA8u) = (u16)xy;
         /* dernier releve du stylet pour le SDK : x 12 bits, y 12 bits, touche */
-        *(volatile u16 *)0x027FFFAAu = (u16)((touch_x & 0xFFF) | ((touch_y & 0xF) << 12));
-        *(volatile u16 *)0x027FFFACu = (u16)(((touch_y >> 4) & 0xFF) | (touch_down ? 0x100 : 0));
+        REG16(0x027FFFAAu) = (u16)((touch_x & 0xFFF) | ((touch_y & 0xF) << 12));
+        REG16(0x027FFFACu) = (u16)(((touch_y >> 4) & 0xFF) | (touch_down ? 0x100 : 0));
     }
     static int trace_on = -1;
     if (trace_on < 0) trace_on = nds_arg("--trace", 0);

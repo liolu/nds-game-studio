@@ -1,5 +1,9 @@
-/* Fonctions du SDK qui parlent au processeur ARM7 : ici elles repondent directement. */
+/* Fonctions du SDK qui parlent au processeur ARM7 : ici elles repondent directement.
+ * Le jeu les appelle avec ses registres : un pointeur arrive en u32, adresse DS (DS() pour y acceder),
+ * une fonction de rappel aussi (nds_call_target). */
 #include "nitro.h"
+
+typedef u64 (*Fn)();
 
 typedef struct { u16 x, y, touch, validity; } TPData;
 
@@ -21,20 +25,20 @@ void hle_frame(void) {
 }
 
 void TP_Init(void) {}
-u32 TP_GetUserInfo(void *calibrate) {
-    nds_zero(calibrate, 12);
+u32 TP_GetUserInfo(u32 calibrate) {
+    nds_zero(DS(calibrate), 12);
     return 1;
 }
 void TP_WaitBusy(u32 mask) {}
 u32 TP_RequestSetStabilityAsync(u32 a, u32 b) { return 0; }
 u32 TP_RequestSamplingAsync(void) { return 0; }
-u32 TP_WaitCalibratedResult(TPData *d) {
-    current_touch(d);
+u32 TP_WaitCalibratedResult(u32 d) {
+    current_touch((TPData *)DS(d));
     return 0;
 }
-void TP_GetCalibratedPoint(TPData *disp, const TPData *raw) { *disp = *raw; }
-u32 TP_RequestAutoSamplingStartAsync(u32 vcount, u32 freq, TPData *buf, u32 size) {
-    auto_buf = buf;
+void TP_GetCalibratedPoint(u32 disp, u32 raw) { *(TPData *)DS(disp) = *(const TPData *)DS(raw); }
+u32 TP_RequestAutoSamplingStartAsync(u32 vcount, u32 freq, u32 buf, u32 size) {
+    auto_buf = buf ? (TPData *)DS(buf) : 0;
     auto_size = size & 0xFFFF;
     return 0;
 }
@@ -45,19 +49,19 @@ u32 TP_RequestAutoSamplingStopAsync(void) {
 
 /* alimentation */
 static u32 backlight = 3;
-u32 PM_SetBackLightAsync(u32 a, u32 b, void *cb, void *arg) {
-    if (cb) ((void (*)(u32, void *))cb)(0, arg);
+u32 PM_SetBackLightAsync(u32 a, u32 b, u32 cb, u32 arg) {
+    if (cb) ((Fn)nds_call_target(cb))(0, arg);
     return 0;
 }
 u32 PM_SetBackLight(u32 a, u32 b) { return 0; }
-u32 PM_GetBackLight(u32 *top, u32 *bottom) {
-    if (top) *top = backlight;
-    if (bottom) *bottom = backlight;
+u32 PM_GetBackLight(u32 top, u32 bottom) {
+    if (top) *(u32 *)DS(top) = backlight;
+    if (bottom) *(u32 *)DS(bottom) = backlight;
     return 0;
 }
 u32 PM_SetLCDPower(u32 on) { return 1; }
 u32 PM_GetLCDPower(void) { return 1; }
-u32 PM_ForceToPowerOffAsync(void *cb, void *arg) { return 0; }
+u32 PM_ForceToPowerOffAsync(u32 cb, u32 arg) { return 0; }
 u32 PM_ForceToPowerOff(void) { os_exit(0); return 0; }
 
 /* horloge */
@@ -65,22 +69,25 @@ typedef struct { u32 year, month, day, week; } RTCDate;
 typedef struct { u32 hour, minute, second; } RTCTime;
 
 void RTC_Init(void) {}
-u32 RTC_GetDateTime(RTCDate *d, RTCTime *t) {
+static void date_time(RTCDate *d, RTCTime *t) {
     OsTime s;
     os_local_time(&s);
     if (d) { d->year = s.year % 100; d->month = s.month; d->day = s.day; d->week = s.dow; }
     if (t) { t->hour = s.hour; t->minute = s.minute; t->second = s.second; }
+}
+u32 RTC_GetDateTime(u32 d, u32 t) {
+    date_time(d ? (RTCDate *)DS(d) : 0, t ? (RTCTime *)DS(t) : 0);
     return 0;
 }
-u32 RTC_GetDateTimeAsync(RTCDate *d, RTCTime *t, void (*cb)(u32, void *), void *arg) {
+u32 RTC_GetDateTimeAsync(u32 d, u32 t, u32 cb, u32 arg) {
     RTC_GetDateTime(d, t);
-    if (cb) cb(0, arg);
+    if (cb) ((Fn)nds_call_target(cb))(0, arg);
     return 0;
 }
 
 /* lecture de fichiers : la rom est deja en memoire, resultat immediat (FS_RESULT_SUCCESS = 0) */
-u32 FSi_ReadRomCallback(void *arc, void *dst, u32 pos, u32 size) {
+u32 FSi_ReadRomCallback(u32 arc, u32 dst, u32 pos, u32 size) {
     if (pos + size > nds_rom_size) nds_fatal("lecture hors de la rom : %x + %x", pos, size);
-    nds_copy(dst, nds_rom + pos, size);
+    nds_copy(DS(dst), nds_rom + pos, size);
     return 0;
 }

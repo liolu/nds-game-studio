@@ -12,14 +12,15 @@ typedef struct SNDCommand {
     u32 arg[4];
 } SNDCommand;
 
-static volatile u32 *shared; /* SNDSharedWork : son premier mot compte les listes de commandes traitees */
+static volatile u32 *shared; /* SNDSharedWork (dans la memoire DS) : son premier mot compte les listes de commandes traitees */
 static u32 logged;
 
-void snd_set_shared(u32 addr) { shared = (volatile u32 *)addr; }
+void snd_set_shared(u32 addr) { shared = addr ? (volatile u32 *)DS(addr) : 0; }
 volatile u32 *snd_shared(void) { return shared; }
 
+/* addr : adresse DS de la premiere commande, chainees par adresses DS */
 static void snd_list(u32 addr) {
-    for (SNDCommand *c = (SNDCommand *)addr; c; c = (SNDCommand *)c->next) {
+    for (SNDCommand *c = addr ? (SNDCommand *)DS(addr) : 0; c; c = c->next ? (SNDCommand *)DS(c->next) : 0) {
         if (c->id == 29) snd_set_shared(c->arg[0]);
         snd_command(c->id, c->arg);
     }
@@ -30,7 +31,7 @@ static void snd_list(u32 addr) {
 #define SAVE_SIZE (1u << 20)
 static u8 *save;
 static const char *save_path;
-static u32 *card_cmd; /* result, ?, ?, source, destination, longueur */
+static u32 *card_cmd; /* dans la memoire DS : result, ?, ?, source, destination, longueur */
 
 static void save_flush(void) {
     if (!save_path) return;
@@ -49,10 +50,10 @@ static void card_request(u32 req) {
     u32 src = card_cmd[3], dst = card_cmd[4], len = card_cmd[5];
     switch (req) {
     case 6: /* lecture */
-        if (src + len <= SAVE_SIZE) nds_copy((void *)dst, save + src, len);
+        if (src + len <= SAVE_SIZE) nds_copy(DS(dst), save + src, len);
         break;
     case 7: case 8: /* ecriture */
-        if (dst + len <= SAVE_SIZE) { nds_copy(save + dst, (void *)src, len); save_flush(); }
+        if (dst + len <= SAVE_SIZE) { nds_copy(save + dst, DS(src), len); save_flush(); }
         break;
     case 10: case 11: /* effacement */
         if (dst + len <= SAVE_SIZE) { for (u32 i = 0; i < len; i++) save[dst + i] = 0xFF; save_flush(); }
@@ -69,7 +70,7 @@ static void card_request(u32 req) {
 
 static void card_fifo(u32 data) {
     if (data == 0) return; /* la commande d'init : l'adresse du bloc de commande suit */
-    if (data >= 0x02000000u) card_cmd = (u32 *)data;
+    if (data >= 0x02000000u) card_cmd = (u32 *)DS(data);
     else if (card_cmd) card_request(data);
     io_fifo_push(11u | (1u << 5));
 }

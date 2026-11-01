@@ -1,4 +1,4 @@
-/* nitro-pc : runtime natif des jeux DS decompiles. Le code du jeu tourne en x86, la memoire est aux adresses DS. */
+/* nitro-pc : runtime natif des jeux DS decompiles. Le code du jeu tourne en natif, la memoire DS est dans une fenetre (DS()). */
 #ifndef NITRO_H
 #define NITRO_H
 
@@ -10,10 +10,41 @@ typedef unsigned char u8;
 typedef signed char s8;
 typedef unsigned long long u64;
 typedef long long s64;
+typedef __UINTPTR_TYPE__ uptr; /* entier de la taille d'un pointeur de l'hote */
 
-#define REG32(a) (*(volatile u32 *)(a))
-#define REG16(a) (*(volatile u16 *)(a))
-#define REG8(a) (*(volatile u8 *)(a))
+/* Memoire DS : l'adresse DS a vit a nds_mem + a, dans une fenetre de 4 Go reservee au demarrage (native/MACOS.md 3.1).
+ * Windows 32 bits : nds_mem est la constante 0, la memoire est aux adresses DS et DS()/HOST2DS() ne coutent rien.
+ * DS(a) : adresse DS -> pointeur de l'hote. HOST2DS(p) : pointeur de l'hote dans la fenetre -> adresse DS.
+ * Meme definitions dans le PRELUDE de tools/arm2c.py. */
+#if defined(_WIN32) && defined(__i386__)
+#define NDS_IDENTITY 1
+#define nds_mem ((uptr)0)
+#else
+#define NDS_IDENTITY 0
+extern uptr nds_mem;
+#endif
+#define DS(a) ((u8 *)(nds_mem + (u32)(a)))
+#if defined(NDS_INSTRUMENT) && !NDS_IDENTITY
+u32 nds_host2ds(const volatile void *p); /* verifie que p est dans la fenetre */
+#define HOST2DS(p) nds_host2ds(p)
+#else
+#define HOST2DS(p) ((u32)((uptr)(p) - nds_mem))
+#endif
+
+/* Donnees du jeu que le runtime nomme. Windows 32 bits : symbole absolu a l'adresse DS (dsabs.s de native_build.py).
+ * Ailleurs (ld64 n'a pas de symboles absolus utilisables) : le build fournit nds_addr_<nom>, voir MACOS.md 3.6. */
+#if NDS_IDENTITY
+#define GAME_SYM(name) extern char name[]
+#define GAME_ADDR(name) ((u32)(uptr)(name))
+#else
+#define GAME_SYM(name) extern const u32 nds_addr_##name
+#define GAME_ADDR(name) (nds_addr_##name)
+#endif
+
+/* registres et memoire DS a une adresse DS fixe */
+#define REG32(a) (*(volatile u32 *)DS(a))
+#define REG16(a) (*(volatile u16 *)DS(a))
+#define REG8(a) (*(volatile u8 *)DS(a))
 #define IO 0x04000000u
 
 /* plateforme : memoire, fichiers, fils, temps, son (os_win32.c) */
@@ -29,6 +60,7 @@ void nds_fatal(const char *fmt, ...);
 void nds_copy(void *dst, const void *src, u32 n);
 void nds_zero(void *dst, u32 n);
 int nds_arg(const char *name, const char **value);
+uptr nds_call_target(u32 a); /* adresse DS (ou deja x86) d'une fonction -> fonction de l'hote */
 
 /* io.c */
 void io_init(void);

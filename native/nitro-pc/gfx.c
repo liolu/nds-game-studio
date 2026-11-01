@@ -10,7 +10,7 @@
 static const u32 bank_size[9] = {KB(128), KB(128), KB(128), KB(128), KB(64), KB(16), KB(16), KB(32), KB(16)};
 static const u32 lcdc_addr[9] = {0x06800000, 0x06820000, 0x06840000, 0x06860000, 0x06880000, 0x06890000, 0x06894000, 0x06898000, 0x068A0000};
 static u8 bank_store[9][KB(128)];
-static u32 bank_cpu[9];   /* adresse CPU actuelle de la banque, 0 si aucune */
+static u32 bank_cpu[9];   /* adresse CPU (DS) actuelle de la banque, 0 si aucune */
 static u8 bank_cnt[9];
 static u8 *tex_slot[4];
 static u8 *texpal_slot[6];
@@ -81,8 +81,8 @@ void vram_cnt_changed(void) {
         u8 v = REG8(IO + 0x200 + vram_reg[b]);
         if (v == bank_cnt[b]) continue;
         if (bank_cpu[b]) {
-            nds_copy(bank_store[b], (void *)bank_cpu[b], bank_size[b]);
-            nds_zero((void *)bank_cpu[b], bank_size[b]);
+            nds_copy(bank_store[b], DS(bank_cpu[b]), bank_size[b]);
+            nds_zero(DS(bank_cpu[b]), bank_size[b]);
             bank_cpu[b] = 0;
         }
         bank_cnt[b] = v;
@@ -96,7 +96,7 @@ void vram_cnt_changed(void) {
         u32 mst = v & 7, ofs = (v >> 3) & 3;
         u32 addr = map_cpu(b, mst, ofs);
         if (addr && !bank_cpu[b]) {
-            nds_copy((void *)addr, bank_store[b], bank_size[b]);
+            nds_copy(DS(addr), bank_store[b], bank_size[b]);
             bank_cpu[b] = addr;
         } else if (!addr) {
             map_special(b, mst, ofs);
@@ -122,13 +122,13 @@ static OsEvent worker_event;
 
 static void snapshot_take(void) {
     Snapshot *s = &snap;
-    nds_copy(s->io, (void *)IO, 0x2000);
-    nds_copy(s->pal, (void *)0x05000000u, 0x800);
-    nds_copy(s->oam, (void *)0x07000000u, 0x800);
-    nds_copy(s->bg_a, (void *)0x06000000u, KB(512));
-    nds_copy(s->bg_b, (void *)0x06200000u, KB(128));
-    nds_copy(s->obj_a, (void *)0x06400000u, KB(256));
-    nds_copy(s->obj_b, (void *)0x06600000u, KB(128));
+    nds_copy(s->io, DS(IO), 0x2000);
+    nds_copy(s->pal, DS(0x05000000u), 0x800);
+    nds_copy(s->oam, DS(0x07000000u), 0x800);
+    nds_copy(s->bg_a, DS(0x06000000u), KB(512));
+    nds_copy(s->bg_b, DS(0x06200000u), KB(128));
+    nds_copy(s->obj_a, DS(0x06400000u), KB(256));
+    nds_copy(s->obj_b, DS(0x06600000u), KB(128));
     for (int i = 0; i < 4; i++) {
         s->has_bgext_a[i] = bgext_a[i] != 0;
         if (bgext_a[i]) nds_copy(s->bgext_a[i], bgext_a[i], KB(8));
@@ -143,7 +143,7 @@ static void snapshot_take(void) {
     u32 mode = (REG32(IO) >> 16) & 3;
     if (mode == 2) {
         u32 b = (REG32(IO) >> 18) & 3;
-        nds_copy(s->lcdc[b], bank_cpu[b] == lcdc_addr[b] ? (u8 *)lcdc_addr[b] : bank_store[b], KB(128));
+        nds_copy(s->lcdc[b], bank_cpu[b] == lcdc_addr[b] ? DS(lcdc_addr[b]) : bank_store[b], KB(128));
     }
     s->frame = nds_frame;
 }
@@ -512,7 +512,7 @@ static volatile BandFn pool_fn;
 static void *volatile pool_arg;
 
 static void pool_thread(void *param) {
-    int index = (int)(u32)param;
+    int index = (int)(uptr)param;
     for (;;) {
         os_event_wait(pool_go[index]);
         pool_fn(pool_arg, index + 1, pool_size + 1);
@@ -677,7 +677,7 @@ void gfx_render(void) {
         for (int i = 0; i < pool_size; i++) {
             pool_go[i] = os_event_create();
             pool_done[i] = os_event_create();
-            os_thread_start(pool_thread, (void *)(u32)i, 0x40000);
+            os_thread_start(pool_thread, (void *)(uptr)i, 0x40000);
         }
         worker_event = os_event_create();
         os_thread_start(render_thread, 0, 0x40000);

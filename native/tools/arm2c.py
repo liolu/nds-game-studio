@@ -2,7 +2,8 @@
 
 Sert aux fonctions qui n'ont pas de C : assembleur du SDK, fonctions pas encore matchees.
 Chaque fonction devient u64 nom(r0, r1, r2, r3, s0..s5) : les arguments de pile passent en s0.., le retour en r0:r1.
-Les adresses de donnees restent numeriques : la memoire du jeu est aux adresses DS dans le processus.
+Les adresses de donnees restent numeriques : la memoire du jeu est a nds_mem + adresse DS (DS() du PRELUDE ; 0 sur Windows 32 bits).
+La pile C de chaque fonction est dans cette memoire (piles des threads dans la fenetre) : sp = HOST2DS(&stack_[n]).
 """
 import re
 
@@ -30,28 +31,44 @@ RET = "return ((u64)r1<<32)|r0;"
 PRELUDE = """/* Genere par arm2c.py */
 typedef unsigned int u32; typedef int s32; typedef unsigned short u16; typedef short s16;
 typedef unsigned char u8; typedef signed char s8; typedef unsigned long long u64; typedef long long s64;
+typedef __UINTPTR_TYPE__ uptr;
+/* memoire DS a nds_mem + adresse DS (nitro.h) ; Windows 32 bits : nds_mem = 0, le code genere ne change pas */
+#if defined(_WIN32) && defined(__i386__)
+#define nds_mem ((uptr)0)
+#define NDS_IDENTITY 1
+#else
+extern uptr nds_mem;
+#define NDS_IDENTITY 0
+#endif
+#define DS(a) ((u8 *)(nds_mem + (u32)(a)))
+#if defined(NDS_INSTRUMENT) && !NDS_IDENTITY
+u32 nds_host2ds(const volatile void *p);
+#define HOST2DS(p) nds_host2ds(p)
+#else
+#define HOST2DS(p) ((u32)((uptr)(p) - nds_mem))
+#endif
 #define MAGIC_LR 0xFFFFFFFEu
 static u32 F_N, F_Z, F_C, F_V; /* drapeaux renvoyes par les comparaisons flottantes du compilateur ARM */
 #define SAVEF() (F_N = n, F_Z = z, F_C = c, F_V = v)
 #define LOADF() (n = F_N, z = F_Z, c = F_C, v = F_V)
 extern u32 nds_pc, nds_r[6]; extern u32 nds_cpsr; void nds_cpsr_changed(void); void nds_unhandled(const char *f, u32 pc);
 u32 nds_cp15_read(u32 crn, u32 crm, u32 op2); void nds_cp15_write(u32 crn, u32 crm, u32 op2, u32 v);
-void nds_swi(u32 n, u32 *r0, u32 *r1, u32 *r2, u32 *r3); u32 nds_call_target(u32 a);
+void nds_swi(u32 n, u32 *r0, u32 *r1, u32 *r2, u32 *r3); uptr nds_call_target(u32 a);
 u32 nds_io_read(u32 a, u32 size); void nds_io_write(u32 a, u32 v, u32 size);
-#define P32(a) (*(volatile u32 *)(a))
+#define P32(a) (*(volatile u32 *)DS(a))
 #define IS_IO(a) (((a) >> 24) == 4 || (a) < 0x01000000u || (s32)(a) < 0)
-static inline u32 RD32(u32 a) { return IS_IO(a) ? nds_io_read(a, 4) : *(volatile u32 *)a; }
-static inline u32 RD16(u32 a) { return IS_IO(a) ? nds_io_read(a, 2) : *(volatile u16 *)a; }
-static inline u32 RD8(u32 a) { return IS_IO(a) ? nds_io_read(a, 1) : *(volatile u8 *)a; }
+static inline u32 RD32(u32 a) { return IS_IO(a) ? nds_io_read(a, 4) : *(volatile u32 *)DS(a); }
+static inline u32 RD16(u32 a) { return IS_IO(a) ? nds_io_read(a, 2) : *(volatile u16 *)DS(a); }
+static inline u32 RD8(u32 a) { return IS_IO(a) ? nds_io_read(a, 1) : *(volatile u8 *)DS(a); }
 #ifdef NDS_INSTRUMENT
 extern u32 nds_watch; void nds_watch_hit(u32 a, u32 v);
 #define WATCH(a, v) do { if (((a) & ~3u) == nds_watch) nds_watch_hit(a, v); } while (0)
 #else
 #define WATCH(a, v)
 #endif
-static inline void WR32(u32 a, u32 v) { WATCH(a, v); if (IS_IO(a)) nds_io_write(a, v, 4); else *(volatile u32 *)a = v; }
-static inline void WR16(u32 a, u32 v) { WATCH(a, v); if (IS_IO(a)) nds_io_write(a, v, 2); else *(volatile u16 *)a = (u16)v; }
-static inline void WR8(u32 a, u32 v) { WATCH(a, v); if (IS_IO(a)) nds_io_write(a, v, 1); else *(volatile u8 *)a = (u8)v; }
+static inline void WR32(u32 a, u32 v) { WATCH(a, v); if (IS_IO(a)) nds_io_write(a, v, 4); else *(volatile u32 *)DS(a) = v; }
+static inline void WR16(u32 a, u32 v) { WATCH(a, v); if (IS_IO(a)) nds_io_write(a, v, 2); else *(volatile u16 *)DS(a) = (u16)v; }
+static inline void WR8(u32 a, u32 v) { WATCH(a, v); if (IS_IO(a)) nds_io_write(a, v, 1); else *(volatile u8 *)DS(a) = (u8)v; }
 static inline u32 LSL(u32 x, u32 n) { n &= 255; return n >= 32 ? 0 : x << n; }
 static inline u32 LSR(u32 x, u32 n) { n &= 255; return n >= 32 ? 0 : x >> n; }
 static inline u32 ASR(u32 x, u32 n) { n &= 255; return (u32)((s32)x >> (n >= 32 ? 31 : n)); }
@@ -618,7 +635,7 @@ class Lifter:
         args = ", ".join(["u32 r0", "u32 r1", "u32 r2", "u32 r3"] + ["u32 s%d" % i for i in range(STACK_ARGS)])
         head = [
             "u64 %s(%s) {" % (name, args),
-            "  u32 stack_[%d]; u32 sp = (u32)&stack_[%d];" % (self.frame_words(out) + STACK_ARGS + 2, self.frame_words(out)),
+            "  u32 stack_[%d]; u32 sp = HOST2DS(&stack_[%d]);" % (self.frame_words(out) + STACK_ARGS + 2, self.frame_words(out)),
             "  u32 r4=0,r5=0,r6=0,r7=0,r8=0,r9=0,r10=0,r11=0,r12=0,lr=MAGIC_LR,res=0,sh=0,pc_val=0; u32 n=0,z=0,c=0,v=0;",
             "  " + " ".join("stack_[%d]=s%d;" % (self.frame_words(out) + i, i) for i in range(STACK_ARGS)),
         ]
