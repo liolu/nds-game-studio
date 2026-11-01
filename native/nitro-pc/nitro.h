@@ -47,7 +47,7 @@ u32 nds_host2ds(const volatile void *p); /* verifie que p est dans la fenetre */
 #define REG8(a) (*(volatile u8 *)DS(a))
 #define IO 0x04000000u
 
-/* plateforme : memoire, fichiers, fils, temps, son (os_win32.c) */
+/* plateforme : memoire, fichiers, fils, temps, son (os_win32.c ; macOS : os_posix.c, audio_coreaudio.c) */
 #include "os.h"
 
 /* core.c */

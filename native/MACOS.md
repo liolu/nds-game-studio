@@ -1,7 +1,7 @@
 # Native DS games on macOS: port plan
 
-Status: steps 1-4 of section 5 are written, not yet built or run on Windows. The no-ROM harness (4.1) passes on
-macOS, natively on arm64 and as x86_64 under Rosetta. Branch `macos-native` on the fork `lasscat/nds-game-studio`.
+Status: steps 1-5 of section 5 are written, not yet built or run on Windows. The no-ROM harness (4.1) passes on
+macOS, natively on arm64 and as x86_64 under Rosetta, and the whole runtime compiles and links there. Branch `macos-native` on the fork `lasscat/nds-game-studio`.
 
 The studio itself (launcher, engine, mod tools) already builds and ships for macOS: `build.yml` makes universal
 binaries and an `.app`. Only the **native game pipeline** is Windows-only: translating a game (`arm2c.py`), building its
@@ -113,6 +113,28 @@ New `nitro-pc/os.h` with a small API. `os_win32.c` holds today's code, moved ver
 
 The runtime is freestanding on Windows (its own `libc.c`). On macOS it links `libSystem`, as every Mac binary must.
 
+**Done** (step 5). `os_posix.c` and `audio_coreaudio.c` are macOS only (`#error` elsewhere); `native_build.py` picks
+the platform files from `OS_SOURCES`, and the other sources are shared.
+- Window: `mmap(PROT_NONE, MAP_NORESERVE)` of 4 GiB + 64 KiB anywhere. `os_mem_alloc` inside the window is
+  `mprotect(RW)` rounded to 16 KiB pages, so it keeps contents like `MEM_COMMIT`. The small regions (palettes, OAM)
+  get a whole page. Outside the window it is `mmap`, and it fails if a required address is taken, like `VirtualAlloc`.
+- Entry: dyld calls `main` (in `os_posix.c`, which calls `nds_start`). Arguments come from `_NSGetArgv`. `os_exit` is
+  `_exit`, so no destructor runs under the render or audio threads.
+- Events: auto-reset, as on Windows. `set` raises a flag and signals a `dispatch_semaphore` only on 0 → 1, and
+  `wait` takes the flag or sleeps, so several sets before one wait count once.
+- `os_time_*`: `mach_absolute_time` (24 MHz on Apple Silicon, 1 GHz on Intel). `os_shm_open` adds the leading `/`
+  if the name has none. `--prof` works (`thread_get_state`).
+- Faults: `SIGSEGV`/`SIGBUS` on an alternate stack, with the DS address, read/write (ESR WnR, #PF W bit) and
+  pc/sp/fp for the log. Single-stepping and `os_fault_call` (the `--with-c` trap) are fatal.
+- Sound: an AudioQueue at the mixer's rate (stereo s16), 6 buffers of 384 frames, as with waveOut. The queue's
+  callback frees a played buffer, which wakes `os_audio_acquire` on the audio thread of `snd.c`. The output therefore
+  sets the mixer's pace, and `snd.c` does not change. With `--mute`, `snd.c` never opens the output.
+- Checked without a ROM, arm64 and x86_64: stub game symbols boot `nds_start` (all regions, header copy, stack switch
+  into the window, time, sleep), an access outside the regions logs its DS address and exits 4, and `--shm` maps an
+  object made by `shm_open`. Audio: `sh native/tests/audio_smoke.sh [--arch x86_64] [--mute]` plays 2 s of a 440 Hz
+  sine (left, then right) through `os_thread_start` + `os_audio_*` exactly as `snd.c` does, and checks that the
+  output pulls it in real time.
+
 ### 3.5 Out of scope on 64-bit: `--with-c`
 
 Matched decomp C uses real pointers: they become 64-bit on the host, which breaks struct layouts and every pointer
@@ -196,7 +218,7 @@ No ROM is, or ever will be, in the repo or the CI, so:
 | 2 | `DS()`/`HOST2DS()` in translator and runtime, `nds_mem = 0` on win32. **Code done**: runtime passes `clang -target x86_64-apple-macos -fsyntax-only -Werror=pointer-to-int-cast -Werror=int-to-pointer-cast` (arm64: only the x86 inline asm of step 4 remains); with `clang -target i686-w64-mingw32`, lifted code is byte-identical and runtime code differs only where a call now goes through `nds_call_target`. Not yet built with GCC or run on Windows | same golden frames on Windows |
 | 3 | Code pointers as DS addresses, direct-mapped dispatch, no fixups, gosub tags. **Code done**: no-ROM harness passes on macOS (arm64), runtime still passes the step 2 checks (macOS `-Werror` casts, i686-mingw syntax). Not yet built with GCC or run on Windows | same golden frames on Windows |
 | 4 | 64-bit `Slot`, arm64/x86_64 context switch, no x86 inline asm on 64-bit. **Code done**: harness passes on macOS arm64 and x86_64 (Rosetta); the whole runtime except `os_win32.c` compiles for `arm64-apple-macos` and `x86_64-apple-macos` with the `-Werror` cast flags, and for `i686-w64-mingw32`, where `context.c` assembles to the old i386 bytes. Not yet built with GCC or run on Windows | unit harness passes on macOS |
-| 5 | `os_posix.c` + CoreAudio + POSIX shm | runtime compiles with `-Werror` on macOS |
+| 5 | `os_posix.c` + CoreAudio + POSIX shm. **Code done**: the whole runtime (arm64, x86_64) compiles with `-std=gnu11 -O2 -Wall -Werror=pointer-to-int-cast -Werror=int-to-pointer-cast` and links against libSystem + AudioToolbox; only the game's own symbols are missing (step 6). Audio smoke test passes on both | runtime compiles with `-Werror` on macOS |
 | 6 | darwin profile in `native_build.py` | **milestone: a game boots headless on macOS**, frames dumped |
 | 7 | Launcher integration (`native_game.rs`) | Play button works on macOS |
 | 8 | Toolchain packaging + CI jobs | launcher downloads the macOS toolchain and generates a module |

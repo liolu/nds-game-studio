@@ -1,5 +1,6 @@
 /* Couche systeme : tout ce que le runtime demande a la plateforme (memoire, fichiers, fils, temps, son).
- * os_win32.c est la seule source qui appelle Win32 (kernel32.def, winmm.def). Le reste du runtime ne voit que ceci. */
+ * os_win32.c est la seule source qui appelle Win32 (kernel32.def, winmm.def) ; sur macOS, os_posix.c (libSystem) et
+ * audio_coreaudio.c (AudioToolbox). Le reste du runtime ne voit que ceci. */
 #ifndef OS_H
 #define OS_H
 

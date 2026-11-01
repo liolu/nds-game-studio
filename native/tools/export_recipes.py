@@ -19,7 +19,7 @@ import recipe
 GAMES = HERE.parent / "games"
 PLAYABLE = {"AJTP", "AR5E", "AL7E"}
 # A augmenter quand le runtime, le traducteur ou les recettes changent : le launcher retelecharge et regenere.
-TOOLCHAIN = 6
+TOOLCHAIN = 7
 
 
 def game_state(project, version, game):

@@ -29,15 +29,16 @@ for bin_dir in (str(TOOLCHAIN_BIN), WINLIBS):
     if os.path.isdir(bin_dir):
         os.environ["PATH"] = bin_dir + os.pathsep + os.environ["PATH"]
         break
-# Couche systeme du runtime (nitro-pc/os.h) : une seule source os_*.c par plateforme
-OS_SOURCES = {"win32": "os_win32.c"}
+# Couche systeme du runtime (nitro-pc/os.h) : les sources propres a chaque plateforme, les autres sont communes
+OS_SOURCES = {"win32": ["os_win32.c"], "darwin": ["os_posix.c", "audio_coreaudio.c"]}
+PLATFORM_SOURCES = {name for names in OS_SOURCES.values() for name in names}
 
 
 def runtime_sources():
-    os_source = OS_SOURCES.get(sys.platform)
-    if not os_source:
+    own = OS_SOURCES.get(sys.platform)
+    if not own:
         sys.exit("pas de couche systeme nitro-pc pour la plateforme %s" % sys.platform)
-    return sorted(p for p in RUNTIME.glob("*.c") if not p.name.startswith("os_") or p.name == os_source)
+    return sorted(p for p in RUNTIME.glob("*.c") if p.name not in PLATFORM_SOURCES or p.name in own)
 
 
 IDLE = 0x4000 | 0x08000000  # priorite basse, le PC reste utilisable ; pas de console quand le launcher nous lance
