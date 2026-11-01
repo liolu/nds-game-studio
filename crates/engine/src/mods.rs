@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Mutex;
 
 use crate::activity::{self, What};
@@ -66,9 +66,44 @@ pub fn has_modded_rom(code: &str) -> bool {
     mod_dir(code).join(MODDED_ROM).is_file()
 }
 
-/// Le jeu se lance avec les mods. Choisi une fois pour toutes par jeu, jusqu'au prochain clic.
+/// Ce jeu a de quoi démarrer avec des mods : une copie modifiée, ou des mods qui demandent des fonctions au runtime.
+pub fn available(code: &str) -> bool {
+    has_modded_rom(code) || crate::mod_packs::has_active_features(code)
+}
+
+/// Le jeu se lance avec les mods. Choisi une fois pour toutes par jeu, jusqu'au prochain clic. Sans choix : oui pour un mod installé, qui ne
+/// change la rom de personne ; une copie modifiée attend le premier import, qui fait ce choix.
 pub fn is_on(code: &str) -> bool {
-    has_modded_rom(code) && std::fs::read_to_string(mod_dir(code).join(ON_FILE)).is_ok_and(|text| text.trim() == "1")
+    if !available(code) {
+        return false;
+    }
+    match std::fs::read_to_string(mod_dir(code).join(ON_FILE)) {
+        Ok(text) => text.trim() == "1",
+        Err(_) => !has_modded_rom(code),
+    }
+}
+
+const RUN_BY_CHOICE: u8 = 0;
+const RUN_ORIGINAL: u8 = 1;
+const RUN_MODDED: u8 = 2;
+/// Le prochain lancement : selon le choix du jeu, ou forcé par les boutons « version originale » et « version modée ».
+static NEXT_RUN: AtomicU8 = AtomicU8::new(RUN_BY_CHOICE);
+
+pub fn run_by_choice() {
+    NEXT_RUN.store(RUN_BY_CHOICE, Ordering::Relaxed);
+}
+
+pub fn run_with_mods(with_mods: bool) {
+    NEXT_RUN.store(if with_mods { RUN_MODDED } else { RUN_ORIGINAL }, Ordering::Relaxed);
+}
+
+/// Ce lancement se fait avec les mods.
+pub fn this_run_has_mods(code: &str) -> bool {
+    match NEXT_RUN.load(Ordering::Relaxed) {
+        RUN_ORIGINAL => false,
+        RUN_MODDED => true,
+        _ => is_on(code),
+    }
 }
 
 pub fn set_on(code: &str, on: bool) {
@@ -84,7 +119,7 @@ pub fn modded_rom(code: &str) -> PathBuf {
 
 /// La rom à donner au jeu : la copie modifiée si les mods sont actifs, sinon la rom de l'utilisateur.
 pub fn rom_to_play(code: &str, rom: &Path) -> PathBuf {
-    if is_on(code) { modded_rom(code) } else { rom.to_path_buf() }
+    if is_on(code) && has_modded_rom(code) { modded_rom(code) } else { rom.to_path_buf() }
 }
 
 /// Retire l'outil, jamais les mods.

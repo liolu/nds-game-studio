@@ -160,7 +160,7 @@ fn pack_features(pack: &Path) -> Vec<String> {
 /// Les arguments du module natif d'après les mods actifs. Seules les fonctions connues passent : un mod ne choisit pas la ligne de commande.
 /// « Les originaux » coupe aussi ces fonctions.
 pub fn native_args(code: &str) -> Vec<OsString> {
-    if mods::has_modded_rom(code) && !mods::is_on(code) {
+    if !mods::this_run_has_mods(code) {
         return Vec::new();
     }
     let dir = mods::mod_dir(code);
@@ -186,6 +186,17 @@ pub fn native_args(code: &str) -> Vec<OsString> {
         }
     }
     args
+}
+
+/// Un mod actif demande une fonction au runtime.
+pub fn has_active_features(code: &str) -> bool {
+    let dir = mods::mod_dir(code);
+    load_state(&dir).packs.iter().any(|p| p.enabled && !pack_features(&packs_dir(&dir).join(&p.id)).is_empty())
+}
+
+/// Les noms des mods actifs de ce jeu.
+pub fn active_names(code: &str) -> Vec<String> {
+    list(code).into_iter().filter(|p| p.enabled).map(|p| p.name).collect()
 }
 
 pub fn host_address(code: &str) -> String {
@@ -252,6 +263,9 @@ pub fn set_enabled(code: &str, rom: &Path, id: &str, enabled: bool) {
         entry.enabled = enabled;
     }
     let _ = save_state(&dir, &state);
+    if enabled {
+        mods::set_on(code, true);
+    }
     if has_files(&packs_dir(&dir).join(id)) {
         mods::apply(code, rom);
     }
@@ -555,6 +569,7 @@ fn stem_of(path: &Path) -> String {
 fn finish(code: &str, rom: &Path, names: Vec<String>) -> Result<(), String> {
     mods::say(t!("Installed: {}", "Installe : {}", names.join(", ")));
     if !any_files(code) {
+        mods::set_on(code, true);
         return Ok(());
     }
     if !mods::installed() {

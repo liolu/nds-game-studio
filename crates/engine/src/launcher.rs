@@ -1848,9 +1848,10 @@ fn native_game(registry: &GameRegistry, code: &str) -> Option<String> {
 }
 
 /// Lance le jeu avec cette rom, sans changer la version choisie dans l'onglet Moding.
-fn play_version_button(parent: &mut ChildSpawnerCommands, font: &Fonts, label: &str, id: String, rom: PathBuf) {
+fn play_version_button(parent: &mut ChildSpawnerCommands, font: &Fonts, label: &str, id: String, rom: PathBuf, with_mods: bool) {
     button(parent, Node { align_self: AlignSelf::FlexStart, ..button_node() }, ITEM, ITEM_HOVER)
         .observe(move |_: On<Activate>, mut commands: Commands| {
+            crate::mods::run_with_mods(with_mods);
             commands.insert_resource(ActiveRom(rom.clone()));
             commands.insert_resource(ActiveGame(Some(id.clone())));
             commands.set_state(StudioState::Playing);
@@ -1879,6 +1880,7 @@ fn play_tab(rom: &Rom, registry: &GameRegistry) -> (Top, Rest) {
                 play.observe(move |_: On<Activate>, mut commands: Commands, mut lau: ResMut<Launcher>| {
                     if ready {
                         // La rom de l'utilisateur, ou sa copie modifiée si les mods de ce jeu sont actifs
+                        crate::mods::run_by_choice();
                         commands.insert_resource(ActiveRom(crate::mods::rom_to_play(&code, &path)));
                         commands.insert_resource(ActiveGame(Some(id.clone())));
                         commands.set_state(StudioState::Playing);
@@ -1897,9 +1899,10 @@ fn play_tab(rom: &Rom, registry: &GameRegistry) -> (Top, Rest) {
             play.with_child(text(font, label, 22.0, if usable { TEXT } else { DIM }));
             if let (Some(id), true) = (native.clone(), matches!(state, Preparation::Ready)) {
                 if crate::mods::is_on(&code_for_state) {
-                    play_version_button(t, font, tr("Play the original version", "Jouer a la version originale"), id, original.clone());
-                } else if crate::mods::has_modded_rom(&code_for_state) {
-                    play_version_button(t, font, tr("Play the modded version", "Jouer a la version modee"), id, crate::mods::modded_rom(&code_for_state));
+                    play_version_button(t, font, tr("Play the original version", "Jouer a la version originale"), id, original.clone(), false);
+                } else if crate::mods::available(&code_for_state) {
+                    let rom = if crate::mods::has_modded_rom(&code_for_state) { crate::mods::modded_rom(&code_for_state) } else { original.clone() };
+                    play_version_button(t, font, tr("Play with mods", "Jouer avec les mods"), id, rom, true);
                 }
             }
             match &state {
@@ -1935,7 +1938,13 @@ fn play_tab(rom: &Rom, registry: &GameRegistry) -> (Top, Rest) {
                 t.spawn(text(font, tr("Experimental: this game may crash or show nothing yet.", "Experimental : ce jeu peut planter ou ne rien afficher pour l'instant."), 15.0, DIM));
             }
             if crate::mods::is_on(&code_for_state) {
-                t.spawn(text(font, tr("Mods are on: the game starts with your changes (Modding tab to go back to the originals).", "Mods actifs : le jeu demarre avec vos changements (onglet Moding pour revenir aux originaux)."), 15.0, GOLD));
+                let names = crate::mod_packs::active_names(&code_for_state).join(", ");
+                let message = if names.is_empty() {
+                    tr("Mods are on: the game starts with your changes (Modding tab to go back to the originals).", "Mods actifs : le jeu demarre avec vos changements (onglet Moding pour revenir aux originaux).").to_string()
+                } else {
+                    t!("Mods are on: {names}. Play starts with them.", "Mods actifs : {names}. Jouer demarre avec eux.")
+                };
+                t.spawn(text(font, message, 15.0, GOLD));
             }
             t.spawn(text(font, summary, 14.0, DIM));
         }),
@@ -1988,27 +1997,11 @@ fn spawn_mods(r: &mut ChildSpawnerCommands, font: &Fonts, code: &str, rom: &Path
                 })
                 .with_child(text(font, tr("3. Apply my changes", "3. Appliquer mes changements"), 15.0, TEXT));
         });
-        if mods::has_modded_rom(code) {
-            let on = mods::is_on(code);
-            r.spawn(text(font, tr("The game starts with:", "Le jeu demarre avec :"), 15.0, DIM));
-            r.spawn(Node { flex_direction: FlexDirection::Row, column_gap: px(8), ..default() }).with_children(|row| {
-                for (value, label) in [(false, tr("The originals", "Les originaux")), (true, tr("My mods", "Mes mods"))] {
-                    let (normal, hover) = if on == value { (ITEM_ON, ITEM_ON) } else { (ITEM, ITEM_HOVER) };
-                    let choice_code = code.to_string();
-                    button(row, button_node(), normal, hover)
-                        .observe(move |_: On<Activate>, mut lau: ResMut<Launcher>| {
-                            crate::mods::set_on(&choice_code, value);
-                            lau.dirty = true;
-                        })
-                        .with_child(text(font, label, 15.0, TEXT));
-                }
-            });
-        }
     }
     // La copie reste jouable sans l'outil
     if mods::has_modded_rom(code) && !running {
         if let (Some(id), crate::native_game::Preparation::Ready) = (native, crate::native_game::preparation(code)) {
-            play_version_button(r, font, tr("Play the modded version", "Jouer a la version modee"), id.to_string(), mods::modded_rom(code));
+            play_version_button(r, font, tr("Play the modded version", "Jouer a la version modee"), id.to_string(), mods::modded_rom(code), true);
         }
     }
     let (lines, error) = mods::lines_for(code);
@@ -2034,9 +2027,31 @@ fn spawn_mods(r: &mut ChildSpawnerCommands, font: &Fonts, code: &str, rom: &Path
 }
 
 /// Les mods venus d'ailleurs : un fichier, un dossier ou un lien, et la liste de ceux qui sont installés.
+/// Avec quoi le jeu démarre : les originaux ou les mods, quels qu'ils soient.
+fn spawn_start_choice(r: &mut ChildSpawnerCommands, font: &Fonts, code: &str) {
+    if !crate::mods::available(code) {
+        return;
+    }
+    let on = crate::mods::is_on(code);
+    r.spawn(text(font, tr("The game starts with:", "Le jeu demarre avec :"), 15.0, DIM));
+    r.spawn(Node { flex_direction: FlexDirection::Row, column_gap: px(8), ..default() }).with_children(|row| {
+        for (value, label) in [(false, tr("The originals", "Les originaux")), (true, tr("My mods", "Mes mods"))] {
+            let (normal, hover) = if on == value { (ITEM_ON, ITEM_ON) } else { (ITEM, ITEM_HOVER) };
+            let choice_code = code.to_string();
+            button(row, button_node(), normal, hover)
+                .observe(move |_: On<Activate>, mut lau: ResMut<Launcher>| {
+                    crate::mods::set_on(&choice_code, value);
+                    lau.dirty = true;
+                })
+                .with_child(text(font, label, 15.0, TEXT));
+        }
+    });
+}
+
 fn spawn_mod_packs(r: &mut ChildSpawnerCommands, font: &Fonts, code: &str, rom: &Path, link: Option<String>, typing_host: bool) {
     use crate::mod_packs;
     mod_packs::offer_base(code);
+    spawn_start_choice(r, font, code);
     let host_typed = if typing_host { link.clone() } else { None };
     let link = if typing_host { None } else { link };
     r.spawn((Node { height: px(2), margin: UiRect::vertical(px(10)), flex_shrink: 0.0, ..default() }, BackgroundColor(BORDER)));
