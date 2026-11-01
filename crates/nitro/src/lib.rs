@@ -30,6 +30,7 @@ pub mod gx_mesh;
 pub mod model3d;
 pub mod narc;
 pub mod nitrofs;
+pub mod packs;
 pub mod romarc;
 pub mod sadl;
 pub mod sdat;

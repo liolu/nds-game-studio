@@ -693,6 +693,16 @@ pub fn find_tex0(file: &[u8]) -> Option<Tex0> {
 /// Écart moyen (au carré, pondéré) au-delà duquel une image ne ressemble plus aux couleurs de sa palette.
 const FAR_FROM_PALETTE: i64 = 400;
 
+/// L'écart moyen entre une image et ce que le jeu en montrera, sur les pixels visibles.
+fn mean_distance(image: &Rgba, shown: &[u8]) -> i64 {
+    let (mut total, mut count) = (0i64, 0i64);
+    for (a, b) in image.data.chunks_exact(4).zip(shown.chunks_exact(4)).filter(|(a, _)| a[3] >= 128) {
+        total += distance([a[0], a[1], a[2], 255], [b[0], b[1], b[2], 255]) as i64;
+        count += 1;
+    }
+    if count == 0 { 0 } else { total / count }
+}
+
 /// L'image est-elle loin de cette palette : une nouvelle image, et non une retouche ?
 fn far_from(image: &Rgba, colors: &[[u8; 4]]) -> bool {
     let mut cache = HashMap::<[u8; 4], i64>::new();
@@ -757,8 +767,11 @@ pub fn write_texture(file: &[u8], texture: &nds_nitro::nitro::Texture, palette: 
     let before = Rgba { width, height, data: before.0 };
     if format == 5 {
         let at = tex0.palettes + palette_at.ok_or("texture sans palette")?;
-        approximate = far_from(image, &read_colors(file, at, 4));
         let pixels = encode_4x4(image, &before, &texture.data1, &texture.data2, file, at);
+        // Chaque bloc a ses couleurs : on juge sur le résultat
+        let after = nds_nitro::nitro::Texture { name: texture.name, params: texture.params, data1: pixels.clone(), data2: texture.data2.clone() };
+        let shown = nds_nitro::nds::decode_texture(&after, palette).map_err(|e| e.to_string())?;
+        approximate = mean_distance(image, &shown.0) > FAR_FROM_PALETTE;
         out[tex0.compressed1 + offset..tex0.compressed1 + offset + pixels.len()].copy_from_slice(&pixels);
     } else {
         let count = palette_size(format).min(palette_room / 2);

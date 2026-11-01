@@ -1,35 +1,44 @@
-"""Fait tourner le vrai decodeur VX de Code Lyoko USA (son code ARM, image et son) sous Unicorn, et compare au decodeur Rust.
+"""Fait tourner le vrai decodeur VX d'un jeu (son code ARM, image et son) sous Unicorn, et compare au decodeur Rust.
 
 Le seul moyen d'essayer une video ecrite par `vx::encode_like` tant qu'aucun jeu a videos VX ne demarre en natif : le code du jeu
 lit l'ancienne image hors des blocs decodes et calcule sur 32 bits, ce que le decodeur Rust ne voit pas.
 
     cargo run -p nds-video --release --example vdump -- x.vx r.yuv r.f32
-    python -I vx_arm_check.py <dossier extract/usa/arm9 du projet> x.vx r.yuv r.f32 [n images]
+    python -I vx_arm_check.py <jeu> <dossier extract/<region> du projet> x.vx r.yuv r.f32 [n images]
 
-Il faut `pip install unicorn`. Le code du jeu reste dans le projet de decompilation, jamais dans ce depot.
+Jeux : lyoko (Code Lyoko USA), heroes (Heroes of Mana Europe). Il faut `pip install unicorn pyyaml`. Le code du jeu reste dans le projet de decompilation, jamais dans ce depot.
 """
 import struct, sys
+import yaml
 from unicorn import *
 from unicorn.arm_const import *
 
-J = sys.argv[1].rstrip("/\\") + "/"
-OPEN, ADVANCE, DECODE, AUDIO, MALLOC = 0x20b5ad8, 0x20b5844, 0x20b55a4, 0x20b5418, 0x209d908
+GAMES = {
+    "lyoko": {"overlay": None, "open": 0x20b5ad8, "advance": 0x20b5844, "decode": 0x20b55a4, "audio": 0x20b5418, "malloc": 0x209d908},
+    "heroes": {"overlay": "ov110.bin", "open": 0x20e1ef4, "advance": 0x20e1c68, "decode": 0x20e19c8, "audio": 0x20e183c, "malloc": 0x20e2818},
+}
+game = GAMES[sys.argv[1]]
+J = sys.argv[2].rstrip("/\\") + "/"
+OPEN, ADVANCE, DECODE, AUDIO, MALLOC = game["open"], game["advance"], game["decode"], game["audio"], game["malloc"]
 DONE, HOOKS, CTX, FILEOBJ, HEAP0, STACK, OUT = 0x2ffff00, 0x2ffe000, 0x2f00000, 0x2f01000, 0x2400000, 0x2e00000, 0x2f10000
 
-path = sys.argv[2]
+path = sys.argv[3]
 data = open(path, 'rb').read()
-ref = open(sys.argv[3], 'rb').read()
-pcm = open(sys.argv[4], 'rb').read()
+ref = open(sys.argv[4], 'rb').read()
+pcm = open(sys.argv[5], 'rb').read()
 pcm = struct.unpack('<%df' % (len(pcm) // 4), pcm)
-limit = int(sys.argv[5]) if len(sys.argv) > 5 else 10 ** 9
+limit = int(sys.argv[6]) if len(sys.argv) > 6 else 10 ** 9
 
 uc = Uc(UC_ARCH_ARM, UC_MODE_ARM)
 uc.ctl_set_cpu_model(UC_CPU_ARM_926)
 for base, size in ((0x02000000, 0x01000000), (0x01ff8000, 0x8000), (0x04000000, 0x10000)):
     uc.mem_map(base, size)
-uc.mem_write(0x02000000, open(J + "arm9.bin", 'rb').read())
-uc.mem_write(0x01ff8000, open(J + "itcm.bin", 'rb').read())
-uc.mem_write(0x027e0000, open(J + "dtcm.bin", 'rb').read())
+uc.mem_write(yaml.safe_load(open(J + "arm9/arm9.yaml"))["base_address"], open(J + "arm9/arm9.bin", 'rb').read())
+uc.mem_write(yaml.safe_load(open(J + "arm9/itcm.yaml"))["base_address"], open(J + "arm9/itcm.bin", 'rb').read())
+uc.mem_write(yaml.safe_load(open(J + "arm9/dtcm.yaml"))["base_address"], open(J + "arm9/dtcm.bin", 'rb').read())
+if game["overlay"]:
+    overlay = next(o for o in yaml.safe_load(open(J + "arm9_overlays/overlays.yaml"))["overlays"] if o["file_name"] == game["overlay"])
+    uc.mem_write(overlay["base_address"], open(J + "arm9_overlays/" + game["overlay"], 'rb').read())
 state = {'heap': HEAP0, 'pos': 0, 'biggest': 0}
 
 

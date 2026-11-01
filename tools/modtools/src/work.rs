@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 
-use nds_nitro::{adx, decompress_any, g2d, gx_mesh, model3d, narc, romarc, sadl, sdat, Kind, Rgba};
+use nds_nitro::{adx, decompress_any, g2d, gx_mesh, model3d, narc, packs, romarc, sadl, sdat, Kind, Rgba};
 use serde::{Deserialize, Serialize};
 
 use crate::asset_scan::{self, Decoded, Entry};
@@ -934,6 +934,17 @@ fn pack(game: &Game, rom: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, String> {
             by_start.insert(start, (bytes, end - start));
         }
         let plain_starts = || by_start.iter().map(|(start, (bytes, _))| (*start, bytes.clone())).collect::<HashMap<_, _>>();
+        // Une archive qui range des vidéos : sa table peut être un fichier à côté d'elle
+        let table_path = packs::companion(&parent_path);
+        let table = table_path.as_ref().and_then(|path| game.entries.iter().find(|e| e.path.eq_ignore_ascii_case(path))).map(|e| &rom[e.span.0..e.span.1]);
+        if !packs::videos(&inner, table).is_empty() {
+            let (out, new_table) = packs::rebuild(&inner, table, &plain_starts()).ok_or_else(|| format!("{parent_path} : archive inattendue"))?;
+            if let (Some(path), Some(new_table)) = (table_path, new_table) {
+                whole.insert(path, new_table);
+            }
+            whole.insert(parent_path, out);
+            continue;
+        }
         let new_inner = match parent.kind {
             Kind::Archive if narc::read(&inner).is_ok() => container::rebuild_narc(&inner, &by_number)?,
             Kind::SoundArchive => container::rebuild_sdat(&inner, &plain_starts())?,

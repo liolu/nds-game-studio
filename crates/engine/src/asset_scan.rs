@@ -17,13 +17,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use nds_video::Video;
-use nds_nitro::{adx, decompress_any, g2d, gx_mesh, looks_compressed, model3d, narc, nitrofs, romarc, sadl, sdat, sniff, unpack, Kind, Rgba};
+use nds_nitro::{adx, decompress_any, g2d, gx_mesh, looks_compressed, model3d, narc, nitrofs, packs, romarc, sadl, sdat, sniff, unpack, Kind, Rgba};
 use serde::{Deserialize, Serialize};
 
 use crate::i18n::{t, tr};
 
 /// À changer quand le calcul change : l'index gardé est alors refait.
-const INDEX_VERSION: u32 = 10;
+const INDEX_VERSION: u32 = 11;
 const BIG_FILE: usize = 4 << 20;
 
 /// Une rom du dossier `rom` du launcher.
@@ -127,6 +127,7 @@ fn kind_of(head: &[u8], whole: impl FnOnce() -> Option<Vec<u8>>) -> Kind {
 pub fn scan(rom_path: &Path) -> Vec<Entry> {
     let Ok(rom) = std::fs::read(rom_path) else { return Vec::new() };
     let Ok(files) = nitrofs::read(&rom) else { return Vec::new() };
+    let spans: HashMap<String, (usize, usize)> = files.iter().map(|f| (f.path.clone(), (f.start, f.end))).collect();
     let mut entries = Vec::new();
     let mut rom_bin = Vec::new();
     for file in files {
@@ -156,6 +157,21 @@ pub fn scan(rom_path: &Path) -> Vec<Entry> {
                 let inner = &data[f.start..f.end];
                 let name = format!("{}.{}", f.name.unwrap_or_else(|| format!("{n:04}")), f.ext);
                 entries.push(Entry { path: format!("{path}#{n}"), member_name: Some(name), rom: rom_path.to_path_buf(), span, member: Some((f.start, f.end)), kind: sniff(inner), size: f.end - f.start, dir: path.clone(), stem: String::new(), rom_index: None });
+            }
+            continue;
+        }
+        // Les vidéos rangées dans les archives des jeux ; le reste de ces archives n'est pas décrit
+        let table = packs::companion(&path).and_then(|p| spans.get(&p)).map(|s| &rom[s.0..s.1]);
+        let videos = packs::videos(data, table);
+        if !videos.is_empty() {
+            for (n, (start, end)) in videos.into_iter().enumerate() {
+                let inner = &data[start..end];
+                let ext = match inner.get(..3) {
+                    Some(b"MOD") => "mods",
+                    Some(b"VXD") => "vx",
+                    _ => "bik",
+                };
+                entries.push(Entry { path: format!("{path}#{n}"), member_name: Some(format!("{n:03}.{ext}")), rom: rom_path.to_path_buf(), span, member: Some((start, end)), kind: sniff(inner), size: end - start, dir: path.clone(), stem: String::new(), rom_index: None });
             }
             continue;
         }
