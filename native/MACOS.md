@@ -1,7 +1,8 @@
 # Native DS games on macOS: port plan
 
-Status: steps 1-5 of section 5 are written, not yet built or run on Windows. The no-ROM harness (4.1) passes on
-macOS, natively on arm64 and as x86_64 under Rosetta, and the whole runtime compiles and links there. Branch `macos-native` on the fork `lasscat/nds-game-studio`.
+Status: steps 1-6 of section 5 are written, not yet built or run on Windows. The no-ROM harness (4.1) passes on
+macOS, natively on arm64 and as x86_64 under Rosetta. On arm64, `native_build.py` builds AL7E from its recipe and the
+player's ROM, and the module boots headless (intro, logos, title screen). Branch `macos-native` on the fork `lasscat/nds-game-studio`.
 
 The studio itself (launcher, engine, mod tools) already builds and ships for macOS: `build.yml` makes universal
 binaries and an `.app`. Only the **native game pipeline** is Windows-only: translating a game (`arm2c.py`), building its
@@ -159,8 +160,34 @@ the C compiler needs its own route, for example calls through `nds_call_target` 
   without Gatekeeper prompts.
 - Parse ld64's missing-symbol format (`"_foo", referenced from:`) for the stub pass. Use `creationflags` only on
   Windows (`nice` + QoS on macOS).
-- Keep calling convention details in mind: `CALLF` passes 10 `u32` through `u64 (*)()`. This works with Apple's arm64
+- Keep calling convention details in mind: `CALLF` passes 14 `u32` through `u64 (*)()`. This works with Apple's arm64
   ABI as long as callees are non-variadic and the dialect stays pre-C23. The build pins `-std`.
+
+**Done** (step 6). `--arch arm64|x86_64` (default: this Mac's). `--instrument` uses
+`-finstrument-functions-after-inlining`, clang having no exclusion list. Two things the Windows build never needed:
+- **Game functions get a host prefix, `ds_<name>`**. Games ship their own `memcpy`, `memset`, `sprintf`, `exit`… (22
+  of them in AL7E), which take DS addresses. Under their real names, the runtime's libSystem calls and the
+  `memcpy`/`memset` that clang emits by itself would bind to them, with truncated 64-bit pointers. Functions the
+  runtime replaces keep their name. The runtime calls a game function by name through `GAME_FN(name)` (`nitro.h`),
+  only `OS_SelectThread` today.
+- **The platform layer replaces no game function.** `os_posix.c` defines `main`, and so does the game (crt0 passes
+  `&main` to the SDK): counting it as a runtime replacement sent the game into `nds_start` again, in a loop.
+- Game data the runtime names: `lift/dsaddr.c` with `const unsigned nds_addr_<name>` (instead of `dsabs.s`).
+- Priority: `nice 10`, and compilers run under `taskpolicy -c utility` (P-cores still allowed, unlike `-b`).
+
+Two translator and runtime bugs found on the way, **which affect Windows too** (to offer upstream):
+- **Stack arguments past the 6th were lost.** `CALLF` forwarded 6 stack words (`STACK_ARGS`), and a callee read the 7th
+  from its own uninitialized `stack_`. AL7E has three functions that read more, up to 9 (printf-style formatting,
+  `func_020549e4` gets a pointer as its 7th): the title logo was missing, and x86_64 and instrumented builds crashed
+  in the TT Games intro. Whatever the stack held decided the outcome, on Windows too. `STACK_ARGS` is now 10, the
+  parameters are named `a0..a9` (`s8` is a type), and `CALLF` is generated from it. Harness case `t_args14`.
+- `--instrument`: the DMA watch log read DS address 0 on every `MI_StopDma` (`src = dst = 0`), since the default
+  `nds_watch = 1` matched `dst <= 1`.
+
+Measured on this Mac, AL7E: build in about 27 s (lifted code: 4741 functions, no stubs), module 7 MiB.
+`--mute --dump … --every 300 --frames 3000` runs in 50 s (paced at 60 fps, about 10 % of one core) and exits 0. The
+ten frames (intro, LucasArts and TT Games 3D logos, Amaze credit, title screen) are byte-identical on arm64, on x86_64
+under Rosetta, and in both instrumented builds.
 
 ### 3.7 Launcher (`crates/engine/src/native_game.rs`)
 
@@ -186,7 +213,7 @@ the C compiler needs its own route, for example calls through `nds_call_target` 
 No ROM is, or ever will be, in the repo or the CI, so:
 
 1. **Translator unit test, no ROM**: a small C harness built on macOS and Windows covers `RD/WR` + `LDRW` rotation,
-   flag macros, `CALLF` with 10 arguments, gosub dispatch, and `nds_call_target` on Thumb and ARM addresses.
+   flag macros, `CALLF` with 10 and 14 arguments, gosub dispatch, and `nds_call_target` on Thumb and ARM addresses.
    **Done**: `native/tests/`. `arm2c_cases.s` holds small ARM/Thumb functions. Their bytes are embedded in
    `arm2c_test.py`, which lifts them with `arm2c.Lifter`, checks the generated C (no `(u32)&`, no `goto *(void *)`,
    literals are ARM addresses, `gs_` tags), then compiles `harness.c` + `lifted.c` + `nitro-pc/calltab.c` +
@@ -219,7 +246,7 @@ No ROM is, or ever will be, in the repo or the CI, so:
 | 3 | Code pointers as DS addresses, direct-mapped dispatch, no fixups, gosub tags. **Code done**: no-ROM harness passes on macOS (arm64), runtime still passes the step 2 checks (macOS `-Werror` casts, i686-mingw syntax). Not yet built with GCC or run on Windows | same golden frames on Windows |
 | 4 | 64-bit `Slot`, arm64/x86_64 context switch, no x86 inline asm on 64-bit. **Code done**: harness passes on macOS arm64 and x86_64 (Rosetta); the whole runtime except `os_win32.c` compiles for `arm64-apple-macos` and `x86_64-apple-macos` with the `-Werror` cast flags, and for `i686-w64-mingw32`, where `context.c` assembles to the old i386 bytes. Not yet built with GCC or run on Windows | unit harness passes on macOS |
 | 5 | `os_posix.c` + CoreAudio + POSIX shm. **Code done**: the whole runtime (arm64, x86_64) compiles with `-std=gnu11 -O2 -Wall -Werror=pointer-to-int-cast -Werror=int-to-pointer-cast` and links against libSystem + AudioToolbox; only the game's own symbols are missing (step 6). Audio smoke test passes on both | runtime compiles with `-Werror` on macOS |
-| 6 | darwin profile in `native_build.py` | **milestone: a game boots headless on macOS**, frames dumped |
+| 6 | darwin profile in `native_build.py`. **Done**: AL7E boots headless on arm64 and reaches its title screen (3.6) | **milestone: a game boots headless on macOS**, frames dumped |
 | 7 | Launcher integration (`native_game.rs`) | Play button works on macOS |
 | 8 | Toolchain packaging + CI jobs | launcher downloads the macOS toolchain and generates a module |
 | 9 | Docs: `README.md`, `native/README.md`, `GAMES.md` platform column (in French, like the rest of the repo) | |

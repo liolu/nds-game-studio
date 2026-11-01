@@ -33,12 +33,17 @@ u32 nds_host2ds(const volatile void *p); /* verifie que p est dans la fenetre */
 
 /* Donnees du jeu que le runtime nomme. Windows 32 bits : symbole absolu a l'adresse DS (dsabs.s de native_build.py).
  * Ailleurs (ld64 n'a pas de symboles absolus utilisables) : le build fournit nds_addr_<nom>, voir MACOS.md 3.6. */
+/* Fonctions du jeu que le runtime appelle par leur nom : hors Windows 32 bits, native_build.py prefixe ds_ toutes les
+ * fonctions du jeu, pour que memcpy, exit, sprintf... du jeu (qui prennent des adresses DS) ne remplacent pas ceux de
+ * libSystem dans les appels du runtime et ceux que clang ajoute de lui-meme. */
 #if NDS_IDENTITY
 #define GAME_SYM(name) extern char name[]
 #define GAME_ADDR(name) ((u32)(uptr)(name))
+#define GAME_FN(name) name
 #else
 #define GAME_SYM(name) extern const u32 nds_addr_##name
 #define GAME_ADDR(name) (nds_addr_##name)
+#define GAME_FN(name) ds_##name
 #endif
 
 /* registres et memoire DS a une adresse DS fixe */

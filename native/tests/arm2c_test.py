@@ -188,12 +188,15 @@ def toolchain():
         import native_build  # met WinLibs ou la boite a outils sur le PATH
         harness = ["-m32", "-std=gnu11", "-O1", "-Wall", "-Wno-unused", "-msse2", "-mfpmath=sse", "-fno-strict-aliasing"]
         return ["gcc"], native_build.LIFT_FLAGS, native_build.RUNTIME_FLAGS, harness, ["-m32"], ".exe"
-    # options de la future version darwin de native_build.py (MACOS.md 3.6)
+    harness = ["-std=gnu11", "-O1", "-Wall", "-Wno-unused", "-fno-strict-aliasing", "-ffp-contract=off"]
+    if sys.platform == "darwin":
+        import native_build  # options du profil darwin (MACOS.md 3.6)
+        return [os.environ.get("CC", "clang")], native_build.LIFT_FLAGS, native_build.RUNTIME_FLAGS, harness + ["-Wno-deprecated-non-prototype"], [], ""
+    # Linux : pas encore de profil dans native_build.py, memes options que darwin
     lift_flags = ["-std=gnu89", "-O1", "-w", "-fwrapv", "-fno-strict-aliasing", "-ffp-contract=off",
                   "-fno-stack-protector", "-fno-omit-frame-pointer"]
     rt = ["-std=gnu11", "-O2", "-Wall", "-Wno-unused", "-fno-strict-aliasing", "-ffp-contract=off",
           "-Werror=pointer-to-int-cast", "-Werror=int-to-pointer-cast"]
-    harness = ["-std=gnu11", "-O1", "-Wall", "-Wno-unused", "-fno-strict-aliasing", "-ffp-contract=off"]
     cc = os.environ.get("CC", "cc")
     if "clang" in subprocess.run([cc, "--version"], capture_output=True, text=True).stdout.lower():
         harness.append("-Wno-deprecated-non-prototype")  # CALLF : u64 (*)(), voulu (MACOS.md 3.6)

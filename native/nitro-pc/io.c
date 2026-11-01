@@ -177,7 +177,7 @@ GAME_SYM(OSi_ThreadInfo);
 GAME_SYM(OSi_IrqThreadQueue);
 #define thread_info ((ThreadInfo *)DS(GAME_ADDR(OSi_ThreadInfo)))
 #define irq_queue ((u32 *)DS(GAME_ADDR(OSi_IrqThreadQueue))) /* [2] */
-extern u64 OS_SelectThread();
+extern u64 GAME_FN(OS_SelectThread)();
 extern u64 OS_SaveContext();
 extern u64 OS_LoadContext();
 typedef u64 (*Fn)();
@@ -215,7 +215,7 @@ void irq_deliver(void) {
         if (thread_info->need) {
             thread_info->need = 0;
             u32 cur = thread_info->current;
-            u32 next = (u32)OS_SelectThread();
+            u32 next = (u32)GAME_FN(OS_SelectThread)();
             if (cur && next && cur != next) {
                 CLOSE();
                 if ((u32)OS_SaveContext(cur) == 0) {
