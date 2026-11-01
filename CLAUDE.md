@@ -5,6 +5,7 @@
 - Pas de Visual Studio sur ce PC : `build.cmd` (toolchain `stable-x86_64-pc-windows-gnu` + WinLibs sur le PATH).
   Depuis Git Bash, le PATH WinLibs s'ecrit `/c/Users/thomr/AppData/Local/Microsoft/WinGet/Packages/BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe/mingw64/bin`.
 - Toujours en release. Tuer `nds-game-studio.exe` avant de recompiler.
+- Temps mesures (moteur, 1 ligne changee) : 40 s, 15-23 s avec `CARGO_PROFILE_RELEASE_INCREMENTAL=true` (dans `build.cmd`) ; le lien de l'app seule prend 12 s, un autre lieur ne gagnerait presque rien. **Ne pas partager un `CARGO_TARGET_DIR` entre deux worktrees** : Cargo garde les memes empreintes et prend pour a jour les sources plus anciennes que le dernier build de l'autre branche, ce qui compile le mauvais code.
 - Plateforme : Windows, PowerShell, clavier AZERTY. `gh` authentifie comme `liolu`.
 
 ## Structure
