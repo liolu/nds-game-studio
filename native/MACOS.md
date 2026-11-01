@@ -1,0 +1,169 @@
+# Native DS games on macOS: port plan
+
+Status: plan only. Nothing below is implemented yet. Branch `macos-native` on the fork `lasscat/nds-game-studio`.
+
+The studio itself (launcher, engine, mod tools) already builds and ships for macOS: `build.yml` makes universal
+binaries and an `.app`. Only the **native game pipeline** is Windows-only: translating a game (`arm2c.py`), building its
+module (`native_build.py`), running it (`nitro-pc`) and showing it in the launcher (`native_game.rs`).
+
+## 1. Why it is Windows-only today
+
+| # | Assumption | Where |
+|---|---|---|
+| 1 | **32-bit identity mapping**: a DS address is used directly as a host pointer. `RD32(a)` is `*(u32 *)a`. The runtime maps RAM at `0x02000000`, IO at `0x04000000`, VRAM at `0x06000000`, and so on. | `arm2c.py` PRELUDE (`RD*/WR*/P32`), `core.c` `nds_start`/`reserve` |
+| 2 | **Host pointers stored in 32 bits**: `(u32)&func` for code pointers, `lr = (u32)&&L…` for internal subroutines, `sp = (u32)&stack_[n]` (the C stack is DS stack memory), and x86 function pointers written into DS memory (`nds_fixups`). `nds_call_target` treats values outside the DS range as x86 addresses. | `arm2c.py:341`, `:447`, `:621`; `core.c` `load_arm9`, `nds_call_target` |
+| 3 | **i386 assembly**: `OS_SaveContext`/`OS_LoadContext` (green threads), the stack switch in `nds_start`, `nds_irq_tramp`, `rep movsb/stosb`, x87 `fyl2x` | `core.c:23,26,364,449,696`, `snd.c:27` |
+| 4 | **Win32 called directly** through `kernel32.def`/`winmm.def`: `VirtualAlloc/Protect`, `CreateFileA`, threads and events, `QueryPerformanceCounter`, file mappings, `waveOut*` audio, vectored exception handler | `nitro.h`, every `nitro-pc/*.c` |
+| 5 | **Toolchain**: WinLibs `gcc -m32`, `ld -m i386pe --image-base 0x10000000`, `dlltool`, bundled `python.exe`; the CI job runs on `windows-latest` only | `native_build.py`, `make_toolchain.py`, `ci_toolchain.ps1`, `native-toolchain.yml` |
+| 6 | **Launcher**: `SharedFrames::new` returns `None` off Windows, modules are named `*.exe`, the toolchain is detected through `python/python.exe` | `crates/engine/src/native_game.rs` |
+
+## 2. Measured on this Mac (Apple Silicon, macOS 27.2, Apple clang 21)
+
+| Test | Result |
+|---|---|
+| arm64: `mmap(0x02000000, MAP_FIXED)` | refused: the 4 GiB `__PAGEZERO` covers all of it |
+| arm64 linked with `-pagezero_size 0x1000` | **killed by the kernel at launch** (exit 137) |
+| x86_64 under Rosetta, small pagezero | low fixed mapping still refused |
+| arm64: reserve a 4 GiB + guard window anywhere | works (`0x7000000000`) |
+| page size | 16 KiB (Windows: 4 KiB) |
+| 32-bit (`-arch i386`) | no longer exists on macOS |
+
+**Conclusion:** keeping DS addresses as host addresses cannot work on Apple Silicon. Rosetta does not help either, and
+Apple is winding Rosetta down after macOS 27. The port therefore needs a **memory window**: DS address `a` lives at
+`nds_mem + a`. The same design also covers Intel Macs (x86_64), and later Linux or 64-bit Windows.
+
+## 3. Design
+
+### 3.1 Memory window
+
+- Reserve 4 GiB + 64 KiB as `PROT_NONE` at any address (`nds_mem`). Inside it, commit the same regions `nds_start`
+  maps today (ITCM, main RAM and mirrors, IO, palettes, VRAM, OAM, GBA slot). Green-thread stacks stay at window offset
+  `0x20000000+`, as `stack_alloc` does now.
+- `#define DS(a) ((u8 *)nds_mem + (u32)(a))` and `#define HOST2DS(p) ((u32)((u8 *)(p) - (u8 *)nds_mem))`.
+- **Windows 32-bit keeps `nds_mem` as the constant 0**, so the compiler folds it away: same generated code, no
+  regression risk for the current platform.
+- Generated code: `RD*/WR*/P32` go through `DS()`. Frames become `sp = HOST2DS(&stack_[n])`. This is valid because
+  all game code runs on stacks inside the window: the main stack is switched at startup and the SDK threads use
+  `stack_alloc`. In instrumented builds, `HOST2DS` asserts that its pointer is inside the window, which catches game code
+  running on a render, audio or input thread.
+- On arm64 this costs almost nothing, since `ldr w0, [x_base, w_off, uxtw]` is one instruction.
+
+### 3.2 Code pointers stay DS addresses
+
+- `(u32)&func` → emit the ARM address (`0x0201234du`, with the Thumb bit).
+- **Drop `nds_fixups`**: DS memory keeps the game's original function pointers. This is also closer to the real
+  hardware, because games can compare, hash or store those pointers.
+- `nds_call_target` always maps DS address → host function. The binary search becomes a direct-mapped table over the
+  code ranges (main RAM `0x02000000-0x02400000` + ITCM, 2-byte granularity, about 16 MiB of virtual memory touched
+  lazily): one load per indirect call. `thread_tramp` also calls through it.
+- Internal subroutines (`gosub_funcs`): `lr = (u32)&&L…` becomes `lr = GOSUB_TAG + k`, with a per-function
+  `static void *const gs_[] = { &&L…, … }`. Returns (`goto *(void *)lr` / `pc_val`) become `goto *gs_[x - GOSUB_TAG]`.
+  `GOSUB_TAG` sits above `0xFFF00000`, a range a real return address never uses and that differs from `MAGIC_LR`.
+
+### 3.3 Threads and assembly
+
+- `Slot` widens to `uintptr_t` fields. New `OS_SaveContext`/`OS_LoadContext` and stack switch for **arm64** (x19-x30,
+  sp, d8-d15) and **x86_64** (rbx, rbp, r12-r15, rsp, rip). The i386 version stays behind `#if`.
+- `rep movsb/stosb` → `__builtin_memcpy/memset` off Windows. The x87 `fyl2x` becomes `log()`.
+- `nds_irq_tramp` and the exception handler are used only by `--with-c` (see 3.5).
+
+### 3.4 Platform layer
+
+New `nitro-pc/os.h` with a small API. `os_win32.c` holds today's code, moved verbatim. `os_posix.c` and
+`audio_coreaudio.c` are new:
+
+| Need | Win32 now | macOS |
+|---|---|---|
+| window, stacks, buffers | `VirtualAlloc` | `mmap` (+ `mprotect`) |
+| rom, save, wav, bmp | `CreateFileA/ReadFile/WriteFile` | `open/read/write` |
+| render pool, render, input, audio threads | `CreateThread`, `CreateEventA`, `WaitForSingleObject` | `pthread_create`, `dispatch_semaphore` |
+| frame pacing | `QueryPerformanceCounter`, `Sleep`, `timeBeginPeriod` | `mach_absolute_time`, `nanosleep` |
+| frames for the launcher | `OpenFileMappingA/MapViewOfFile` | `shm_open/mmap` |
+| sound | `waveOut*` | AudioQueue (CoreAudio) pulling from `snd.c`'s mixer |
+| RTC | `GetLocalTime` | `localtime_r` |
+| `--prof` (dev only) | `SuspendThread/GetThreadContext` | `thread_get_state` on the main thread (later, optional) |
+
+The runtime is freestanding on Windows (its own `libc.c`). On macOS it links `libSystem`, as every Mac binary must.
+
+### 3.5 Out of scope on 64-bit: `--with-c`
+
+Matched decomp C uses real pointers: they become 64-bit on the host, which breaks struct layouts and every pointer
+stored in DS memory. That mode also relies on the IO trap (4 KiB `VirtualProtect` + single-step). macOS therefore runs
+**translated mode only**, which is already the default. `native_build.py` refuses `--with-c` off win32.
+
+### 3.6 Build (`native_build.py`)
+
+- A host profile chooses the build. Windows stays as it is now. darwin uses
+  `clang -arch arm64|x86_64 -std=gnu89 -O1 -fwrapv -fno-strict-aliasing -ffp-contract=off -fno-stack-protector -fno-omit-frame-pointer -w`.
+  The runtime is built with `-std=gnu11 -O2 -Werror=pointer-to-int-cast -Werror=int-to-pointer-cast`, which surfaces
+  every 32-bit pointer assumption left.
+- `-ffp-contract=off` is required: clang on arm64 fuses `a*b+c` into FMA by default, which rounds differently from the
+  DS.
+- Link with `clang`: no `dlltool`/`.def`, and no absolute data symbols, since translated code uses numeric addresses.
+  The output is `build/<code>/<code>` (no `.exe`). ld64 ad-hoc signs arm64 output, so a locally built module runs
+  without Gatekeeper prompts.
+- Parse ld64's missing-symbol format (`"_foo", referenced from:`) for the stub pass. Use `creationflags` only on
+  Windows (`nice` + QoS on macOS).
+- Keep calling convention details in mind: `CALLF` passes 10 `u32` through `u64 (*)()`. This works with Apple's arm64
+  ABI as long as callees are non-variadic and the dialect stays pre-C23. The build pins `-std`.
+
+### 3.7 Launcher (`crates/engine/src/native_game.rs`)
+
+- `SharedFrames` on unix: `shm_open("/ndsgs-<pid>-<code>")` (macOS caps names at 31 chars; the current name is close
+  to that limit), `ftruncate`, `mmap`, then `shm_unlink` on drop.
+- Module file names use `std::env::consts::EXE_SUFFIX`, both when generating and when scanning `native/`.
+- Toolchain: `python/bin/python3` on unix. The asset becomes `native-toolchain-<v>-macos-<arch>.zip`. Before
+  generating, check `xcrun --find clang`; if it is missing, show `tr("…", "…")` explaining `xcode-select --install`.
+  All new text follows the i18n rule.
+- Lower the generator's priority (`setpriority`/`taskpolicy -b`) so the Mac stays usable, as `IDLE` does on Windows.
+
+### 3.8 Toolchain and CI
+
+- `make_toolchain.py --platform macos-arm64|macos-x86_64`: translator, runtime, recipes, python-build-standalone
+  (install_only) and the matching capstone wheel. **No compiler**, because the Apple SDK may not be redistributed:
+  players need the Xcode Command Line Tools.
+- `native-toolchain.yml`: add `macos-latest` (arm64) and an Intel runner, plus a job that compiles the runtime with
+  `-Werror` on macOS and with `-m32` on Windows. That job needs no ROM and catches regressions on both sides.
+- Bump `TOOLCHAIN` in `export_recipes.py` (project rule after any change in `native/`).
+
+## 4. Validation
+
+No ROM is, or ever will be, in the repo or the CI, so:
+
+1. **Translator unit test, no ROM**: a small C harness built on macOS and Windows covers `RD/WR` + `LDRW` rotation,
+   flag macros, `CALLF` with 10 arguments, gosub dispatch, and `nds_call_target` on Thumb and ARM addresses.
+2. **Golden frames** with the player's own ROM of a verified game (AJTP, AR5E, AL7E): run the same headless command on
+   Windows (today's 32-bit build) and on macOS, then compare the BMPs and the `--wav` output:
+   `--mute --frames 3000 --dump out --every 300 --keys …`. Green threads and frame skipping can shift timing, so start
+   with visual comparison and use exact matching on early frames.
+3. Run through the real engine: `cargo run --release -p nds-engine --example native_check -- …`.
+4. Speed: full speed on an M1 at the default HD scale, measured with frame times in the log.
+
+## 5. Order of work (one reviewable commit or PR each; Windows keeps working at every step)
+
+| Step | Change | Done when |
+|---|---|---|
+| 1 | Extract `os.h` + `os_win32.c` (no behavior change) | Windows module builds and boots the same |
+| 2 | `DS()`/`HOST2DS()` in translator and runtime, `nds_mem = 0` on win32 | same golden frames on Windows |
+| 3 | Code pointers as DS addresses, direct-mapped dispatch, no fixups, gosub tags | same golden frames on Windows |
+| 4 | 64-bit `Slot`, arm64/x86_64 context switch, no x86 inline asm on 64-bit | unit harness passes on macOS |
+| 5 | `os_posix.c` + CoreAudio + POSIX shm | runtime compiles with `-Werror` on macOS |
+| 6 | darwin profile in `native_build.py` | **milestone: a game boots headless on macOS**, frames dumped |
+| 7 | Launcher integration (`native_game.rs`) | Play button works on macOS |
+| 8 | Toolchain packaging + CI jobs | launcher downloads the macOS toolchain and generates a module |
+| 9 | Docs: `README.md`, `native/README.md`, `GAMES.md` platform column (in French, like the rest of the repo) | |
+
+Steps 1-3 also benefit Windows (fewer hidden x86 assumptions) and are the ones to offer upstream first.
+
+## 6. Risks and open questions
+
+- **Hidden `u32` ↔ pointer casts** in the runtime (about 130, 73 of them in `core.c`). The `-Werror` cast flags find
+  them; each one is either a DS address (`DS()`) or a real host pointer (widen it).
+- **Game code on a foreign stack**: if any runtime thread ever calls game code, `HOST2DS` breaks. Covered by the
+  instrumented-build assert.
+- **Cost of the indirect-call lookup and the base add**: expected to be small. Measure in step 3 on Windows, where
+  the base add is free, to isolate the lookup.
+- **Xcode Command Line Tools required** for players. Possible later step: ship a prebuilt, signed runtime from the CI,
+  plus LLVM `clang` + `ld64.lld`, and compile only the translated game code.
+- **Testing needs a real ROM** of a verified game, and a Windows machine for the golden reference. The maintainer
+  has both; this Mac needs a Rust toolchain (`rustup`), `pip install capstone`, and a ROM the user owns.
