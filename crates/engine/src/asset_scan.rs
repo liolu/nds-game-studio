@@ -17,13 +17,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use nds_video::Video;
-use nds_nitro::{adx, decompress_any, g2d, gx_mesh, looks_compressed, model3d, narc, nitrofs, packs, romarc, sadl, sdat, sniff, unpack, Kind, Rgba};
+use nds_nitro::{adx, ahx, amaze, decompress_any, g2d, gx_mesh, looks_compressed, model3d, narc, nitrofs, packs, romarc, sadl, sdat, sniff, unpack, Kind, Rgba};
 use serde::{Deserialize, Serialize};
 
 use crate::i18n::{t, tr};
 
 /// À changer quand le calcul change : l'index gardé est alors refait.
-const INDEX_VERSION: u32 = 12;
+const INDEX_VERSION: u32 = 13;
 const BIG_FILE: usize = 4 << 20;
 
 /// Une rom du dossier `rom` du launcher.
@@ -137,6 +137,7 @@ pub fn scan(rom_path: &Path) -> Vec<Entry> {
         let size = data.len();
         let small = size < BIG_FILE;
         let kind = guess_file_format(guess_house_format(by_extension(kind_of(&data[..size.min(4)], || small.then(|| data.to_vec())), &path), &path, data, false), &path, data);
+        let kind = if kind == Kind::Other && looks_like_rom(data) { Kind::NestedRom } else { kind };
         let dir = path.rsplit_once('/').map_or(String::new(), |(d, _)| d.to_string());
         let stem = stem_of(&path);
         entries.push(Entry { path: path.clone(), member_name: None, rom: rom_path.to_path_buf(), span, member: None, kind, size, dir, stem, rom_index: None });
@@ -579,20 +580,62 @@ fn embedded_files(bytes: &[u8]) -> Vec<(usize, usize, &'static str)> {
 
 /// Les fichiers de l'archive numérotée rom.bin : `rom.bin#n`, nommés `<n sur 5 chiffres>.<ext>`.
 fn scan_rom_bin(rom_path: &Path, data: &[u8], base: usize) -> Vec<Entry> {
-    romarc::entries(data)
-        .into_iter()
+    let list = romarc::entries(data);
+    let files: Vec<Vec<u8>> = list.iter().map(|(at, size)| unpack(romarc::unpack(&data[*at..*at + *size]))).collect();
+    let mut sorts: Vec<(Kind, &str)> = files.iter().map(|bytes| rom_bin_kind(bytes)).collect();
+    // Le descripteur d'un sprite n'en est un que si ses tuiles sont à côté : sans ça, on n'y touche pas
+    for (n, bytes) in files.iter().enumerate() {
+        if sorts[n].0 != Kind::Other {
+            continue;
+        }
+        let Some(sprite) = amaze::read_sprite(bytes) else { continue };
+        if let Some(tiles) = SPRITE_TILES_AT.iter().filter_map(|d| n.checked_add_signed(*d)).find(|t| files.get(*t).is_some_and(|f| amaze::tiles_match(&sprite, f))) {
+            sorts[n] = (Kind::RomSprite, "spr");
+            sorts[tiles] = (Kind::RomSpriteTiles, "spt");
+        }
+    }
+    list.into_iter()
         .enumerate()
         .map(|(n, (at, size))| {
-            let bytes = unpack(romarc::unpack(&data[at..at + size]));
-            let mut kind = sniff(&bytes);
-            let mut ext = romarc::extension(&bytes);
-            if kind == Kind::Other && g2d::read_rom_image(&bytes).is_some() {
-                (kind, ext) = (Kind::RomImage, "img");
-            }
+            let bytes = &files[n];
+            let (kind, ext) = sorts[n];
             let name = format!("{n:05}.{ext}");
             Entry { path: format!("rom.bin#{n}"), member_name: Some(name), rom: rom_path.to_path_buf(), span: (base + at, base + at + size), member: None, kind, size: bytes.len(), dir: "rom.bin".into(), stem: n.to_string(), rom_index: Some(n as u32) }
         })
         .collect()
+}
+
+/// Où chercher les tuiles d'un sprite, par rapport à son descripteur.
+const SPRITE_TILES_AT: [isize; 6] = [-1, -2, 1, 2, -3, 3];
+
+/// Sorte d'un fichier de rom.bin, à lui seul.
+fn rom_bin_kind(bytes: &[u8]) -> (Kind, &'static str) {
+    let kind = sniff(bytes);
+    if kind != Kind::Other {
+        return (kind, romarc::extension(bytes));
+    }
+    if ahx::is_ahx(bytes) {
+        return (Kind::Audio, "ahx");
+    }
+    if g2d::read_rom_image(bytes).is_some() {
+        return (Kind::RomImage, "img");
+    }
+    if amaze::read_level_tiles(bytes).is_some() {
+        return (Kind::RomLevelTiles, "chr");
+    }
+    // Palette de 16 ou 256 couleurs : le bit 15 d'une couleur de la DS ne sert pas
+    if matches!(bytes.len(), 32 | 512) && bytes.chunks_exact(2).all(|c| c[1] & 0x80 == 0) {
+        return (Kind::RawPalette, "pal");
+    }
+    (Kind::Other, "bin")
+}
+
+/// Une mini-rom sous un autre nom que `.srl` (`child.bin` des Simpsons) : un code de jeu lisible, le code ARM9 et le NitroFS
+/// dans le fichier.
+fn looks_like_rom(data: &[u8]) -> bool {
+    let field = |at: usize| data.get(at..at + 4).map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]) as usize);
+    let (Some(arm9), Some(names), Some(fat)) = (field(0x20), field(0x40), field(0x48)) else { return false };
+    data.len() > 0x4000 && data[0x0C..0x10].iter().all(u8::is_ascii_alphanumeric) && (0x200..data.len()).contains(&arm9) && (0x200..data.len()).contains(&names) && (0x200..data.len()).contains(&fat) && nitrofs::read(data).is_ok()
 }
 
 fn read_span(rom: &Path, (start, end): (usize, usize)) -> Result<Vec<u8>, String> {
@@ -761,6 +804,8 @@ pub fn choices_for(entries: &[Entry], sel: usize) -> Choices {
     let kind = entries[sel].kind;
     let mut c = Choices::default();
     match kind {
+        Kind::RomSprite | Kind::RomSpriteTiles => c.palettes = rom_palettes(entries, sel, 32),
+        Kind::RomLevelTiles => c.palettes = rom_palettes(entries, sel, 512),
         Kind::Tiles | Kind::Screen | Kind::Cells => {
             c.palettes = companions(entries, sel, &[Kind::Palette]);
             if kind == Kind::Tiles {
@@ -1093,6 +1138,7 @@ fn decode_inner(entries: &[Entry], sel: usize, c: &mut Choices) -> Result<Decode
             let sound = match bytes.get(0..4) {
                 Some(b"STRM") => sdat::read_strm(&bytes),
                 Some(b"SWAV") => sdat::read_swav(&bytes),
+                _ if ahx::is_ahx(&bytes) => ahx::decode(&bytes),
                 _ if adx::is_adx(&bytes) => adx::decode(&bytes),
                 _ => sadl::decode(&bytes),
             };
@@ -1190,6 +1236,28 @@ fn decode_inner(entries: &[Entry], sel: usize, c: &mut Choices) -> Result<Decode
             let image = g2d::read_rom_image(&bytes).ok_or(tr("unreadable image", "image illisible"))?;
             let info = t!("{} x {} pixels, {} bpp", "{} x {} pixels, {} bpp", image.rgba.width, image.rgba.height, if image.bpp8 { 8 } else { 4 });
             Ok(Decoded::Image { rgba: image.rgba, info })
+        }
+        Kind::RomSprite | Kind::RomSpriteTiles => {
+            let (sprite, tiles) = sprite_files(entries, sel, &bytes).ok_or(tr("no matching sprite file", "aucun fichier de sprite qui va avec"))?;
+            let palette = match load(&c.palettes, c.palette)? {
+                Some(p) => g2d::raw_palette(&p),
+                None => g2d::raw_palette(&[]),
+            };
+            let images = amaze::render_sprite(&sprite, &tiles, &palette);
+            let info = t!("{} frames, {} bpp (all of them in order, the game's sequences are elsewhere)", "{} images, {} bpp (toutes dans l'ordre, les sequences du jeu sont ailleurs)", images.len(), if sprite.bpp8 { 8 } else { 4 });
+            Ok(Decoded::Frames { frames: images.into_iter().map(|image| (image, SPRITE_FRAME)).collect(), info })
+        }
+        Kind::RomLevelTiles => {
+            let tiles = amaze::read_level_tiles(&bytes).ok_or(tr("unreadable tile sheet", "planche de tuiles illisible"))?;
+            let palette = match load(&c.palettes, c.palette)? {
+                Some(p) => g2d::raw_palette(&p),
+                None => grey_palette(&tiles),
+            };
+            if c.width == 0 {
+                c.width = 32;
+            }
+            let info = t!("{} level tiles, 8 bpp (the sheet, not the assembled level)", "{} tuiles de niveau, 8 bpp (la planche, pas le niveau assemble)", tiles.count());
+            Ok(Decoded::Image { rgba: g2d::render_tiles(&tiles, &palette, 0, c.width), info })
         }
         Kind::AnmFile => Ok(Decoded::Text { lines: anm_lines(&bytes), info: t!("Animation not played: its content", "Animation pas jouee : son contenu") }),
         Kind::ZImage => {
@@ -1360,6 +1428,33 @@ pub fn thumbnail(entries: &[Entry], sel: usize) -> Option<Vec<(Rgba, u16)>> {
         }
     }))
     .unwrap_or(None)
+}
+
+/// Durée d'une image de sprite (1/60 s) : la vraie est dans les séquences du jeu.
+const SPRITE_FRAME: u16 = 6;
+
+/// Le descripteur et les tuiles d'un sprite, depuis l'un ou l'autre.
+fn sprite_files(entries: &[Entry], sel: usize, bytes: &[u8]) -> Option<(amaze::Sprite, Vec<u8>)> {
+    let me = entries[sel].rom_index?;
+    let near = |wanted: Kind| entries.iter().filter(move |e| e.kind == wanted && e.rom_index.is_some_and(|n| n.abs_diff(me) <= 3)).filter_map(|e| read_entry(e).ok());
+    if entries[sel].kind == Kind::RomSprite {
+        let sprite = amaze::read_sprite(bytes)?;
+        let tiles = near(Kind::RomSpriteTiles).find(|t| amaze::tiles_match(&sprite, t))?;
+        return Some((sprite, tiles));
+    }
+    let sprite = near(Kind::RomSprite).find_map(|d| amaze::read_sprite(&d).filter(|s| amaze::tiles_match(s, bytes)))?;
+    Some((sprite, bytes.to_vec()))
+}
+
+/// Les palettes d'un fichier de rom.bin : la taille voulue d'abord, puis celles qui suivent le fichier, les plus proches en tête.
+fn rom_palettes(entries: &[Entry], sel: usize, size: usize) -> Vec<usize> {
+    let mut list = companions(entries, sel, &[Kind::RawPalette]);
+    let me = entries[sel].rom_index.unwrap_or(0);
+    list.sort_by_key(|&i| {
+        let n = entries[i].rom_index.unwrap_or(0);
+        (entries[i].size != size, if n > me { n - me } else { me - n + (1 << 24) })
+    });
+    list
 }
 
 /// L'aperçu de `sel`. Un fichier mal formé donne une erreur, il ne fait pas tomber le studio.

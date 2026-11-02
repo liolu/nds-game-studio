@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 
-use nds_nitro::{adx, decompress_any, g2d, gx_mesh, model3d, narc, packs, romarc, sadl, sdat, Kind, Rgba};
+use nds_nitro::{adx, ahx, decompress_any, g2d, gx_mesh, model3d, narc, packs, romarc, sadl, sdat, Kind, Rgba};
 use serde::{Deserialize, Serialize};
 
 use crate::asset_scan::{self, Decoded, Entry};
@@ -436,6 +436,12 @@ fn export_entry(writer: &mut Writer, game: &Game, sel: usize) -> Result<(), Stri
         }
         Kind::Textures => export_textures(writer, entry, &base, &model3d::read(&bytes).map_err(|e| e.to_string())?),
         Kind::Model => export_model(writer, game, sel, &base, &bytes),
+        // Pas de codeur MPEG Layer II ici : on écoute et on exporte, mais le fichier du jeu revient tel quel
+        Kind::Audio if ahx::is_ahx(&bytes) => {
+            raw(writer, Recipe::Raw)?;
+            let wav = read_sound_file(&bytes)?.wav();
+            writer.put(&format!("{base}.apercu.wav"), entry, Recipe::ExportOnly, || Ok(wav))
+        }
         Kind::Audio => {
             let sound = read_sound_file(&bytes)?;
             let wav = sound.wav();
@@ -508,7 +514,7 @@ fn export_entry(writer: &mut Writer, game: &Game, sel: usize) -> Result<(), Stri
             Some(lines) => writer.put(&format!("{base}.txt"), entry, Recipe::LangText, || Ok(lines.into_bytes())),
             None => raw(writer, Recipe::Raw),
         },
-        Kind::ZImage | Kind::Font | Kind::Bitmap | Kind::EngineBitmap | Kind::RawTexture | Kind::TextureRef | Kind::JCells | Kind::JLayout | Kind::EngineGeometry | Kind::EngineMesh | Kind::Messages => {
+        Kind::ZImage | Kind::Font | Kind::Bitmap | Kind::EngineBitmap | Kind::RawTexture | Kind::TextureRef | Kind::JCells | Kind::JLayout | Kind::EngineGeometry | Kind::EngineMesh | Kind::Messages | Kind::RomSprite | Kind::RomLevelTiles => {
             let mut c = asset_scan::choices_for(&game.entries, sel);
             match (entry.kind, asset_scan::decode(&game.entries, sel, &mut c)) {
                 // Sous `mesh/`, ce qui ressemble à une image est une donnée de collision
@@ -534,6 +540,12 @@ fn export_entry(writer: &mut Writer, game: &Game, sel: usize) -> Result<(), Stri
                     raw(writer, Recipe::Raw)?;
                     match decoded {
                         Ok(Decoded::Image { rgba, .. }) => writer.image(format!("{base}.apercu.png"), entry, Recipe::ExportOnly, || Ok(rgba)),
+                        Ok(Decoded::Frames { frames, .. }) => {
+                            for (index, (image, _)) in frames.into_iter().enumerate() {
+                                writer.image(format!("{base}.apercu/{index:03}.png"), entry, Recipe::ExportOnly, || Ok(image))?;
+                            }
+                            Ok(())
+                        }
                         Ok(Decoded::Model { model: built, .. }) => {
                             let mtl = format!("{base}.apercu.mtl");
                             let mtl_short = mtl.rsplit('/').next().unwrap_or(&mtl).to_string();
@@ -556,6 +568,7 @@ fn read_sound_file(bytes: &[u8]) -> Result<sadl::Sound, String> {
     match bytes.get(0..4) {
         Some(b"STRM") => sdat::read_strm(bytes),
         Some(b"SWAV") => sdat::read_swav(bytes),
+        _ if ahx::is_ahx(bytes) => ahx::decode(bytes),
         _ if adx::is_adx(bytes) => adx::decode(bytes),
         _ => sadl::decode(bytes),
     }

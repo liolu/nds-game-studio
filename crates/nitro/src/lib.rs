@@ -25,6 +25,8 @@ pub mod nitro;
 pub mod primitives;
 
 pub mod adx;
+pub mod ahx;
+pub mod amaze;
 pub mod g2d;
 pub mod gx_mesh;
 pub mod model3d;
@@ -95,6 +97,11 @@ pub enum Kind {
     PaletteTiles,
     /// Image 2D de `rom.bin` (moteur Amaze) : palette, carte et tuiles.
     RomImage,
+    /// Sprite de `rom.bin` (moteur Amaze) : son descripteur et ses tuiles, deux fichiers voisins, voir `amaze`.
+    RomSprite,
+    RomSpriteTiles,
+    /// Tuiles d'un niveau (`rom.bin`, The Simpsons Game).
+    RomLevelTiles,
     /// Fichier `.z` (Tom and Jerry) : image, écran ou texture une fois décompressé.
     ZImage,
     /// Animation `.anm` : un résumé, elle n'est pas jouée.
@@ -140,6 +147,8 @@ impl Kind {
             Kind::Texel | Kind::TextureRef | Kind::RawTexture | Kind::BsTexture => "texture",
             Kind::EngineGeometry | Kind::EngineMesh => "modele 3D",
             Kind::Bitmap | Kind::ZImage | Kind::RomImage => "image",
+            Kind::RomSprite | Kind::RomSpriteTiles => "sprite",
+            Kind::RomLevelTiles => "tuiles",
             Kind::PaletteTiles => "tuiles",
             Kind::AnmFile => "animation 2D",
             Kind::ZipFile => "archive",
@@ -159,7 +168,7 @@ impl Kind {
     }
 
     pub fn viewable(self) -> bool {
-        matches!(self, Kind::Model | Kind::Textures | Kind::Palette | Kind::Tiles | Kind::Screen | Kind::Cells | Kind::ModelAnim | Kind::CellAnim | Kind::JCells | Kind::JLayout | Kind::Audio | Kind::AudioBank | Kind::Font | Kind::Messages | Kind::PaletteTiles | Kind::RomImage | Kind::ZImage | Kind::AnmFile | Kind::EngineGeometry | Kind::EngineMesh | Kind::RawTexture | Kind::BsTexture | Kind::Bitmap | Kind::ZipFile | Kind::Video | Kind::Texel | Kind::TextureRef | Kind::EngineBitmap | Kind::PlainText | Kind::Compressed | Kind::NestedRom | Kind::RawTiles | Kind::RawPalette | Kind::RawScreen | Kind::Script)
+        matches!(self, Kind::Model | Kind::Textures | Kind::Palette | Kind::Tiles | Kind::Screen | Kind::Cells | Kind::ModelAnim | Kind::CellAnim | Kind::JCells | Kind::JLayout | Kind::Audio | Kind::AudioBank | Kind::Font | Kind::Messages | Kind::PaletteTiles | Kind::RomImage | Kind::RomSprite | Kind::RomSpriteTiles | Kind::RomLevelTiles | Kind::ZImage | Kind::AnmFile | Kind::EngineGeometry | Kind::EngineMesh | Kind::RawTexture | Kind::BsTexture | Kind::Bitmap | Kind::ZipFile | Kind::Video | Kind::Texel | Kind::TextureRef | Kind::EngineBitmap | Kind::PlainText | Kind::Compressed | Kind::NestedRom | Kind::RawTiles | Kind::RawPalette | Kind::RawScreen | Kind::Script)
     }
 }
 
