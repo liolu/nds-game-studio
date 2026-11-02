@@ -22,8 +22,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::i18n::{t, tr};
 
+#[path = "game_params.rs"]
+pub mod game_params;
+
 /// À changer quand le calcul change : l'index gardé est alors refait.
-const INDEX_VERSION: u32 = 12;
+const INDEX_VERSION: u32 = 13;
 const BIG_FILE: usize = 4 << 20;
 
 /// Une rom du dossier `rom` du launcher.
@@ -208,6 +211,13 @@ pub fn scan(rom_path: &Path) -> Vec<Entry> {
         }
     }
     entries.extend(rom_bin);
+    let code = rom.get(0x0C..0x10).map(String::from_utf8_lossy).unwrap_or_default();
+    let params = game_params::for_game(&code);
+    if !params.is_empty() {
+        for e in &mut entries {
+            e.kind = params.kind_for(&e.dir, &e.format(), e.kind);
+        }
+    }
     entries
 }
 

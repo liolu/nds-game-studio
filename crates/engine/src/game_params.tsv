@@ -1,0 +1,22 @@
+# Parametres propres a chaque jeu, remplis par : cargo run --release -p nds-engine --example asset_params
+# code	motif	sorte	commentaire
+YYBP	*.h	PlainText	2 fichiers, 2 essayes
+BRPP	*.evd	Compressed	1074 fichiers, 8 essayes
+AMGP	animation/*.bin	Compressed	70 fichiers, 8 essayes
+AMGP	*.ds	Compressed	6 fichiers, 6 essayes
+AQIE	*.apf	Compressed	36 fichiers, 8 essayes
+AD2J	*.bin	Compressed	38 fichiers, 8 essayes
+ADGE	*.bin	Compressed	38 fichiers, 8 essayes
+ADGJ	*.bin	Compressed	38 fichiers, 8 essayes
+AD3J	*.bin	Compressed	38 fichiers, 8 essayes
+YC2P	*.(sans extension)	PlainText	72 fichiers, 8 essayes
+YC2P	01English/MessageText/SimsName/*.bin	PlainText	16 fichiers, 8 essayes
+YC2P	*.naix	PlainText	3 fichiers, 3 essayes
+YSPE	romFileNames.bin/*.bin	PlainText	9151 fichiers, 8 essayes
+AJTP	*.iof	PlainText	212 fichiers, 8 essayes
+AJTP	*.xof	PlainText	156 fichiers, 8 essayes
+VT3V	*.lpc	Compressed	23 fichiers, 8 essayes
+VT3V	*.nslbcc	Compressed	23 fichiers, 8 essayes
+BZ3J	*.(sans nom)	PlainText	557 fichiers, 8 essayes
+AHEP	data/ending.dat/*.bin	RawTiles	generiques de fin, vus a l oeil
+APDE	*.bin	RawTiles	polices, vues a l oeil
