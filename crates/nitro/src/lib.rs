@@ -93,6 +93,8 @@ pub enum Kind {
     Video,
     /// Planche de tuiles avec sa palette au début (Heroes of Mana).
     PaletteTiles,
+    /// Image 2D de `rom.bin` (moteur Amaze) : palette, carte et tuiles.
+    RomImage,
     /// Fichier `.z` (Tom and Jerry) : image, écran ou texture une fois décompressé.
     ZImage,
     /// Animation `.anm` : un résumé, elle n'est pas jouée.
@@ -137,7 +139,7 @@ impl Kind {
             Kind::PlainText => "texte",
             Kind::Texel | Kind::TextureRef | Kind::RawTexture | Kind::BsTexture => "texture",
             Kind::EngineGeometry | Kind::EngineMesh => "modele 3D",
-            Kind::Bitmap | Kind::ZImage => "image",
+            Kind::Bitmap | Kind::ZImage | Kind::RomImage => "image",
             Kind::PaletteTiles => "tuiles",
             Kind::AnmFile => "animation 2D",
             Kind::ZipFile => "archive",
@@ -157,7 +159,7 @@ impl Kind {
     }
 
     pub fn viewable(self) -> bool {
-        matches!(self, Kind::Model | Kind::Textures | Kind::Palette | Kind::Tiles | Kind::Screen | Kind::Cells | Kind::ModelAnim | Kind::CellAnim | Kind::JCells | Kind::JLayout | Kind::Audio | Kind::AudioBank | Kind::Font | Kind::Messages | Kind::PaletteTiles | Kind::ZImage | Kind::AnmFile | Kind::EngineGeometry | Kind::EngineMesh | Kind::RawTexture | Kind::BsTexture | Kind::Bitmap | Kind::ZipFile | Kind::Video | Kind::Texel | Kind::TextureRef | Kind::EngineBitmap | Kind::PlainText | Kind::Compressed | Kind::NestedRom | Kind::RawTiles | Kind::RawPalette | Kind::RawScreen | Kind::Script)
+        matches!(self, Kind::Model | Kind::Textures | Kind::Palette | Kind::Tiles | Kind::Screen | Kind::Cells | Kind::ModelAnim | Kind::CellAnim | Kind::JCells | Kind::JLayout | Kind::Audio | Kind::AudioBank | Kind::Font | Kind::Messages | Kind::PaletteTiles | Kind::RomImage | Kind::ZImage | Kind::AnmFile | Kind::EngineGeometry | Kind::EngineMesh | Kind::RawTexture | Kind::BsTexture | Kind::Bitmap | Kind::ZipFile | Kind::Video | Kind::Texel | Kind::TextureRef | Kind::EngineBitmap | Kind::PlainText | Kind::Compressed | Kind::NestedRom | Kind::RawTiles | Kind::RawPalette | Kind::RawScreen | Kind::Script)
     }
 }
 

@@ -311,6 +311,66 @@ pub fn render_screen(screen: &Screen, tiles: &Tiles, palette: &Palette) -> Rgba 
     out
 }
 
+/// Une image 2D de `rom.bin` (moteur Amaze, `func_020549e4` de Lego) : la carte est une simple suite de lignes.
+pub struct RomImage {
+    pub rgba: Rgba,
+    pub bpp8: bool,
+}
+
+/// u16 : palette (bits 0-1 : 1 = 256 couleurs, 2 = 16), sorte (bits 2-4 : 6 = carte + tuiles), copie des tuiles
+/// (bits 5-6 : 0 telles quelles, 3 codeur du jeu). Puis la palette, largeur et hauteur en tuiles (u16), la carte (u16,
+/// alignée sur 4 octets), la taille des tuiles (u16) et les tuiles. Sans signature : les tuiles doivent aller
+/// exactement jusqu'à la plus haute tuile de la carte, sinon `None`.
+pub fn read_rom_image(file: &[u8]) -> Option<RomImage> {
+    /// N° de tuile sur 10 bits, 64 octets par tuile au plus.
+    const MOST_TILE_BYTES: usize = 1024 * 64;
+    let head = u16::from_le_bytes([*file.first()?, *file.get(1)?]);
+    let (colors_size, bpp8) = match head & 3 {
+        1 => (0x200, true),
+        2 => (0x20, false),
+        _ => return None,
+    };
+    if head >> 2 & 7 != 6 {
+        return None;
+    }
+    let palette = raw_palette(file.get(2..2 + colors_size)?);
+    let u16_at = |at: usize| file.get(at..at + 2).map(|b| u16::from_le_bytes([b[0], b[1]]) as usize);
+    let (size_at, map_at) = (2 + colors_size, 6 + colors_size);
+    let (width, height) = (u16_at(size_at)?, u16_at(size_at + 2)?);
+    // Une ou deux tuiles : le hasard d'un en-tête qui tombe juste
+    if !(1..=256).contains(&width) || !(1..=256).contains(&height) || width * height < 4 {
+        return None;
+    }
+    let map_end = map_at + width * height * 2;
+    let entries: Vec<u16> = file.get(map_at..map_end)?.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+    let tiles_at = map_at + ((width * height * 2 + 3) & !3);
+    let size = u16_at(tiles_at)?;
+    let data = match head >> 5 & 3 {
+        0 => file.get(tiles_at + 2..tiles_at + 2 + size)?.to_vec(),
+        3 => {
+            let mut blob = vec![0; 4];
+            blob.extend_from_slice(file.get(tiles_at + 2..)?);
+            crate::romarc::own_coder_up_to(&blob, MOST_TILE_BYTES)?
+        }
+        _ => return None,
+    };
+    let tile_bytes = if bpp8 { 64 } else { 32 };
+    let highest = entries.iter().map(|e| (e & 0x3FF) as usize).max()?;
+    if data.len() != (highest + 1) * tile_bytes {
+        return None;
+    }
+    let pixels = if bpp8 { data } else { data.iter().flat_map(|b| [b & 15, b >> 4]).collect() };
+    let tiles = Tiles { bpp8, linear: false, pixels, width: None, height: None, attrs: Vec::new() };
+    let (w, h) = (width as u32 * 8, height as u32 * 8);
+    let mut rgba = Rgba { width: w, height: h, data: vec![0; (w * h * 4) as usize] };
+    for (i, &e) in entries.iter().enumerate() {
+        let (x, y) = ((i % width) as i64 * 8, (i / width) as i64 * 8);
+        // Une seule palette de 16 couleurs dans le fichier : le groupe de la carte vaut pour la mémoire de la console
+        draw_tile(&mut rgba, &tiles, (e & 0x3FF) as usize, &palette, 0, x, y, e & 0x400 != 0, e & 0x800 != 0);
+    }
+    Some(RomImage { rgba, bpp8 })
+}
+
 // --------------------------------------------------------------------------------------------
 //  Cellules (sprites faits de plusieurs OBJ)
 // --------------------------------------------------------------------------------------------
@@ -1104,5 +1164,51 @@ mod tests {
         let mut file = b"TTLP\x04\0\0\0".to_vec();
         file.extend([0x1F, 0, 0xE0, 3, 0, 0]);
         assert_eq!(read_palette(&file).unwrap().colors.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod rom_image_tests {
+    use super::*;
+
+    /// 16 couleurs, carte + tuiles copiées telles quelles : 2x2 tuiles, dont la dernière retournée.
+    fn image(tile_count: usize) -> Vec<u8> {
+        let mut file = vec![0x1A, 0];
+        file.extend((0..16u16).flat_map(|c| (c * 0x421).to_le_bytes()));
+        file.extend([2, 0, 2, 0]);
+        file.extend([0u16, 1, 0, 1 | 0x400].iter().flat_map(|e| e.to_le_bytes()));
+        file.extend(((tile_count * 32) as u16).to_le_bytes());
+        for tile in 0..tile_count {
+            let mut pixels = [0x11u8 * (tile as u8 + 1); 32];
+            pixels[0] = 0xF0;
+            file.extend(pixels);
+        }
+        file
+    }
+
+    #[test]
+    fn reads_map_tiles_and_palette() {
+        let read = read_rom_image(&image(2)).unwrap();
+        assert!(!read.bpp8);
+        assert_eq!((read.rgba.width, read.rgba.height), (16, 16));
+        let pixel = |x: usize, y: usize| read.rgba.data[(y * 16 + x) * 4 + 3];
+        // Couleur 0 = transparente, en haut à gauche de la tuile ; retournée dans la dernière
+        assert_eq!(pixel(0, 0), 0);
+        assert_eq!(pixel(8, 8), 255);
+        assert_eq!(pixel(15, 8), 0);
+    }
+
+    #[test]
+    fn tiles_must_end_at_the_highest_tile_of_the_map() {
+        assert!(read_rom_image(&image(1)).is_none());
+        assert!(read_rom_image(&image(3)).is_none());
+    }
+
+    #[test]
+    fn other_headers_are_not_images() {
+        let mut file = image(2);
+        file[0] = 0x18; // pas de palette
+        assert!(read_rom_image(&file).is_none());
+        assert!(read_rom_image(b"BSP").is_none());
     }
 }

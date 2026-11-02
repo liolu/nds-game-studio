@@ -191,6 +191,15 @@ impl Bits<'_> {
 /// - `011` : un octet répété (longueur gamma, valeur gamma : dans la table, ou calculée) ;
 /// - `1...` : copie longue (longueur gamma, distance gamma + b bits + 8 bits) ; distance 255 = la fin.
 fn own_coder(blob: &[u8], size: usize) -> Option<Vec<u8>> {
+    let mut out = own_coder_up_to(blob, size + 1)?;
+    (out.len() + 1 >= size).then(|| {
+        out.resize(size, 0);
+        out
+    })
+}
+
+/// Ce que donne le codeur du jeu, `limit` octets au plus. `blob` commence 4 octets avant son en-tête.
+pub(crate) fn own_coder_up_to(blob: &[u8], limit: usize) -> Option<Vec<u8>> {
     let h = u32::from_le_bytes(blob.get(4..8)?.try_into().ok()?);
     let (table_size, mut marker) = ((h & 0xFF) as usize, h >> 8 & 0xFF);
     let (far_bits, marker_bits) = (h >> 16 & 0xFF, h >> 24 & 0xFF);
@@ -200,7 +209,7 @@ fn own_coder(blob: &[u8], size: usize) -> Option<Vec<u8>> {
     let low_bits = 8 - marker_bits;
     let table = blob.get(8..8 + table_size)?;
     let mut bits = Bits { src: blob, pos: 8 + table_size.div_ceil(4) * 4, word: 0, left: 0 };
-    let mut out: Vec<u8> = Vec::with_capacity(size);
+    let mut out: Vec<u8> = Vec::new();
     loop {
         let head = bits.read(marker_bits)?;
         if head != marker {
@@ -234,23 +243,20 @@ fn own_coder(blob: &[u8], size: usize) -> Option<Vec<u8>> {
                 let value = bits.gamma()?;
                 let byte = if value < 0x20 { *table.get(value as usize - 1)? } else { ((value - 0x20) << 3 | bits.read(3)?) as u8 };
                 out.resize(out.len() + base as usize + 1, byte);
-                if out.len() > size + 1 {
+                if out.len() > limit {
                     return None;
                 }
                 continue;
             }
         }
-        if distance > out.len() || out.len() + length > size + 1 {
+        if distance > out.len() || out.len() + length > limit {
             return None;
         }
         for _ in 0..length {
             out.push(out[out.len() - distance]);
         }
     }
-    (out.len() + 1 >= size).then(|| {
-        out.resize(size, 0);
-        out
-    })
+    Some(out)
 }
 
 /// Le fichier dépaqueté. Un fichier dont le début ressemble seulement à un en-tête (des données brutes,

@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::i18n::{t, tr};
 
 /// À changer quand le calcul change : l'index gardé est alors refait.
-const INDEX_VERSION: u32 = 11;
+const INDEX_VERSION: u32 = 12;
 const BIG_FILE: usize = 4 << 20;
 
 /// Une rom du dossier `rom` du launcher.
@@ -584,8 +584,13 @@ fn scan_rom_bin(rom_path: &Path, data: &[u8], base: usize) -> Vec<Entry> {
         .enumerate()
         .map(|(n, (at, size))| {
             let bytes = unpack(romarc::unpack(&data[at..at + size]));
-            let name = format!("{n:05}.{}", romarc::extension(&bytes));
-            Entry { path: format!("rom.bin#{n}"), member_name: Some(name), rom: rom_path.to_path_buf(), span: (base + at, base + at + size), member: None, kind: sniff(&bytes), size: bytes.len(), dir: "rom.bin".into(), stem: n.to_string(), rom_index: Some(n as u32) }
+            let mut kind = sniff(&bytes);
+            let mut ext = romarc::extension(&bytes);
+            if kind == Kind::Other && g2d::read_rom_image(&bytes).is_some() {
+                (kind, ext) = (Kind::RomImage, "img");
+            }
+            let name = format!("{n:05}.{ext}");
+            Entry { path: format!("rom.bin#{n}"), member_name: Some(name), rom: rom_path.to_path_buf(), span: (base + at, base + at + size), member: None, kind, size: bytes.len(), dir: "rom.bin".into(), stem: n.to_string(), rom_index: Some(n as u32) }
         })
         .collect()
 }
@@ -1180,6 +1185,11 @@ fn decode_inner(entries: &[Entry], sel: usize, c: &mut Choices) -> Result<Decode
             }
             let info = t!("{} tiles {} bpp, palette included", "{} tuiles {} bpp, palette incluse", tiles.count(), if tiles.bpp8 { 8 } else { 4 });
             Ok(Decoded::Image { rgba: g2d::render_tiles(&tiles, &palette, 0, c.width), info })
+        }
+        Kind::RomImage => {
+            let image = g2d::read_rom_image(&bytes).ok_or(tr("unreadable image", "image illisible"))?;
+            let info = t!("{} x {} pixels, {} bpp", "{} x {} pixels, {} bpp", image.rgba.width, image.rgba.height, if image.bpp8 { 8 } else { 4 });
+            Ok(Decoded::Image { rgba: image.rgba, info })
         }
         Kind::AnmFile => Ok(Decoded::Text { lines: anm_lines(&bytes), info: t!("Animation not played: its content", "Animation pas jouee : son contenu") }),
         Kind::ZImage => {
