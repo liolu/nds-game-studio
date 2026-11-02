@@ -123,6 +123,8 @@ u32 nds_cp15_read(u32 crn, u32 crm, u32 op2) {
     return 0;
 }
 
+u32 nds_dtcm_base(void) { return cp15_dtcm & 0xFFFFF000u; }
+
 void nds_cp15_write(u32 crn, u32 crm, u32 op2, u32 v) {
     if (crn == 1) cp15_ctrl = v;
     else if (crn == 9 && crm == 1 && op2 == 0) cp15_dtcm = v;
@@ -252,7 +254,7 @@ void nds_swi(u32 n, u32 *r0, u32 *r1, u32 *r2, u32 *r3) {
     case 0x03: break;                                     /* WaitByLoop */
     case 0x04: case 0x05: {                               /* IntrWait, VBlankIntrWait */
         u32 mask = n == 5 ? 1 : *r1;
-        volatile u32 *check = (volatile u32 *)DS(0x027E3FF8u);
+        volatile u32 *check = (volatile u32 *)DS(nds_dtcm_base() + 0x3FF8u);
         if (n == 5 || *r0) *check &= ~mask;
         u32 saved = nds_cpsr;
         nds_cpsr &= ~0x80u;
@@ -329,6 +331,8 @@ static void thread_tramp(u32 ctx) {
     u32 *c = (u32 *)DS(ctx);
     /* OSContext : cpsr, r0..r12, sp, lr, pc+4 */
     u32 arg = c[1], lr = c[15];
+    nds_sp = c[14];
+    nds_lr = 0xFFFFFFFEu;
     ((Fn)nds_call_target(nds_ctx_func(ctx)))(arg, 0, 0, 0);
     if (lr) ((Fn)nds_call_target(lr))(0, 0, 0, 0);
     nds_fatal("fin de thread sans suite");
@@ -509,7 +513,7 @@ static void prof_thread(void *arg) {
             {
                 u32 *st = (u32 *)sp;
                 int shown = 0;
-                for (u32 i = 0; i < 4000 && shown < 24; i++)
+                for (u32 i = 0; i < 200 && shown < 24; i++)
                     if (st[i] >= 0x10000000u && st[i] < 0x11000000u) { nds_log("  pile %8x", st[i]); shown++; }
             }
             for (int k = 0; k < 14; k++) {

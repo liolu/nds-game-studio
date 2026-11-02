@@ -103,6 +103,7 @@ class Game:
         self.data = {}  # nom -> addr
         self.relocs = {}
         self.units = []  # (fichier source, [(start, end)])
+        self.overlays = []  # (numero, debut du code, fin du code)
         modules = [cfg] + [p for p in (cfg / "itcm", cfg / "dtcm") if p.exists()]
         modules += sorted(p for p in (cfg / "overlays").glob("*") if p.is_dir()) if (cfg / "overlays").exists() else []
         for m in modules:
@@ -122,6 +123,8 @@ class Game:
                 if r:
                     self.relocs[int(r.group(1), 16)] = (r.group(2), int(r.group(3), 16))
             self.read_delinks(m / "delinks.txt")
+            if m.parent.name == "overlays":
+                self.overlays += [(int(m.name[2:]), s, e) for s, e in overlay_code(m / "delinks.txt")]
             lcf = m / "lcf_symbols.txt"
             if lcf.exists():
                 for name, value in re.findall(r"^(\w+) = (0x[0-9a-fA-F]+);", lcf.read_text(), re.M):
@@ -135,6 +138,11 @@ class Game:
         meta = (ext / "arm9.yaml").read_text()
         self.entry = int(re.search(r"entry_function: (\d+)", meta).group(1))
         self.build_info = int(re.search(r"build_info: (\d+)", meta).group(1))
+        table = self.root / "extract" / version / "arm9_overlays"
+        self.overlay_images = {}
+        if self.overlays:
+            for num, base in re.findall(r"- id: (\d+)\s+base_address: (\d+)", (table / "overlays.yaml").read_text()):
+                self.overlay_images[int(num)] = (int(base), (table / ("ov%03d.bin" % int(num))).read_bytes())
 
     def read_delinks(self, path):
         current = None
@@ -153,10 +161,19 @@ class Game:
                     self.data["ARM9_CTOR_END"] = int(m.group(2), 16)
 
     def memory(self, addr, n):
-        for base, raw in self.image.values():
-            if base <= addr < base + len(raw):
-                return raw[addr - base : addr - base + n]
-        return None
+        return recipe.read_memory(self, addr, n)
+
+
+def overlay_code(path):
+    """Plages de code d'un overlay, d'apres l'en-tete de son delinks.txt."""
+    ranges = []
+    for line in path.read_text(errors="replace").splitlines():
+        if line.endswith(":") and not line.startswith(" "):
+            break
+        m = re.match(r"\s+\.\w+\s+start:0x([0-9a-f]+) end:0x([0-9a-f]+) kind:code", line)
+        if m and m.group(1) != m.group(2):
+            ranges.append((int(m.group(1), 16), int(m.group(2), 16)))
+    return ranges
 
 
 def game_patches(code):
@@ -166,7 +183,7 @@ def game_patches(code):
 
 
 # Toujours definies : les autres jeux gardent 0, et le runtime sait que la fonction n'existe pas pour eux
-PATCH_VALUES = ["nds_fp_camera", "nds_fp_players", "nds_fp_index", "nds_fp_matrix", "nds_fp_yaw", "nds_fp_heading_a", "nds_fp_heading_b", "nds_fp_render_obj", "nds_fp_arm_slots", "nds_net_screens", "nds_net_menu_screen", "nds_intro_menu_screen", "nds_intro_menu_arg", "nds_intro_back_screen", "nds_free_game_flags", "nds_free_objects", "nds_free_tasks", "nds_free_timers", "nds_free_get_tick"]
+PATCH_VALUES = ["nds_fp_camera", "nds_fp_players", "nds_fp_index", "nds_fp_matrix", "nds_fp_yaw", "nds_fp_heading_a", "nds_fp_heading_b", "nds_fp_render_obj", "nds_fp_arm_slots", "nds_net_screens", "nds_net_menu_screen", "nds_intro_menu_screen", "nds_intro_menu_arg", "nds_intro_back_screen", "nds_free_game_flags", "nds_free_objects", "nds_free_tasks", "nds_free_timers", "nds_free_get_tick", "nds_old_sdk"]
 
 
 def has_asm(text):
@@ -248,6 +265,9 @@ def main():
     for addr, name in patches.get("names", {}).items():
         addr = int(addr, 16)
         game.functions[addr] = (name, *game.functions[addr][1:])
+    game.data.update({name: int(addr, 16) for name, addr in patches.get("data", {}).items()})
+    if not patches.get("overlays"):
+        game.overlays = []
 
     # 1. runtime : ce qu'il definit remplace le jeu
     rt_srcs = runtime_sources()
@@ -328,6 +348,8 @@ def main():
     lifter.hooks = {int(addr, 16): fn for addr, fn in patches.get("hooks", {}).items()}
     lifter.exit_hooks = {int(addr, 16): fn for addr, fn in patches.get("exit_hooks", {}).items()}
     lifter.gates = {int(addr, 16): fn for addr, fn in patches.get("gates", {}).items()}
+    if "eh_end_catch" in patches:
+        lifter.eh_end_catch = int(patches["eh_end_catch"], 16)
     # plusieurs passes : les fonctions qui renvoient des drapeaux se decouvrent chez leurs appelants
     for _ in range(4):
         before = len(lifter.flag_funcs) + len(lifter.gosub_funcs)
@@ -352,7 +374,7 @@ def main():
     for n in set(re.findall(r"CALLF\((\w+)\)", "\n".join(bodies))):
         if not n.startswith("nds_"):
             protos.add(n)
-    lift_c = arm2c.PRELUDE + "\n".join("extern u64 %s();" % p for p in sorted(protos)) + "\n\n" + "\n".join(bodies)
+    lift_c = ("#define NDS_EH 1\n" if lifter.eh_end_catch is not None else "") + arm2c.PRELUDE + "\n".join("extern u64 %s();" % p for p in sorted(protos)) + "\n\n" + "\n".join(bodies)
     lift_path = out / "lift" / "lifted.c"
     if not lift_path.exists() or lift_path.read_text() != lift_c:
         lift_path.write_text(lift_c)

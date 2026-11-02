@@ -93,3 +93,13 @@ u32 FSi_ReadRomCallback(u32 arc, u32 dst, u32 pos, u32 size) {
     nds_copy(DS(dst), nds_rom + pos, size);
     return 0;
 }
+
+/* OS_Terminate des assertions du jeu : autant le dire que tourner en rond sans image */
+void nds_hook_game_halt(u32 r0) {
+    extern u32 nds_pc, nds_r[6];
+#ifdef NDS_INSTRUMENT
+    extern u32 nds_ring[4096], nds_ring_pos;
+    for (int i = 4096 - 200; i < 4096; i++) nds_log("  appel %8x", nds_ring[(nds_ring_pos + i) & 4095]);
+#endif
+    nds_fatal("le jeu s'est arrete sur une de ses assertions : arm=%x r0=%x r1=%x r2=%x r3=%x r4=%x r5=%x", nds_pc, nds_r[0], nds_r[1], nds_r[2], nds_r[3], nds_r[4], nds_r[5]);
+}

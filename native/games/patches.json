@@ -43,5 +43,36 @@
   "functions": {
    "nds_open_screen": "func_0205ecc4"
   }
+ },
+ "APDE": {
+  "names": {
+   "0x0209c1dc": "OS_SelectThread",
+   "0x0209c728": "OS_InitContext",
+   "0x0209c78c": "OS_SaveContext",
+   "0x0209c7d8": "OS_LoadContext",
+   "0x020a0f34": "FSi_ReadRomCallback",
+   "0x020a2560": "TP_Init",
+   "0x020a24d4": "TP_GetUserInfo",
+   "0x020a2330": "TP_RequestSamplingAsync",
+   "0x020a22d8": "TP_WaitCalibratedResult",
+   "0x020a1f38": "TP_GetCalibratedPoint",
+   "0x020a1f20": "TP_WaitBusy",
+   "0x020a3aec": "RTC_Init",
+   "0x020a3a2c": "RTC_GetTime",
+   "0x020b3594": "nds_eh_resume"
+  },
+  "data": {
+   "OSi_ThreadInfo": "0x020d8454",
+   "OSi_IrqThreadQueue": "0x023c0000"
+  },
+  "values": {
+   "nds_old_sdk": "1"
+  },
+  "hooks": {
+   "0x0209d6cc": "nds_hook_game_halt",
+   "0x020aac54": "nds_hook_game_halt"
+  },
+  "eh_end_catch": "0x020b39ec",
+  "overlays": true
  }
 }

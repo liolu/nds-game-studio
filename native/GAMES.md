@@ -40,7 +40,7 @@ La colonne « Essai » vient d'un relevé sous Windows ; la colonne « macOS » 
 | plants-vs-zombies | BWBE | 3 | ok | tourne, image 0, rien a l'ecran | pas essaye |
 | plants-vs-zombies-eu | BWBY | 3 | ok | plante : acces memoire invalide 13822010 (ecriture) eip=1019b282 esp=20fff758 a, rien a l'ecran | pas essaye |
 | plants-vs-zombies-eu-2 | BWBX | 3 | ok | plante : acces memoire invalide 13822010 (ecriture) eip=1019b302 esp=20fff758 a, rien a l'ecran | pas essaye |
-| pokemon-dash | APDE | 2 | ok | tourne, image 0, rien a l'ecran | pas essaye |
+| pokemon-dash | APDE | 2 | ok | essaye jusqu'en course, 60 images/s, stylet ; une course entiere et la sauvegarde pas encore essayees | pas essaye |
 | pokemon-ranger | ARGE | 16 | ok | tourne, image 0, rien a l'ecran | pas essaye |
 | powerpuff-girls-z | YPPJ | 0 | ok | tourne, image 0, rien a l'ecran | pas essaye |
 | professor-layton-and-the-spectre-s-call | BLFP | 47 | ok | fin 3, image 0, rien a l'ecran | pas essaye |

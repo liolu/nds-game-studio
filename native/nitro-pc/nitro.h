@@ -62,6 +62,8 @@ extern u32 nds_rom_size;
 extern u32 nds_frame;
 void nds_log(const char *fmt, ...);
 void nds_fatal(const char *fmt, ...);
+u32 nds_dtcm_base(void);
+extern u32 nds_sp, nds_lr; /* pile ARM et retour de la fonction du jeu appelee, code traduit en NDS_EH seulement */
 void nds_copy(void *dst, const void *src, u32 n);
 void nds_zero(void *dst, u32 n);
 int nds_arg(const char *name, const char **value);

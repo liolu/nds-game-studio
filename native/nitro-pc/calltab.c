@@ -37,6 +37,6 @@ static uptr call_target_slow(u32 a) {
 uptr nds_call_target(u32 a) {
     u32 k = (a - CODE_LO) >> 1; /* le bit Thumb tombe */
     uptr f = k < CODE_N ? (uptr)code_map[k] : call_target_slow(a); /* dans la table directe, rien d'autre a chercher */
-    if (!f) nds_fatal("saut vers une adresse DS sans fonction : %x", a);
+    if (!f) { extern u32 nds_pc, nds_frame; nds_fatal("saut vers une adresse DS sans fonction : %x, arm=%x image %u", a, nds_pc, nds_frame); }
     return f;
 }
