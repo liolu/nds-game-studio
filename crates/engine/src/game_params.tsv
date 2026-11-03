@@ -19,4 +19,10 @@ VT3V	*.lpc	Compressed	23 fichiers, 8 essayes
 VT3V	*.nslbcc	Compressed	23 fichiers, 8 essayes
 BZ3J	*.(sans nom)	PlainText	557 fichiers, 8 essayes
 AHEP	data/ending.dat/*.bin	RawTiles	generiques de fin, vus a l oeil
-APDE	*.bin	RawTiles	polices, vues a l oeil
+APDE	seq/*.cg	RawTiles bpp=4	4 fichiers, tuiles 4 bits meme si la palette .ncl a 256 couleurs, vus a l oeil
+APDE	seq/*.sc	RawScreen bpp=4 bank=0	4 fichiers, ecrans qui demandent la banque 15 : la palette va en banque 0, vus a l oeil
+APDE	radar/*.icg	RawTiles palette=radar/uegamen_obj_pokemon.ncl bpp=8 width=8	16 fichiers, 5 images 64x64 en 8 bits par Pokemon, vus a l oeil
+APDE	*.bin	TileFont	6 fichiers, polices (rodEB12 : 16x16 + largeurs .fwa ; console_font_16 : 8x16)
+APDE	*.fwa	TileFont	5 fichiers, largeurs des polices .bin
+APDE	*.img	LzSprites	agbpoke.img : 439 Pokemon de la GBA, vus a l oeil
+APDE	*.siz	LzSprites	agbpoke.siz : tailles des images de agbpoke.img

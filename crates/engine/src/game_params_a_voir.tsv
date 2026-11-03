@@ -48,11 +48,6 @@ AD3J	*.mbox	RawPalette	5
 AD3J	*.nkbsd	RawTiles	1
 AD3J	*.sci	RawPalette	3
 AD3J	*.tbl	RawTiles	1
-APDE	*.fwa	RawPalette	5
-APDE	*.icg	PaletteTiles	16
-APDE	*.img	RawTiles	1
-APDE	*.sc	RawTiles	4
-APDE	*.siz	RawPalette	1
 ARGE	player/*.dat	RawPalette	2
 ARGE	*.sad	RawPalette	1
 YRRE	*.rec	PlainText	1

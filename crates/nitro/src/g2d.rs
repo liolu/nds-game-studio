@@ -663,7 +663,11 @@ fn looks_8bpp(file: &[u8]) -> bool {
 
 /// Plus de 16 couleurs dans la palette : 8 bits par pixel ; sinon 4.
 pub fn raw_tiles(file: &[u8], palette: Option<&Palette>) -> Tiles {
-    let bpp8 = palette.map_or_else(|| looks_8bpp(file), |p| p.colors.len() > 16);
+    raw_tiles_bpp(file, palette.map_or_else(|| looks_8bpp(file), |p| p.colors.len() > 16))
+}
+
+/// Tuiles brutes dont on sait la profondeur.
+pub fn raw_tiles_bpp(file: &[u8], bpp8: bool) -> Tiles {
     let pixels = if bpp8 { file.to_vec() } else { file.iter().flat_map(|b| [b & 15, b >> 4]).collect() };
     Tiles { bpp8, linear: false, pixels, width: None, height: None, attrs: Vec::new() }
 }

@@ -4,7 +4,7 @@
 //!   `primitives`, `decompress`, `util` et `errors` sont repris d'apicula
 //!   (<https://github.com/scurest/apicula>, licence 0BSD, voir LICENSE-apicula, commit 3d4e91e) ;
 //!   `model3d` en tire des maillages et des images RGBA prêts pour un moteur.
-//! - Son : `sadl`, archives `SDAT` (`sdat`).
+//! - Son : `sadl`, archives `SDAT` (`sdat`), musiques `SSEQ` / `SSAR` et instruments `SBNK` (`sseq`).
 //! - 2D : `.nclr` (palettes), `.ncgr` (tuiles), `.nscr` (écrans de tuiles), `.ncer` (cellules /
 //!   sprites), voir `g2d`.
 //! - Archives `.narc` (`narc`) et fichiers compressés LZ77 du BIOS (`decompress`).
@@ -34,6 +34,7 @@ pub mod packs;
 pub mod romarc;
 pub mod sadl;
 pub mod sdat;
+pub mod sseq;
 
 pub use errors::Result;
 
@@ -66,8 +67,22 @@ pub enum Kind {
     Audio,
     /// Banque de sons (SWAR).
     AudioBank,
-    /// Archive de son (SDAT) : ses fichiers sont listés à part.
+    /// Musique (SSEQ), bruitages (SSAR) et instruments (SBNK) : joués avec les banques de leur archive de son.
+    Sequence,
+    SequenceArchive,
+    Instruments,
+    /// Archive de son (SDAT) : ses fichiers sont listés à part, elle montre leur liste.
     SoundArchive,
+    /// Archive `NITRO Archive 1` (Pokémon Dash) : la liste de ses fichiers.
+    NitroArchive,
+    /// Module `NITRO RelocMod 1` (Pokémon Dash : niveaux et modèles) : données compressées et pointeurs à reloger,
+    /// montrées en mots de 32 bits.
+    RelocModule,
+    /// Police en tuiles brutes : `.bin` de 8x16, ou de 16x16 avec les largeurs de son `.fwa` (Pokémon Dash).
+    TileFont,
+    /// Images compressées les unes après les autres, leurs tailles dans un `.siz` et une palette de 16 couleurs
+    /// chacune dans un `.pal` (`agbpoke.img` de Pokémon Dash : les Pokémon de la GBA).
+    LzSprites,
     /// Police (NFTR).
     Font,
     /// Messages (BMG).
@@ -134,8 +149,14 @@ impl Kind {
             Kind::JLayout => "mise en page",
             Kind::Audio => "son",
             Kind::AudioBank => "banque de sons",
+            Kind::Sequence => "musique",
+            Kind::SequenceArchive => "bruitages",
+            Kind::Instruments => "instruments",
             Kind::SoundArchive => "archive de son",
-            Kind::Font => "police",
+            Kind::NitroArchive => "archive",
+            Kind::RelocModule => "module",
+            Kind::Font | Kind::TileFont => "police",
+            Kind::LzSprites => "image",
             Kind::PlainText => "texte",
             Kind::Texel | Kind::TextureRef | Kind::RawTexture | Kind::BsTexture => "texture",
             Kind::EngineGeometry | Kind::EngineMesh => "modele 3D",
@@ -159,12 +180,18 @@ impl Kind {
     }
 
     pub fn viewable(self) -> bool {
-        matches!(self, Kind::Model | Kind::Textures | Kind::Palette | Kind::Tiles | Kind::Screen | Kind::Cells | Kind::ModelAnim | Kind::CellAnim | Kind::JCells | Kind::JLayout | Kind::Audio | Kind::AudioBank | Kind::Font | Kind::Messages | Kind::PaletteTiles | Kind::RomImage | Kind::ZImage | Kind::AnmFile | Kind::EngineGeometry | Kind::EngineMesh | Kind::RawTexture | Kind::BsTexture | Kind::Bitmap | Kind::ZipFile | Kind::Video | Kind::Texel | Kind::TextureRef | Kind::EngineBitmap | Kind::PlainText | Kind::Compressed | Kind::NestedRom | Kind::RawTiles | Kind::RawPalette | Kind::RawScreen | Kind::Script)
+        matches!(self, Kind::Model | Kind::Textures | Kind::Palette | Kind::Tiles | Kind::Screen | Kind::Cells | Kind::ModelAnim | Kind::CellAnim | Kind::JCells | Kind::JLayout | Kind::Audio | Kind::AudioBank | Kind::Font | Kind::Messages | Kind::PaletteTiles | Kind::RomImage | Kind::ZImage | Kind::AnmFile | Kind::EngineGeometry | Kind::EngineMesh | Kind::RawTexture | Kind::BsTexture | Kind::Bitmap | Kind::ZipFile | Kind::Video | Kind::Texel | Kind::TextureRef | Kind::EngineBitmap | Kind::PlainText | Kind::Compressed | Kind::NestedRom | Kind::RawTiles | Kind::RawPalette | Kind::RawScreen | Kind::Script | Kind::Sequence | Kind::SequenceArchive | Kind::Instruments | Kind::SoundArchive | Kind::NitroArchive | Kind::RelocModule | Kind::TileFont | Kind::LzSprites)
     }
 }
 
 /// Sorte d'un fichier d'après ses premiers octets.
 pub fn sniff(head: &[u8]) -> Kind {
+    if head.starts_with(b"NITRO RelocMod") {
+        return Kind::RelocModule;
+    }
+    if head.starts_with(b"NITRO Archive") {
+        return Kind::NitroArchive;
+    }
     match head.get(0..4) {
         Some(b"BMD0") => Kind::Model,
         Some(b"BTX0") => Kind::Textures,
@@ -180,6 +207,9 @@ pub fn sniff(head: &[u8]) -> Kind {
         Some(b"JNCL") => Kind::JLayout,
         Some(b"sadl" | b"STRM" | b"SWAV") => Kind::Audio,
         Some(b"SWAR") => Kind::AudioBank,
+        Some(b"SSEQ") => Kind::Sequence,
+        Some(b"SSAR") => Kind::SequenceArchive,
+        Some(b"SBNK") => Kind::Instruments,
         Some(b"SDAT") => Kind::SoundArchive,
         Some(b"RTFN") => Kind::Font,
         Some(b"MESG" | b"GNAL") => Kind::Messages,

@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use nds_video::Video;
-use nds_nitro::{adx, decompress_any, g2d, gx_mesh, looks_compressed, model3d, narc, nitrofs, packs, romarc, sadl, sdat, sniff, unpack, Kind, Rgba};
+use nds_nitro::{adx, decompress_any, g2d, gx_mesh, looks_compressed, model3d, narc, nitrofs, packs, romarc, sadl, sdat, sniff, sseq, unpack, Kind, Rgba};
 use serde::{Deserialize, Serialize};
 
 use crate::i18n::{t, tr};
@@ -26,7 +26,7 @@ use crate::i18n::{t, tr};
 pub mod game_params;
 
 /// À changer quand le calcul change : l'index gardé est alors refait.
-const INDEX_VERSION: u32 = 13;
+const INDEX_VERSION: u32 = 14;
 const BIG_FILE: usize = 4 << 20;
 
 /// Une rom du dossier `rom` du launcher.
@@ -139,7 +139,7 @@ pub fn scan(rom_path: &Path) -> Vec<Entry> {
         let path = file.path;
         let size = data.len();
         let small = size < BIG_FILE;
-        let kind = guess_file_format(guess_house_format(by_extension(kind_of(&data[..size.min(4)], || small.then(|| data.to_vec())), &path), &path, data, false), &path, data);
+        let kind = guess_file_format(guess_house_format(by_extension(kind_of(&data[..size.min(16)], || small.then(|| data.to_vec())), &path), &path, data, false), &path, data);
         let dir = path.rsplit_once('/').map_or(String::new(), |(d, _)| d.to_string());
         let stem = stem_of(&path);
         entries.push(Entry { path: path.clone(), member_name: None, rom: rom_path.to_path_buf(), span, member: None, kind, size, dir, stem, rom_index: None });
@@ -474,6 +474,172 @@ fn zip_lines(bytes: &[u8]) -> Vec<String> {
     lines
 }
 
+/// Les fichiers d'une archive de son, avec leur taille.
+fn sound_archive_lines(bytes: &[u8]) -> Vec<String> {
+    let files = sdat::files(bytes).unwrap_or_default();
+    files.into_iter().enumerate().map(|(n, f)| format!("{}.{}  {}", f.name.unwrap_or_else(|| format!("{n:04}")), f.ext, size_text(f.end - f.start))).collect()
+}
+
+/// Les fichiers d'une `NITRO Archive 1` : leur nombre à 0x10, puis à 0x20 pour chacun la position de son nom, son
+/// début et sa taille.
+fn nitro_archive_members(bytes: &[u8]) -> Vec<(String, usize, usize)> {
+    let u32_at = |at: usize| bytes.get(at..at + 4).map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]) as usize);
+    let count = u32_at(0x10).unwrap_or(0).min(65536);
+    (0..count)
+        .map_while(|i| {
+            let (name_at, start, size) = (u32_at(0x20 + i * 12)?, u32_at(0x24 + i * 12)?, u32_at(0x28 + i * 12)?);
+            let name = bytes.get(name_at..)?.split(|b| *b == 0).next()?;
+            (start + size <= bytes.len()).then(|| (String::from_utf8_lossy(name).into_owned(), start, start + size))
+        })
+        .collect()
+}
+
+/// Un `NITRO RelocMod 1` : à 0x10 la position et la taille des données, à 0x20 la position et le nombre des pointeurs
+/// à reloger (positions dans les données), à 0x30 `lz77` si les données sont compressées. Montré en mots de 32 bits,
+/// les pointeurs marqués d'une `*`.
+fn reloc_module_lines(bytes: &[u8]) -> Result<(Vec<String>, String), String> {
+    const WORDS_PER_LINE: usize = 4;
+    let u32_at = |b: &[u8], at: usize| b.get(at..at + 4).map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]) as usize);
+    let unreadable = || tr("unreadable module", "module illisible").to_string();
+    let (data_at, size, relocs_at, relocs) = (u32_at(bytes, 0x10).ok_or_else(unreadable)?, u32_at(bytes, 0x14).ok_or_else(unreadable)?, u32_at(bytes, 0x20).ok_or_else(unreadable)?, u32_at(bytes, 0x24).ok_or_else(unreadable)?);
+    let body = bytes.get(data_at..).ok_or_else(unreadable)?;
+    let packed = bytes.get(0x30..0x34) == Some(b"lz77");
+    let data = if packed { decompress_any(body).ok_or_else(unreadable)? } else { body[..size.min(body.len())].to_vec() };
+    let pointers: std::collections::HashSet<usize> = (0..relocs.min(65536)).filter_map(|i| u32_at(bytes, relocs_at + i * 4)).collect();
+    let lines = data
+        .chunks(WORDS_PER_LINE * 4)
+        .enumerate()
+        .map(|(row, chunk)| {
+            let words: Vec<String> = chunk.chunks(4).enumerate().map(|(i, w)| {
+                let at = row * WORDS_PER_LINE * 4 + i * 4;
+                let value = w.iter().rev().fold(0u32, |v, b| v << 8 | *b as u32);
+                format!("{value:08x}{}", if pointers.contains(&at) { "*" } else { " " })
+            }).collect();
+            format!("{:05x}  {}", row * WORDS_PER_LINE * 4, words.join(" "))
+        })
+        .collect();
+    let info = t!("Module: {} data bytes{}, {} pointers to relocate (*)", "Module : {} octets de donnees{}, {} pointeurs a reloger (*)", data.len(), if packed { " (lz77)" } else { "" }, pointers.len());
+    Ok((lines, info))
+}
+
+/// Le fichier du même dossier et du même nom, d'une autre extension (`rodEB12a.bin` et `rodEB12a.fwa`).
+fn sibling(entries: &[Entry], sel: usize, ext: &str) -> Option<usize> {
+    let me = &entries[sel];
+    entries.iter().position(|e| e.dir == me.dir && e.stem == me.stem && e.format() == ext)
+}
+
+/// Police en tuiles de 4 bits de Pokémon Dash. Avec un `.fwa` du même nom : des caractères de 16x16 (4 tuiles, celles du
+/// haut puis celles du bas) depuis l'espace, et pour chacun un octet de marge et un de largeur, soulignées en bleu. Sans :
+/// des caractères de 8x16 sur une planche de 16 tuiles de large.
+fn tile_font(entries: &[Entry], sel: usize) -> Result<Decoded, String> {
+    const PER_ROW: usize = 16;
+    const GLYPH_BYTES: usize = 128;
+    const TILE_BYTES: usize = 32;
+    let glyphs = read_entry(&entries[sibling(entries, sel, "bin").ok_or(tr("no .bin font found", "aucune police .bin trouvee"))?])?;
+    let grey = g2d::Palette { colors: (0..16).map(|i| [(i * 17) as u8, (i * 17) as u8, (i * 17) as u8, 255]).collect() };
+    let Some(widths) = sibling(entries, sel, "fwa").map(|i| read_entry(&entries[i])).transpose()? else {
+        let tiles = g2d::raw_tiles_bpp(&glyphs, false);
+        let info = t!("{} characters 8x16", "{} caracteres 8x16", tiles.count() / 2);
+        return Ok(Decoded::Image { rgba: g2d::render_tiles(&tiles, &grey, 0, PER_ROW as u32), info });
+    };
+    let count = (widths.len() / 2).min(glyphs.len() / GLYPH_BYTES);
+    let mut sheet = vec![0u8; count.div_ceil(PER_ROW) * 2 * PER_ROW * 2 * TILE_BYTES];
+    for g in 0..count {
+        for k in 0..4 {
+            let (tx, ty) = ((g % PER_ROW) * 2 + k % 2, (g / PER_ROW) * 2 + k / 2);
+            let at = (ty * PER_ROW * 2 + tx) * TILE_BYTES;
+            sheet[at..at + TILE_BYTES].copy_from_slice(&glyphs[g * GLYPH_BYTES + k * TILE_BYTES..][..TILE_BYTES]);
+        }
+    }
+    let mut rgba = g2d::render_tiles(&g2d::raw_tiles_bpp(&sheet, false), &grey, 0, (PER_ROW * 2) as u32);
+    for g in 0..count {
+        let (left, width) = (widths[g * 2] as usize, widths[g * 2 + 1] as usize);
+        let (x0, y) = ((g % PER_ROW) * 16, (g / PER_ROW) * 16 + 15);
+        for x in (x0 + left).min(x0 + 16)..(x0 + left + width).min(x0 + 16) {
+            let at = (y * rgba.width as usize + x) * 4;
+            rgba.data[at..at + 4].copy_from_slice(&[60, 110, 220, 255]);
+        }
+    }
+    Ok(Decoded::Image { rgba, info: t!("{count} characters 16x16 from the space, widths from the .fwa (blue)", "{count} caracteres 16x16 depuis l'espace, largeurs du .fwa (en bleu)") })
+}
+
+/// `agbpoke.img` de Pokémon Dash : des images compressées l'une après l'autre, leurs tailles en u16 dans le `.siz`, des
+/// tuiles de 4 bits rangées ligne par ligne, chacune avec ses 16 couleurs dans le `.pal`.
+fn lz_sprites(entries: &[Entry], sel: usize) -> Result<Decoded, String> {
+    const PER_ROW: u32 = 20;
+    const COLORS_BYTES: usize = 32;
+    let missing = || tr("no .img and .siz pair found", "pas de paire .img et .siz").to_string();
+    let images = read_entry(&entries[sibling(entries, sel, "img").ok_or_else(missing)?])?;
+    let sizes = read_entry(&entries[sibling(entries, sel, "siz").ok_or_else(missing)?])?;
+    let colors = sibling(entries, sel, "pal").map(|i| read_entry(&entries[i])).transpose()?.unwrap_or_default();
+    let mut sprites = Vec::new();
+    let mut at = 0;
+    for (n, size) in sizes.chunks_exact(2).map(|s| u16::from_le_bytes([s[0], s[1]]) as usize).enumerate() {
+        let Some(pixels) = images.get(at..at + size).and_then(decompress_any) else { break };
+        at += size;
+        let tiles = g2d::raw_tiles_bpp(&pixels, false);
+        let palette = colors.get(n * COLORS_BYTES..(n + 1) * COLORS_BYTES).map_or_else(|| grey_palette(&tiles), g2d::raw_palette);
+        sprites.push(g2d::render_tiles(&tiles, &palette, 0, (tiles.count() as f64).sqrt().max(1.0) as u32));
+    }
+    let side = sprites.first().map_or(0, |s| s.width);
+    let info = t!("{} images {side}x{side}", "{} images {side}x{side}", sprites.len());
+    Ok(Decoded::Image { rgba: sheet_wide(&sprites, PER_ROW * (side + 4)), info })
+}
+
+/// L'archive de son d'où vient un fichier, et sa position dedans.
+fn owner_sound_archive(entry: &Entry) -> Option<(Vec<u8>, usize)> {
+    let (start, _) = entry.member?;
+    let bytes = unpack(read_span(&entry.rom, entry.span).ok()?);
+    bytes.starts_with(b"SDAT").then_some((bytes, start))
+}
+
+/// Une musique sans les banques de son de son archive : ses commandes en octets.
+fn no_bank_text(bytes: &[u8]) -> Decoded {
+    Decoded::Text { lines: text_lines(bytes), info: t!("Not played: its sound bank was not found", "Pas jouee : sa banque de sons est introuvable") }
+}
+
+/// Une musique `SSEQ`, jouée avec la banque que lui donne son archive de son.
+fn sequence_preview(entries: &[Entry], sel: usize, bytes: &[u8]) -> Result<Decoded, String> {
+    let Some((archive, start)) = owner_sound_archive(&entries[sel]) else { return Ok(no_bank_text(bytes)) };
+    let Some((bank, volume)) = sdat::sequence_settings(&archive, start) else { return Ok(no_bank_text(bytes)) };
+    let Some((bank_file, waves)) = sdat::bank_files(&archive, bank) else { return Ok(no_bank_text(bytes)) };
+    let instruments = sseq::read_bank(bank_file).map_err(|e| e.to_string())?;
+    let data = sseq::sequence_data(bytes).map_err(|e| e.to_string())?;
+    Ok(audio(sseq::render(data, 0, &instruments, &waves, volume), String::new()))
+}
+
+/// Un bruitage d'une archive `SSAR`, choisi avec `c.anim`.
+fn sequence_archive_preview(entries: &[Entry], sel: usize, bytes: &[u8], c: &mut Choices) -> Result<Decoded, String> {
+    let (data, items) = sseq::read_archive(bytes).map_err(|e| e.to_string())?;
+    c.anims = items.len();
+    c.anim = c.anim.min(c.anims.saturating_sub(1));
+    let Some(item) = items.get(c.anim) else { return Ok(Decoded::Text { lines: text_lines(bytes), info: tr("Empty archive", "Archive vide").to_string() }) };
+    let Some((archive, _)) = owner_sound_archive(&entries[sel]) else { return Ok(no_bank_text(bytes)) };
+    let Some((bank_file, waves)) = sdat::bank_files(&archive, item.bank as usize) else { return Ok(no_bank_text(bytes)) };
+    let instruments = sseq::read_bank(bank_file).map_err(|e| e.to_string())?;
+    let extra = t!("sound {} of {}, ", "son {} sur {}, ", c.anim + 1, c.anims);
+    Ok(audio(sseq::render(data, item.start, &instruments, &waves, item.volume), extra))
+}
+
+/// Une banque d'instruments : une note de l'instrument choisi, ou leur liste si ses sons ne sont pas dans la rom.
+fn instruments_preview(entries: &[Entry], sel: usize, bytes: &[u8], c: &mut Choices) -> Result<Decoded, String> {
+    let instruments = sseq::read_bank(bytes).map_err(|e| e.to_string())?;
+    let list = || instruments.iter().enumerate().map(|(i, instrument)| format!("{i:4}  {}", instrument.describe())).collect::<Vec<_>>();
+    let waves = owner_sound_archive(&entries[sel]).and_then(|(archive, start)| {
+        let bank = sdat::bank_at(&archive, start)?;
+        let (_, waves) = sdat::bank_files(&archive, bank)?;
+        Some(waves.map(|wave| wave.map(<[u8]>::to_vec)))
+    });
+    let Some(waves) = waves else { return Ok(Decoded::Text { lines: list(), info: t!("{} instruments, their sounds are not in this file", "{} instruments, leurs sons ne sont pas dans ce fichier", instruments.len()) }) };
+    let waves: [Option<&[u8]>; 4] = std::array::from_fn(|i| waves[i].as_deref());
+    c.anims = instruments.len();
+    c.anim = c.anim.min(c.anims.saturating_sub(1));
+    match sseq::render_instrument(&instruments, c.anim, &waves).filter(|sound| !sound.samples.is_empty()) {
+        Some(sound) => Ok(audio(sound, t!("instrument {} of {}, ", "instrument {} sur {}, ", c.anim + 1, c.anims))),
+        None => Ok(Decoded::Text { lines: list(), info: t!("Instrument {} is empty", "L'instrument {} est vide", c.anim + 1) }),
+    }
+}
+
 /// Le n° du fichier à ce chemin (le moteur écrit parfois le dossier avec des `\\`).
 fn entry_at(entries: &[Entry], path: &str) -> Option<usize> {
     let wanted = path.replace('\\', "/").to_lowercase();
@@ -652,6 +818,14 @@ pub struct Choices {
     /// Séquence ou animation montrée, dans le fichier.
     pub anim: usize,
     pub anims: usize,
+    /// Ce que la table du jeu dit de ce fichier (`game_params.tsv`).
+    pub options: game_params::Options,
+}
+
+/// Les options que la table du jeu donne à ce fichier (code du jeu lu dans l'en-tête de la rom).
+fn game_options(entry: &Entry) -> game_params::Options {
+    let Ok(head) = read_span(&entry.rom, (0, 0x10)) else { return game_params::Options::default() };
+    game_params::for_game(&String::from_utf8_lossy(&head[0x0C..0x10])).options_for(&entry.dir, &entry.format())
 }
 
 /// Les fichiers d'une sorte qui vont le mieux avec `sel` : même dossier d'abord, puis le nom
@@ -798,6 +972,7 @@ pub fn choices_for(entries: &[Entry], sel: usize) -> Choices {
             c.palettes = texture_palettes(entries, Some(sel), sel);
         }
         Kind::RawTiles | Kind::RawTexture => {
+            c.options = game_options(&entries[sel]);
             c.palettes = companions(entries, sel, &[Kind::RawPalette]);
             // Une palette au nom sans rapport colore n'importe comment : mieux vaut du gris, et la choisir à la main
             const NAME_MATCH: usize = 4;
@@ -805,10 +980,16 @@ pub fn choices_for(entries: &[Entry], sel: usize) -> Choices {
             if kind == Kind::RawTiles && !c.palettes.iter().any(named) {
                 c.palette = c.palettes.len();
             }
+            if kind == Kind::RawTiles {
+                nitro_palettes(entries, sel, &mut c);
+            }
+            c.width = c.options.width.unwrap_or(0);
         }
         Kind::RawScreen => {
+            c.options = game_options(&entries[sel]);
             c.tiles = companions(entries, sel, &[Kind::RawTiles]);
             c.palettes = companions(entries, sel, &[Kind::RawPalette]);
+            nitro_palettes(entries, sel, &mut c);
         }
         Kind::JLayout => {
             c.linked = companions(entries, sel, &[Kind::JCells]);
@@ -826,6 +1007,21 @@ pub fn choices_for(entries: &[Entry], sel: usize) -> Choices {
         _ => {}
     }
     c
+}
+
+/// Les palettes Nitro (`.ncl`) d'un fichier brut, après ses palettes brutes : celle que donne la table du jeu,
+/// ou celle de son dossier qui a exactement son nom, est prise d'office.
+fn nitro_palettes(entries: &[Entry], sel: usize, c: &mut Choices) {
+    let nitro = companions(entries, sel, &[Kind::Palette]);
+    let wanted = c.options.palette.as_deref().and_then(|path| entry_at(entries, path)).or_else(|| nitro.iter().copied().find(|&i| entries[i].stem == entries[sel].stem && entries[i].dir == entries[sel].dir));
+    if let Some(wanted) = wanted {
+        c.palettes.retain(|&i| i != wanted);
+        c.palettes.insert(0, wanted);
+        c.palette = 0;
+    } else if c.palette == c.palettes.len() {
+        c.palette += nitro.len();
+    }
+    c.palettes.extend(nitro.into_iter().filter(|&i| Some(i) != wanted));
 }
 
 pub enum Decoded {
@@ -922,6 +1118,8 @@ pub fn kind_text(kind: Kind) -> &'static str {
         "mise en page" => tr("layout", "mise en page"),
         "son" => tr("sound", "son"),
         "banque de sons" => tr("sound bank", "banque de sons"),
+        "musique" => tr("music", "musique"),
+        "bruitages" => tr("sound effects", "bruitages"),
         "archive de son" => tr("sound archive", "archive de son"),
         "police" => tr("font", "police"),
         "texte" => tr("text", "texte"),
@@ -933,8 +1131,13 @@ pub fn kind_text(kind: Kind) -> &'static str {
 
 /// Les images en grille, avec 4 pixels entre elles.
 fn sheet(images: &[Rgba]) -> Rgba {
+    sheet_wide(images, 512)
+}
+
+/// La même grille, d'au moins `width` pixels de large.
+fn sheet_wide(images: &[Rgba], width: u32) -> Rgba {
     const GAP: u32 = 4;
-    let max_w = images.iter().map(|i| i.width).max().unwrap_or(1).max(512);
+    let max_w = images.iter().map(|i| i.width).max().unwrap_or(1).max(width);
     let (mut x, mut y, mut line_h, mut places) = (0, 0, 0, Vec::new());
     for img in images {
         if x > 0 && x + img.width > max_w {
@@ -1244,6 +1447,23 @@ fn decode_inner(entries: &[Entry], sel: usize, c: &mut Choices) -> Result<Decode
             let info = format!("{}x{}", rgba.width, rgba.height);
             Ok(Decoded::Image { rgba, info })
         }
+        Kind::Sequence => sequence_preview(entries, sel, &bytes),
+        Kind::SequenceArchive => sequence_archive_preview(entries, sel, &bytes, c),
+        Kind::Instruments => instruments_preview(entries, sel, &bytes, c),
+        Kind::SoundArchive => {
+            let lines = sound_archive_lines(&bytes);
+            Ok(Decoded::Text { info: t!("Sound archive of {} files", "Archive de son de {} fichiers", lines.len()), lines })
+        }
+        Kind::NitroArchive => {
+            let lines: Vec<String> = nitro_archive_members(&bytes).into_iter().map(|(name, start, end)| format!("{name}  {}  {}", size_text(end - start), kind_text(sniff(&bytes[start..end])))).collect();
+            Ok(Decoded::Text { info: t!("Archive of {} files", "Archive de {} fichiers", lines.len()), lines })
+        }
+        Kind::RelocModule => {
+            let (lines, info) = reloc_module_lines(&bytes)?;
+            Ok(Decoded::Text { lines, info })
+        }
+        Kind::TileFont => tile_font(entries, sel),
+        Kind::LzSprites => lz_sprites(entries, sel),
         Kind::Font => {
             let (rgba, count) = g2d::render_font(&bytes).map_err(|e| e.to_string())?;
             Ok(Decoded::Image { rgba, info: t!("{count} characters", "{count} caracteres") })
@@ -1259,12 +1479,20 @@ fn decode_inner(entries: &[Entry], sel: usize, c: &mut Choices) -> Result<Decode
         }
         Kind::RawTiles | Kind::RawScreen => {
             let unpacked = |b: Vec<u8>| decompress_any(&b).unwrap_or(b);
-            let palette = load(&c.palettes, c.palette)?.map(|p| g2d::raw_palette(&unpacked(p)));
+            // Palette brute, ou palette Nitro (`.ncl` de Pokémon Dash)
+            let palette = load(&c.palettes, c.palette)?.map(|p| if sniff(&p) == Kind::Palette { g2d::read_palette(&p).map_err(|e| e.to_string()) } else { Ok(g2d::raw_palette(&unpacked(p))) }).transpose()?;
             let tiles_bytes = if kind == Kind::RawTiles { Some(bytes.clone()) } else { load(&c.tiles, c.tile)? };
-            let tiles = g2d::raw_tiles(&unpacked(tiles_bytes.ok_or(tr("no tile file (.nbfc) found", "aucun fichier de tuiles (.nbfc) trouve"))?), palette.as_ref());
+            let tiles_bytes = unpacked(tiles_bytes.ok_or(tr("no tile file (.nbfc) found", "aucun fichier de tuiles (.nbfc) trouve"))?);
+            let tiles = match c.options.bpp8 {
+                Some(bpp8) => g2d::raw_tiles_bpp(&tiles_bytes, bpp8),
+                None => g2d::raw_tiles(&tiles_bytes, palette.as_ref()),
+            };
             let palette = palette.unwrap_or_else(|| grey_palette(&tiles));
             if kind == Kind::RawScreen {
-                let screen = g2d::raw_screen(&bytes);
+                let mut screen = g2d::raw_screen(&bytes);
+                if let Some(bank) = c.options.bank {
+                    screen.entries.iter_mut().for_each(|e| *e = (*e & 0x0FFF) | (bank & 15) << 12);
+                }
                 return Ok(Decoded::Image { rgba: g2d::render_screen(&screen, &tiles, &palette), info: t!("screen {}x{}", "ecran {}x{}", screen.width, screen.height) });
             }
             c.banks = if tiles.bpp8 { 1 } else { palette.banks() };
@@ -1350,6 +1578,10 @@ fn fit_thumb(image: &Rgba) -> Rgba {
 
 /// La vignette de `sel` : une ou plusieurs images (avec leur durée en 1/60 s) ; `None` pour un fichier sans image.
 pub fn thumbnail(entries: &[Entry], sel: usize) -> Option<Vec<(Rgba, u16)>> {
+    // Jouer une musique entière pour une vignette serait trop long
+    if matches!(entries[sel].kind, Kind::Sequence | Kind::SequenceArchive | Kind::Instruments) {
+        return None;
+    }
     catch_unwind(AssertUnwindSafe(|| {
         let mut choices = choices_for(entries, sel);
         match decode(entries, sel, &mut choices).ok()? {
