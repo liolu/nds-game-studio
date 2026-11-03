@@ -94,6 +94,39 @@ pub fn sar_summary(file: &[u8]) -> Option<Vec<String>> {
     Some((0..head.len().saturating_sub(7)).step_by(4).filter(|&at| is_tag(&head[at..at + 4])).map(|at| format!("{}  {:#x}", String::from_utf8_lossy(&head[at..at + 4]), u32_at(file, at + 4).unwrap_or(0))).collect())
 }
 
+/// Les morceaux d'une archive `sar ` : des blocs `cmp ` (u32, taille du bloc) qui se suivent depuis 0x18, chacun
+/// avec un bloc `lz7 ` dedans dont le flux LZ77 commence à 0x18 du bloc. La position et la fin du flux de chacun (ou
+/// de ses octets, s'il n'est pas compressé). La table `.mat` voisine donne les mêmes positions.
+pub fn sar_members(file: &[u8]) -> Vec<(usize, usize)> {
+    const FIRST: usize = 0x18;
+    if file.get(0..4) != Some(b"sar ") {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut at = FIRST;
+    while file.get(at..at + 4) == Some(b"cmp ") {
+        let Some(size) = u32_at(file, at + 8).filter(|&size| size >= FIRST && at + size <= file.len()) else { break };
+        let data = if file.get(at + 12..at + 16) == Some(b"lz7 ") { at + FIRST } else { at + 12 };
+        out.push((data, at + size));
+        at += size;
+    }
+    out
+}
+
+/// Les noms des événements d'un morceau d'archive `sar ` (`CameraSettingEventData`...), dans l'ordre, sans doublon.
+pub fn event_names(file: &[u8]) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for run in file.split(|b| !b.is_ascii_alphanumeric()) {
+        if run.len() >= 6 && run.ends_with(b"Data") && run[0].is_ascii_uppercase() {
+            let name = String::from_utf8_lossy(run).into_owned();
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
+    names
+}
+
 /// La table `.mat` d'une archive : (position, taille) de chaque morceau, qui se suivent sans trou.
 pub fn mat_entries(file: &[u8]) -> Option<Vec<(usize, usize)>> {
     let pairs: Vec<(usize, usize)> = file.chunks_exact(8).map(|c| (u32_at(c, 0).unwrap_or(0), u32_at(c, 4).unwrap_or(0))).collect();

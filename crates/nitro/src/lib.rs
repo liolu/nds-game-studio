@@ -25,6 +25,8 @@ pub mod nitro;
 pub mod primitives;
 
 pub mod adx;
+pub mod ahx;
+pub mod amaze;
 pub mod g2d;
 pub mod gx_mesh;
 pub mod hom;
@@ -33,6 +35,7 @@ pub mod narc;
 pub mod nitrofs;
 pub mod packs;
 pub mod romarc;
+pub mod romsound;
 pub mod sadl;
 pub mod sdat;
 pub mod sseq;
@@ -115,6 +118,13 @@ pub enum Kind {
     RomSprite,
     /// Image 8 bpp de `rom.bin` (Les Sims 2), sa palette dedans ou au fichier d'avant.
     RomBitmap,
+    /// Son de `SoundData.rom` (moteur Amaze) : sa fiche est dans le même fichier (`romsound`).
+    RomSound,
+    /// Sprite de `rom.bin` (The Simpsons Game) : son descripteur et ses tuiles, deux fichiers voisins, voir `amaze`.
+    ChainSprite,
+    ChainSpriteTiles,
+    /// Tuiles d'un niveau (`rom.bin`, The Simpsons Game).
+    RomLevelTiles,
     /// Fichier `.z` (Tom and Jerry) : image, écran ou texture une fois décompressé.
     ZImage,
     /// Animation `.anm` : un résumé, elle n'est pas jouée.
@@ -175,7 +185,7 @@ impl Kind {
             Kind::CellAnim => "animation 2D",
             Kind::JCells => "cellules J",
             Kind::JLayout => "mise en page",
-            Kind::Audio => "son",
+            Kind::Audio | Kind::RomSound => "son",
             Kind::AudioBank => "banque de sons",
             Kind::Sequence => "musique",
             Kind::SequenceArchive => "bruitages",
@@ -190,6 +200,8 @@ impl Kind {
             Kind::EngineGeometry | Kind::EngineMesh => "modele 3D",
             Kind::Bitmap | Kind::ZImage | Kind::RomImage | Kind::RomBitmap => "image",
             Kind::RomSprite => "sprite",
+            Kind::ChainSprite | Kind::ChainSpriteTiles => "sprite",
+            Kind::RomLevelTiles => "tuiles",
             Kind::PaletteTiles => "tuiles",
             Kind::AnmFile => "animation 2D",
             Kind::ZipFile => "archive",
@@ -217,7 +229,7 @@ impl Kind {
     }
 
     pub fn viewable(self) -> bool {
-        matches!(self, Kind::Model | Kind::Textures | Kind::Palette | Kind::Tiles | Kind::Screen | Kind::Cells | Kind::ModelAnim | Kind::CellAnim | Kind::JCells | Kind::JLayout | Kind::Audio | Kind::AudioBank | Kind::Font | Kind::Messages | Kind::PaletteTiles | Kind::RomImage | Kind::ZImage | Kind::AnmFile | Kind::EngineGeometry | Kind::EngineMesh | Kind::RawTexture | Kind::BsTexture | Kind::Bitmap | Kind::ZipFile | Kind::Video | Kind::Texel | Kind::TextureRef | Kind::EngineBitmap | Kind::PlainText | Kind::Compressed | Kind::NestedRom | Kind::RawTiles | Kind::RawPalette | Kind::RawScreen | Kind::Script | Kind::Sequence | Kind::SequenceArchive | Kind::Instruments | Kind::SoundArchive | Kind::HomSprite | Kind::HomModelTextures | Kind::HomSheet | Kind::SiblingPaletteTiles | Kind::EventScript | Kind::HouseModelAnim | Kind::TableArchive | Kind::SarArchive | Kind::OffsetTable | Kind::EmbeddedFs | Kind::EmptySlot | Kind::GameData | Kind::Nitro3dOther | Kind::RomSprite | Kind::RomBitmap | Kind::NitroArchive | Kind::RelocModule | Kind::TileFont | Kind::LzSprites)
+        matches!(self, Kind::Model | Kind::Textures | Kind::Palette | Kind::Tiles | Kind::Screen | Kind::Cells | Kind::ModelAnim | Kind::CellAnim | Kind::JCells | Kind::JLayout | Kind::Audio | Kind::AudioBank | Kind::Font | Kind::Messages | Kind::PaletteTiles | Kind::RomImage | Kind::ZImage | Kind::AnmFile | Kind::EngineGeometry | Kind::EngineMesh | Kind::RawTexture | Kind::BsTexture | Kind::Bitmap | Kind::ZipFile | Kind::Video | Kind::Texel | Kind::TextureRef | Kind::EngineBitmap | Kind::PlainText | Kind::Compressed | Kind::NestedRom | Kind::RawTiles | Kind::RawPalette | Kind::RawScreen | Kind::Script | Kind::Sequence | Kind::SequenceArchive | Kind::Instruments | Kind::SoundArchive | Kind::HomSprite | Kind::HomModelTextures | Kind::HomSheet | Kind::SiblingPaletteTiles | Kind::EventScript | Kind::HouseModelAnim | Kind::TableArchive | Kind::SarArchive | Kind::OffsetTable | Kind::EmbeddedFs | Kind::EmptySlot | Kind::GameData | Kind::Nitro3dOther | Kind::RomSprite | Kind::RomBitmap | Kind::RomSound | Kind::ChainSprite | Kind::ChainSpriteTiles | Kind::RomLevelTiles | Kind::NitroArchive | Kind::RelocModule | Kind::TileFont | Kind::LzSprites)
     }
 }
 

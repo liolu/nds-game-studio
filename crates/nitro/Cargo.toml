@@ -9,6 +9,9 @@ license = "0BSD AND MIT"
 [dependencies]
 cgmath = "0.18"
 log = "0.4"
+# Voix AHX de CRI (MPEG Layer II), licence MPL-2.0
+symphonia-bundle-mp3 = { version = "0.5", default-features = false, features = ["mp2"] }
+symphonia-core = "0.5"
 
 [dev-dependencies]
 image = { version = "0.25", default-features = false, features = ["png"] }
