@@ -80,7 +80,7 @@ mod tests {
         let mut file = vec![0u8; 40];
         let descriptor_at = 48;
         let sample_at = descriptor_at + DESCRIPTOR_SIZE;
-        let ends = [40, 40, 44, 44, 48, 48, 48, 48, 48, 48];
+        let ends = [40, 40, 40, 44, 44, 48, 48, 48, 48, 48];
         for (n, at) in ends.iter().enumerate() {
             file[n * 4..n * 4 + 4].copy_from_slice(&(*at as u32).to_le_bytes());
         }

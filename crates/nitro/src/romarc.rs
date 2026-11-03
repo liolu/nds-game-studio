@@ -200,6 +200,11 @@ fn own_coder(blob: &[u8], size: usize) -> Option<Vec<u8>> {
 
 /// Ce que donne le codeur du jeu, `limit` octets au plus. `blob` commence 4 octets avant son en-tête.
 pub(crate) fn own_coder_up_to(blob: &[u8], limit: usize) -> Option<Vec<u8>> {
+    own_coder_block(blob, limit).map(|(out, _)| out)
+}
+
+/// Pareil, avec la position où s'arrête le flux dans `blob`.
+fn own_coder_block(blob: &[u8], limit: usize) -> Option<(Vec<u8>, usize)> {
     let h = u32::from_le_bytes(blob.get(4..8)?.try_into().ok()?);
     let (table_size, mut marker) = ((h & 0xFF) as usize, h >> 8 & 0xFF);
     let (far_bits, marker_bits) = (h >> 16 & 0xFF, h >> 24 & 0xFF);
@@ -256,13 +261,42 @@ pub(crate) fn own_coder_up_to(blob: &[u8], limit: usize) -> Option<Vec<u8>> {
             out.push(out[out.len() - distance]);
         }
     }
-    Some(out)
+    Some((out, bits.pos))
+}
+
+/// Plusieurs blocs du codeur du jeu mis bout à bout, qui remplissent tout le fichier (les images d'un sprite) :
+/// la position et le contenu de chacun. `None` si ce n'est pas exactement ça.
+pub fn own_chain(file: &[u8]) -> Option<Vec<(usize, Vec<u8>)>> {
+    let mut blocks = Vec::new();
+    let mut at = 0;
+    while at < file.len() {
+        let blob = file.get(at..)?;
+        let h = u32::from_le_bytes(blob.get(0..4)?.try_into().ok()?);
+        let size = (h >> 8) as usize;
+        if h & 0xFF != 0x60 || size == 0 {
+            return None;
+        }
+        let (out, used) = own_coder_block(blob, size)?;
+        if out.len() != size {
+            return None;
+        }
+        blocks.push((at, out));
+        at += used;
+    }
+    (at == file.len() && !blocks.is_empty()).then_some(blocks)
 }
 
 /// Le fichier dépaqueté. Un fichier dont le début ressemble seulement à un en-tête (des données brutes,
 /// comme deux fichiers de Lego) est rendu tel quel.
 pub fn unpack(blob: &[u8]) -> Vec<u8> {
+    if crate::amaze::is_level_tiles(blob) {
+        return blob.to_vec();
+    }
     let Some((kind, size)) = header(blob) else { return blob.to_vec() };
+    // Plusieurs blocs : `header` n'en voit que le premier, ils se lisent à part (`amaze`)
+    if kind == 6 && own_chain(blob).is_some_and(|blocks| blocks.len() > 1) {
+        return blob.to_vec();
+    }
     let out = match kind & 7 {
         0 => Some(blob[4..4 + size].to_vec()),
         1 => lz77(blob, size),
