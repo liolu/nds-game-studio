@@ -70,6 +70,7 @@ int nds_arg(const char *name, const char **value);
 /* mods.c : mods natifs (native/sdk/nds_mod.h). Une liste vide = rien a appeler, un seul test dans le runtime. */
 void nds_mods_load(void);
 void nds_mods_crash_note(void);
+const char *nds_mods_fingerprint(void);
 typedef struct { void *frame, *gx, *polygon, *present, *audio, *io_read, *io_write, *irq, *rom_read; } NdsCallbacks;
 extern NdsCallbacks nds_cb;
 extern int nds_mods_input_taken, nds_mods_mouse_captured;
@@ -123,6 +124,9 @@ float fp_arc_tangent(float y, float x);
 /* free_camera.c */
 int nds_free_camera(u32 camera);
 
+/* first_person.c */
+int nds_fp_active(void);
+
 /* gx3d.c */
 void gx_write(u32 reg, u32 value);
 void gx_fifo_word(u32 value);
@@ -144,6 +148,11 @@ void present_frame(void);
 u32 present_keys(void);
 u32 present_pad(void);
 u32 present_free_camera(void);
+void present_notice(const char *text, u32 ms);
+void present_input_extra(u32 *buttons, int *wheel, u32 *keys);
+const char *present_language(void);
+u32 present_window_flags(void);
+void present_flags_changed(void);
 void present_touch(int *down, int *x, int *y);
 void present_mouse(int *x, int *y);
 void present_config(int *scale, int *ds_width);

@@ -151,6 +151,7 @@ struct nds_mod {
     const char *id, *version, *path;
     Json *settings;
     const char *state, *reason; /* "charge", "refuse", "retire" */
+    int net_safe; /* "multiplayer": "safe" : sans effet sur la partie, pas compare en multi */
     int active, loading;
     struct nds_mod *next;
 };
@@ -332,12 +333,20 @@ static void api_input(nds_input *out) {
     in.ds_keys = present_pad() & 0xFFF;
     present_touch(&in.touch_down, &in.touch_x, &in.touch_y);
     present_mouse(&in.mouse_dx, &in.mouse_dy);
+    present_input_extra(&in.mouse_buttons, &in.wheel, in.keys);
+    in.window = present_window_flags();
     nds_copy(out, &in, size);
 }
 
 static void api_take_input(nds_mod *mod, int on) { nds_mods_input_taken = on != 0; }
-static void api_capture_mouse(nds_mod *mod, int on) { nds_mods_mouse_captured = on != 0; } /* envoye au launcher a l'etape 2 */
-static void api_notice(nds_mod *mod, const char *text, u32 ms) { nds_log("[%s] message : %s", mod ? mod->id : "?", text); }
+static void api_capture_mouse(nds_mod *mod, int on) {
+    nds_mods_mouse_captured = on != 0;
+    present_flags_changed();
+}
+static void api_notice(nds_mod *mod, const char *text, u32 ms) {
+    nds_log("[%s] message : %s", mod ? mod->id : "?", text);
+    present_notice(text, ms);
+}
 
 /* variables et fonctions du runtime par leur nom (tables.c de native_build.py) */
 extern const struct { const char *name; void *p; } nds_runtime_syms[];
@@ -350,8 +359,8 @@ static void *api_runtime(const char *name) {
 }
 
 static char game_code[5];
-static const nds_api api = {
-    sizeof(nds_api), NDS_API_MAJOR, NDS_API_MINOR, game_code, PLATFORM,
+static nds_api api = { /* language : au chargement, d'apres --lang */
+    sizeof(nds_api), NDS_API_MAJOR, NDS_API_MINOR, game_code, PLATFORM, 0,
     api_log, api_fail, api_setting,
     api_memory, api_read8, api_read16, api_read32, api_write8, api_write16, api_write32,
     api_hook, api_hook_insn, api_function_at,
@@ -406,6 +415,24 @@ void nds_mods_crash_note(void) {
     }
     line[n] = 0;
     if (n) nds_log("mods charges : %s (relancer sans mods pour savoir si l'un d'eux est en cause)", line);
+}
+
+/* Ce que deux joueurs doivent avoir en commun (net.c) : la version du runtime et les mods charges qui touchent a la partie. */
+extern const char nds_runtime_version[];
+
+const char *nds_mods_fingerprint(void) {
+    static char out[2048];
+    u32 n = put(out, 0, sizeof out, "runtime ", 0);
+    n = put(out, n, sizeof out, nds_runtime_version, 0);
+    for (nds_mod *m = mods; m; m = m->next) {
+        if (!m->active || m->net_safe) continue;
+        n = put(out, n, sizeof out, ", ", 0);
+        n = put(out, n, sizeof out, m->id, 0);
+        n = put(out, n, sizeof out, " ", 0);
+        n = put(out, n, sizeof out, m->version ? m->version : "?", 0);
+    }
+    out[n] = 0;
+    return out;
 }
 
 /* ------------------------------------------------------------------ chargement */
@@ -489,6 +516,7 @@ static void load_manifest_list(const char *path) {
         const char *lib = plugin && plugin->type == 'o' ? j_text(plugin, PLATFORM) : plugin ? plugin->text : 0;
         nds_mod *m = new_mod(id, j_text(e, "version"), lib);
         m->settings = j_get(e, "settings");
+        { const char *mp = j_text(e, "multiplayer"); m->net_safe = mp && str_eq(mp, "safe"); }
         u32 major, minor;
         const char *want = j_text(e, "api");
         if (!id) refuse(m, "manifeste sans \"id\"", 0);
@@ -504,6 +532,7 @@ static void load_manifest_list(const char *path) {
 void nds_mods_load(void) {
     if (nds_arg("--no-mods", 0)) return;
     nds_copy(game_code, DS(0x027FFE0Cu), 4); /* en-tete de la carte, copie au chargement de la rom */
+    api.language = present_language();
     const char *list;
     if (nds_arg("--plugins", &list) && list) {
         static char derived[600];

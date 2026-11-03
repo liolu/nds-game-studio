@@ -438,6 +438,11 @@ def main():
     gen.append("const struct { const char *name; void *p; } nds_runtime_syms[] = {")
     gen += ['  {"%s", %s},' % (n, n) for n in rt_names]
     gen.append("}; const unsigned nds_runtime_sym_count = %d;" % len(rt_names))
+    # version du runtime pour le multi (net.c compare les deux joueurs) : empreinte des sources du runtime et du traducteur
+    version = hashlib.sha1()
+    for src in sorted(RUNTIME.glob("*.[ch]")) + [HERE / "arm2c.py", HERE / "native_build.py"]:
+        version.update(src.name.encode() + src.read_bytes().replace(b"\r\n", b"\n"))
+    gen.append('const char nds_runtime_version[] = "%s";' % version.hexdigest()[:12])
     gen_path = out / "lift" / "tables.c"
     gen_path.write_text("\n".join(gen) + "\n")
     gobj = out / "obj" / "tables.o"

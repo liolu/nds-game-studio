@@ -14,6 +14,8 @@ static void peek_step(void);
 static void look_step(void);
 static u8 *shm;
 static volatile int cfg_scale = 1, cfg_width = 256;
+static void header_init(void);
+static int lang_fr;
 
 void present_init(void) {
     const char *v;
@@ -28,6 +30,8 @@ void present_init(void) {
         shm = os_shm_open(v);
         if (!shm) nds_fatal("memoire d'images introuvable : %s", v);
     }
+    if (nds_arg("--lang", &v) && v) lang_fr = v[0] == 'f';
+    header_init();
     pipe_mode = nds_arg("--pipe", 0);
     if (pipe_mode) os_thread_start(input_thread, 0, 0x10000);
 }
@@ -36,7 +40,13 @@ void present_init(void) {
 #define MAX_W 2688
 #define MAX_H 1152
 #define SHM_HEADER 4096
-typedef struct { volatile u32 seq, width, height, front; } ShmHeader;
+/* En-tete de la memoire partagee (native_game.rs) : le module y ecrit ses images, et ce qu'il demande au launcher.
+ * protocol 2 : le launcher envoie alors le paquet de 64 octets (input_thread). flags : bit 0 = retenir le curseur.
+ * notice_seq change a chaque message ; le texte (UTF-8, termine par 0) est a NOTICE_AT. */
+typedef struct { volatile u32 seq, width, height, front, protocol, flags, notice_seq, notice_ms; } ShmHeader;
+#define PROTOCOL 2
+#define NOTICE_AT 64
+#define NOTICE_MAX 960
 static u32 *local_frames;
 static int back_set;
 static volatile u32 flips;
@@ -165,19 +175,96 @@ void present_frame(void) {
     }
 }
 
-/* commandes : le launcher envoie 16 octets a chaque changement (touches et camera libre, stylet, definition, cumul des mouvements de la souris) */
+/* commandes du launcher, a chaque changement. Paquet 1 (16 octets, launchers d'avant le protocole 2) : touches du DS,
+ * stylet, definition, cumul de la souris. Paquet 2 (64 octets, commence par 0x8002, que les touches du paquet 1 n'atteignent
+ * jamais) : la meme chose, puis boutons et molette de la souris, etat de la fenetre et clavier entier (codes HID). */
 static volatile u32 keys_now;
 static volatile int touch_down, touch_x, touch_y;
 static volatile int mouse_x, mouse_y;
+static volatile u32 mouse_buttons, window_flags, keyboard[8];
+static volatile int wheel;
+static volatile u32 free_cam; /* bit 0 = camera libre, bit 1 = scene gelee (--free-camera) */
+#define HID_C 0x06
+#define HID_V 0x19
+#define KEY_DOWN(kb, k) ((kb)[(k) >> 5] >> ((k) & 31) & 1)
+
+void present_notice(const char *text, u32 ms) {
+    if (!shm) { nds_log("message : %s", text); return; }
+    ShmHeader *h = (ShmHeader *)shm;
+    u8 *at = shm + NOTICE_AT;
+    u32 n = 0;
+    while (text[n] && n < NOTICE_MAX - 1) { at[n] = (u8)text[n]; n++; }
+    at[n] = 0;
+    h->notice_ms = ms;
+    __sync_synchronize();
+    h->notice_seq++;
+}
+
+static void say(const char *en, const char *fr) { present_notice(lang_fr ? fr : en, 3000); }
+
+/* C et V du clavier : la camera libre du runtime (avant, le launcher les envoyait en bits 12 et 13) */
+static void free_camera_keys(const u32 *now, const u32 *before) {
+    static int on = -1;
+    if (on < 0) on = nds_arg("--free-camera", 0);
+    if (!on) return;
+    u32 was = free_cam;
+    if (KEY_DOWN(now, HID_C) && !KEY_DOWN(before, HID_C)) free_cam = free_cam ? 0 : 1;
+    else if (KEY_DOWN(now, HID_V) && !KEY_DOWN(before, HID_V)) free_cam = free_cam == 3 ? 1 : 3;
+    if (free_cam == was) return;
+    if (!free_cam) say("Free camera off", "Camera libre coupee");
+    else if (free_cam == 1) say("Free camera: mouse, arrows, L and R. V freezes the scene.", "Camera libre : souris, fleches, L et R. V gele la scene.");
+    else say("Scene frozen. V resumes, C leaves.", "Scene gelee. V reprend, C quitte.");
+}
+
+static void header_init(void) {
+    if (!shm) return;
+    ShmHeader *h = (ShmHeader *)shm;
+    h->protocol = PROTOCOL;
+    if (nds_arg("--free-camera", 0)) say("C: free camera. V: freeze the scene.", "C : camera libre. V : geler la scene.");
+    if (nds_arg("--first-person", 0)) say("The mouse moves the camera. F7 frees the cursor.", "La souris dirige la camera. F7 libere le curseur.");
+}
+
+/* le curseur retenu : la camera a la souris (vue a la premiere personne, camera libre) ou un mod qui le demande */
+static void header_flags(void) {
+    if (!shm) return;
+    int want = free_cam || nds_mods_mouse_captured || nds_fp_active();
+    ((ShmHeader *)shm)->flags = want ? 1 : 0;
+}
+
+static void read_all(void *buf, u32 size) {
+    u32 have = 0;
+    while (have < size) {
+        u32 got = os_stdin_read((u8 *)buf + have, size - have);
+        if (!got) os_exit(0); /* launcher ferme */
+        have += got;
+    }
+}
 
 static void input_thread(void *arg) {
-    u16 packet[8];
+    u16 packet[32];
     for (;;) {
-        u32 have = 0;
-        while (have < sizeof packet) {
-            u32 got = os_stdin_read((u8 *)packet + have, sizeof packet - have);
-            if (!got) os_exit(0); /* launcher ferme */
-            have += got;
+        read_all(packet, 16);
+        if (packet[0] == 0x8002) {
+            /* mots de 16 bits : 0 = 0x8002, 1 touches, 2-4 stylet, 5 largeur, 6 echelle, 7-8 cumul de la souris,
+             * 9 fenetre (bit 0 curseur retenu, bit 1 active), 10-11 boutons, 12-13 molette, 16-31 clavier (256 bits) */
+            read_all(packet + 8, 48);
+            u32 before[8];
+            for (int i = 0; i < 8; i++) before[i] = keyboard[i];
+            nds_copy((void *)keyboard, packet + 16, 32);
+            keys_now = packet[1] & 0xFFF;
+            touch_down = packet[2];
+            touch_x = packet[3];
+            touch_y = packet[4];
+            cfg_width = packet[5];
+            cfg_scale = packet[6];
+            mouse_x = (s16)packet[7];
+            mouse_y = (s16)packet[8];
+            window_flags = packet[9];
+            mouse_buttons = packet[10] | (u32)packet[11] << 16;
+            wheel = (s32)(packet[12] | (u32)packet[13] << 16);
+            free_camera_keys((const u32 *)keyboard, before);
+            header_flags();
+            continue;
         }
         keys_now = packet[0];
         touch_down = packet[1];
@@ -200,7 +287,8 @@ static void script_step(void) {
         if (frame > nds_frame) return;
         if (*p == ':') p++;
         while (*p >= '0' && *p <= '9') mask = mask * 10 + *p++ - '0';
-        keys_now = mask;
+        keys_now = mask & 0xFFF;
+        if (nds_arg("--free-camera", 0)) { free_cam = mask >> 12 & 3; header_flags(); }
         if (*p == '/') { /* image:masque/x/y : stylet */
             int x = 0, y = 0;
             p++;
@@ -284,12 +372,30 @@ static void peek_step(void) {
     }
 }
 
-/* Touches vues par le jeu. Bits du launcher au-dela des 12 du DS : 12 = camera libre, 13 = scene gelee ; le jeu ne recoit alors plus rien. */
-u32 present_keys(void) { return present_free_camera() || nds_mods_input_taken ? 0 : keys_now & 0x3FF; }
+/* Touches vues par le jeu : rien pendant la camera libre ou si un mod les prend. Curseur retenu dans la vue a la premiere
+ * personne : le clic gauche tire (bouton L). */
+u32 present_keys(void) {
+    if (present_free_camera() || nds_mods_input_taken) return 0;
+    u32 k = keys_now & 0x3FF;
+    if ((window_flags & 1) && (mouse_buttons & 1) && nds_fp_active()) k |= 1u << 9;
+    return k;
+}
 
 u32 present_pad(void) { return keys_now & 0xFFF; }
 
-u32 present_free_camera(void) { return keys_now >> 12 & 3; }
+u32 present_free_camera(void) { return free_cam; }
+
+void present_input_extra(u32 *buttons, int *wheel_out, u32 *keys) {
+    *buttons = mouse_buttons;
+    *wheel_out = wheel;
+    for (int i = 0; i < 8; i++) keys[i] = keyboard[i];
+}
+
+const char *present_language(void) { return lang_fr ? "fr" : "en"; }
+
+u32 present_window_flags(void) { return window_flags; }
+
+void present_flags_changed(void) { header_flags(); }
 
 void present_mouse(int *x, int *y) {
     *x = mouse_x;

@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use bevy::asset::RenderAssetUsages;
 use bevy::image::ImageSampler;
-use bevy::input::mouse::AccumulatedMouseMotion;
+use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::window::{CursorGrabMode, CursorOptions};
@@ -37,6 +37,25 @@ const MAX_W: usize = 2688;
 const MAX_H: usize = 1152;
 const SHM_HEADER: usize = 4096;
 const SHM_BYTES: usize = SHM_HEADER + 4 * MAX_W * MAX_H * 4;
+/// Message du module dans l'en-tête, comme `present.c`.
+const NOTICE_AT: usize = 64;
+const NOTICE_MAX: usize = 960;
+
+/// Ce que le module écrit en tête de la mémoire partagée.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Header {
+    /// Numéro de l'image, largeur, hauteur, jeu d'images terminé.
+    seq: u32,
+    width: u32,
+    height: u32,
+    front: u32,
+    /// 2 : le module lit le paquet de 64 octets ; 0 : un module d'avant, qui lit celui de 16 octets.
+    protocol: u32,
+    /// Bit 0 : le module veut le curseur (caméra à la souris d'un mod ou du runtime).
+    flags: u32,
+    /// Change à chaque message à afficher.
+    notice_seq: u32,
+}
 /// Pixels dessinés par pixel DS : au moins 2 pour la HD, le runtime ne va pas au-delà de 6.
 const MAX_SCALE: f32 = 6.0;
 
@@ -109,10 +128,19 @@ impl SharedFrames {
         None
     }
 
-    /// (numéro de l'image, largeur, hauteur, jeu d'images terminé)
-    fn header(&self) -> [u32; 4] {
+    /// L'en-tête que le module écrit (`ShmHeader` de `present.c`).
+    fn header(&self) -> Header {
         // SAFETY: l'en-tête est dans la mémoire ; le jeu l'écrit, d'où la lecture volatile.
-        std::array::from_fn(|i| unsafe { std::ptr::read_volatile((self.view as *const u32).add(i)) })
+        let word = |i: usize| unsafe { std::ptr::read_volatile((self.view as *const u32).add(i)) };
+        Header { seq: word(0), width: word(1), height: word(2), front: word(3), protocol: word(4), flags: word(5), notice_seq: word(6) }
+    }
+
+    /// Le message que le module demande d'afficher (UTF-8, terminé par 0).
+    fn notice(&self) -> String {
+        // SAFETY: NOTICE_MAX octets à NOTICE_AT, dans l'en-tête.
+        let bytes = unsafe { std::slice::from_raw_parts(self.view.add(NOTICE_AT), NOTICE_MAX) };
+        let end = bytes.iter().position(|&b| b == 0).unwrap_or(NOTICE_MAX);
+        String::from_utf8_lossy(&bytes[..end]).into_owned()
     }
 
     /// Les lignes d'un écran, bout à bout.
@@ -573,14 +601,18 @@ impl Plugin for NativeGamesPlugin {
             let spec = format!("id = \"native-{code}\"\nname = \"{code}\"\ngame_code = \"{code}\"\n");
             app.add_ds_game(&spec, start_module);
         }
-        app.add_systems(Update, (show_frames, mouse_look, send_input).chain().run_if(resource_exists::<Running>))
+        app.add_systems(Update, (show_frames, cursor_and_notices, send_input).chain().run_if(resource_exists::<Running>))
             .add_systems(Update, poll_generation.run_if(resource_exists::<Generating>))
             .add_systems(OnExit(StudioState::Playing), stop_module);
     }
 }
 
-/// Le paquet de commandes, comme `native/nitro-pc/present.c`.
-const PACKET: usize = 16;
+/// Les paquets de commandes, comme `input_thread` de `native/nitro-pc/present.c`. Le launcher ne sait rien des mods :
+/// il envoie tout ce que le joueur fait, et le module (ou ses mods) décide.
+const PACKET_V1: usize = 16;
+const PACKET_V2: usize = 64;
+/// Premier mot du paquet 2 : les touches du paquet 1 n'atteignent jamais le bit 15.
+const PACKET_V2_TAG: u16 = 0x8002;
 
 #[derive(Resource)]
 struct Running {
@@ -591,41 +623,16 @@ struct Running {
     seq: u32,
     top: Handle<Image>,
     bottom: Handle<Image>,
-    sent: [u8; PACKET],
-    /// Un mod dirige la caméra à la souris : le curseur est retenu, F7 le rend.
-    mouse_look: bool,
-    captured: bool,
-    /// Le mod de caméra libre est actif : C l'allume, V gèle la scène.
-    free_camera_mod: bool,
-    free_camera: FreeCamera,
-    /// Cumul des mouvements de la souris, envoyé au module.
+    sent: Vec<u8>,
+    /// Le module demande le curseur ; F7 le rend au joueur jusqu'à la prochaine demande.
+    wanted: bool,
+    released: bool,
+    /// Curseur retenu en ce moment : la souris va au module, le stylet ne touche rien.
+    held: bool,
+    /// Cumul des mouvements de la souris et de la molette, envoyés au module.
     mouse: (i16, i16),
-}
-
-/// Ce que le joueur a choisi avec C et V. Envoyé au module avec les touches, bits 12 et 13.
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum FreeCamera {
-    Off,
-    Moving,
-    Frozen,
-}
-
-impl FreeCamera {
-    fn after_c(self) -> Self {
-        if self == Self::Off { Self::Moving } else { Self::Off }
-    }
-
-    fn after_v(self) -> Self {
-        if self == Self::Frozen { Self::Moving } else { Self::Frozen }
-    }
-
-    fn key_bits(self) -> u16 {
-        match self {
-            Self::Off => 0,
-            Self::Moving => 1 << 12,
-            Self::Frozen => 3 << 12,
-        }
-    }
+    wheel: i32,
+    notice_seq: u32,
 }
 
 #[derive(Component)]
@@ -717,10 +724,9 @@ fn launch(commands: &mut Commands, images: &mut Assets<Image>, code: &str, rom: 
         return;
     };
     let mod_args = crate::mod_packs::native_args(code);
-    let mouse_look = mod_args.iter().any(|arg| arg == "--first-person");
-    let free_camera_mod = mod_args.iter().any(|arg| arg == "--free-camera");
+    let lang = if crate::i18n::lang() == crate::i18n::Lang::Fr { "fr" } else { "en" };
     let mut command = Command::new(module);
-    command.arg(rom).arg("--pipe").arg("--shm").arg(&name).arg("--save").arg(saves.join("backup.sav")).args(mod_args).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(log);
+    command.arg(rom).arg("--pipe").arg("--shm").arg(&name).arg("--save").arg(saves.join("backup.sav")).arg("--lang").arg(lang).args(mod_args).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(log);
     if std::env::var_os("NDSGS_NATIVE_MUTE").is_some() {
         command.arg("--mute");
     }
@@ -747,7 +753,7 @@ fn launch(commands: &mut Commands, images: &mut Assets<Image>, code: &str, rom: 
         commands.spawn((Sprite { image: image.clone(), custom_size: Some(size), ..default() }, NativeScreen, engine.layers(), in_game()));
     }
     let stdin = child.stdin.take();
-    commands.insert_resource(Running { code: code.to_string(), child, stdin, frames, seq: 0, top, bottom, sent: [0xFF; PACKET], mouse_look, captured: mouse_look, free_camera_mod, free_camera: FreeCamera::Off, mouse: (0, 0) });
+    commands.insert_resource(Running { code: code.to_string(), child, stdin, frames, seq: 0, top, bottom, sent: Vec::new(), wanted: false, released: false, held: false, mouse: (0, 0), wheel: 0, notice_seq: 0 });
 }
 
 fn show_frames(mut commands: Commands, mut running: ResMut<Running>, mut images: ResMut<Assets<Image>>, mut sprites: Query<&mut Sprite, With<NativeScreen>>) {
@@ -761,7 +767,7 @@ fn show_frames(mut commands: Commands, mut running: ResMut<Running>, mut images:
         commands.set_state(StudioState::Menu);
         return;
     }
-    let [seq, width, height, front] = running.frames.header();
+    let Header { seq, width, height, front, .. } = running.frames.header();
     let (width, height) = (width as usize, height as usize);
     if seq == running.seq || width == 0 || width > MAX_W || height == 0 || height > MAX_H {
         return;
@@ -786,42 +792,27 @@ fn show_frames(mut commands: Commands, mut running: ResMut<Running>, mut images:
     }
 }
 
-/// La souris dirige la caméra : le curseur reste dans la fenêtre, F7 le rend pour toucher l'écran du bas ou la barre de titre.
-fn mouse_look(mut running: ResMut<Running>, motion: Res<AccumulatedMouseMotion>, keys: Res<ButtonInput<KeyCode>>, screens: Res<DsScreens>, mut windows: Query<(&Window, &mut CursorOptions)>, mut toasts: MessageWriter<ShowToast>, mut told: Local<bool>) {
-    if !running.mouse_look && !running.free_camera_mod {
-        return;
-    }
-    if !*told {
-        *told = true;
-        let text = if running.mouse_look {
-            tr("The mouse moves the camera. F7 frees the cursor.", "La souris dirige la camera. F7 libere le curseur.")
-        } else {
-            tr("C: free camera. V: freeze the scene.", "C : camera libre. V : geler la scene.")
-        };
-        toasts.write(ShowToast(text.to_string()));
-    }
-    if running.free_camera_mod {
-        let before = running.free_camera;
-        if keys.just_pressed(KeyCode::KeyC) {
-            running.free_camera = before.after_c();
-        } else if keys.just_pressed(KeyCode::KeyV) {
-            running.free_camera = before.after_v();
-        }
-        if running.free_camera != before {
-            // Le curseur suit la caméra libre ; en la quittant, il revient à ce que la vue à la première personne demande
-            running.captured = running.free_camera != FreeCamera::Off || running.mouse_look;
-            toasts.write(ShowToast(match running.free_camera {
-                FreeCamera::Off => tr("Free camera off", "Camera libre coupee"),
-                FreeCamera::Moving => tr("Free camera: mouse, arrows, L and R. V freezes the scene.", "Camera libre : souris, fleches, L et R. V gele la scene."),
-                FreeCamera::Frozen => tr("Scene frozen. V resumes, C leaves.", "Scene gelee. V reprend, C quitte."),
-            }.to_string()));
+/// Le curseur retenu quand le module le demande (bit 0 de l'en-tête), F7 le rend ; les messages du module en toasts.
+fn cursor_and_notices(mut running: ResMut<Running>, motion: Res<AccumulatedMouseMotion>, scroll: Res<AccumulatedMouseScroll>, keys: Res<ButtonInput<KeyCode>>, screens: Res<DsScreens>, mut windows: Query<(&Window, &mut CursorOptions)>, mut toasts: MessageWriter<ShowToast>) {
+    let header = running.frames.header();
+    if header.notice_seq != running.notice_seq {
+        running.notice_seq = header.notice_seq;
+        let text = running.frames.notice();
+        if !text.is_empty() {
+            toasts.write(ShowToast(text));
         }
     }
+    let wanted = header.flags & 1 != 0;
+    if wanted && !running.wanted {
+        running.released = false;
+    }
+    running.wanted = wanted;
     if keys.just_pressed(KeyCode::F7) {
-        running.captured = !running.captured;
+        running.released = !running.released;
     }
     let Ok((window, mut cursor)) = windows.get_mut(screens.main_window()) else { return };
-    let held = running.captured && window.focused;
+    let held = wanted && !running.released && window.focused;
+    running.held = held;
     let (grab, visible) = if held { (CursorGrabMode::Locked, false) } else { (CursorGrabMode::None, true) };
     if cursor.grab_mode != grab || cursor.visible != visible {
         cursor.grab_mode = grab;
@@ -831,9 +822,85 @@ fn mouse_look(mut running: ResMut<Running>, motion: Res<AccumulatedMouseMotion>,
         let (x, y) = running.mouse;
         running.mouse = (x.wrapping_add(motion.delta.x.round() as i16), y.wrapping_add(motion.delta.y.round() as i16));
     }
+    if window.focused {
+        running.wheel = running.wheel.wrapping_add(scroll.delta.y.round() as i32);
+    }
 }
 
-fn send_input(mut running: ResMut<Running>, input: Res<DsInput>, mouse_buttons: Res<ButtonInput<MouseButton>>, stylus: Res<Stylus>, places: Res<ScreenPlaces>, style: Res<RenderStyle>, windows: Query<&Window>) {
+/// Code HID (page 7 des claviers USB) d'une touche, par sa place : `NDS_KEY_*` de `native/sdk/nds_mod.h`.
+fn hid_usage(key: KeyCode) -> Option<u8> {
+    use KeyCode::*;
+    const LETTERS: [KeyCode; 26] = [KeyA, KeyB, KeyC, KeyD, KeyE, KeyF, KeyG, KeyH, KeyI, KeyJ, KeyK, KeyL, KeyM, KeyN, KeyO, KeyP, KeyQ, KeyR, KeyS, KeyT, KeyU, KeyV, KeyW, KeyX, KeyY, KeyZ];
+    const DIGITS: [KeyCode; 10] = [Digit1, Digit2, Digit3, Digit4, Digit5, Digit6, Digit7, Digit8, Digit9, Digit0];
+    const FUNCTIONS: [KeyCode; 12] = [F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12];
+    if let Some(i) = LETTERS.iter().position(|&k| k == key) {
+        return Some(0x04 + i as u8);
+    }
+    if let Some(i) = DIGITS.iter().position(|&k| k == key) {
+        return Some(0x1E + i as u8);
+    }
+    if let Some(i) = FUNCTIONS.iter().position(|&k| k == key) {
+        return Some(0x3A + i as u8);
+    }
+    Some(match key {
+        Enter => 0x28,
+        Escape => 0x29,
+        Backspace => 0x2A,
+        Tab => 0x2B,
+        Space => 0x2C,
+        Minus => 0x2D,
+        Equal => 0x2E,
+        BracketLeft => 0x2F,
+        BracketRight => 0x30,
+        Backslash => 0x31,
+        Semicolon => 0x33,
+        Quote => 0x34,
+        Backquote => 0x35,
+        Comma => 0x36,
+        Period => 0x37,
+        Slash => 0x38,
+        CapsLock => 0x39,
+        Insert => 0x49,
+        Home => 0x4A,
+        PageUp => 0x4B,
+        Delete => 0x4C,
+        End => 0x4D,
+        PageDown => 0x4E,
+        ArrowRight => 0x4F,
+        ArrowLeft => 0x50,
+        ArrowDown => 0x51,
+        ArrowUp => 0x52,
+        IntlBackslash => 0x64,
+        ControlLeft => 0xE0,
+        ShiftLeft => 0xE1,
+        AltLeft => 0xE2,
+        SuperLeft => 0xE3,
+        ControlRight => 0xE4,
+        ShiftRight => 0xE5,
+        AltRight => 0xE6,
+        SuperRight => 0xE7,
+        _ => return None,
+    })
+}
+
+/// Le paquet 2 : les champs du paquet 1, puis la souris, la fenêtre et le clavier entier (`input_thread` de `present.c`).
+#[allow(clippy::too_many_arguments)]
+fn packet_v2(keys: u16, touch: (u16, u16, u16), ds_width: u16, scale: u16, mouse: (i16, i16), window: u16, buttons: u32, wheel: i32, keyboard: &[u32; 8]) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(PACKET_V2);
+    for word in [PACKET_V2_TAG, keys, touch.0, touch.1, touch.2, ds_width, scale, mouse.0 as u16, mouse.1 as u16, window] {
+        packet.extend_from_slice(&word.to_le_bytes());
+    }
+    packet.extend_from_slice(&buttons.to_le_bytes());
+    packet.extend_from_slice(&wheel.to_le_bytes());
+    packet.resize(32, 0);
+    for word in keyboard {
+        packet.extend_from_slice(&word.to_le_bytes());
+    }
+    packet
+}
+
+#[allow(clippy::too_many_arguments)]
+fn send_input(mut running: ResMut<Running>, input: Res<DsInput>, mouse_buttons: Res<ButtonInput<MouseButton>>, key_input: Res<ButtonInput<KeyCode>>, stylus: Res<Stylus>, places: Res<ScreenPlaces>, style: Res<RenderStyle>, windows: Query<&Window>, screens: Res<DsScreens>) {
     // Bits du registre KEYINPUT du DS, puis X et Y
     const ORDER: [DsButton; 12] = [
         DsButton::A,
@@ -855,13 +922,8 @@ fn send_input(mut running: ResMut<Running>, input: Res<DsInput>, mouse_buttons: 
             keys |= 1 << bit;
         }
     }
-    keys |= running.free_camera.key_bits();
-    // Curseur retenu par la caméra : le clic gauche tire (bouton L)
-    if running.captured && running.free_camera == FreeCamera::Off && mouse_buttons.pressed(MouseButton::Left) {
-        keys |= 1 << 9;
-    }
-    // Il n'est nulle part, il ne touche donc pas l'écran
-    let touch = stylus.touch().filter(|p| !running.captured && p.x >= 0.0 && p.y >= 0.0 && p.x < W as f32 && p.y < H as f32);
+    // Curseur retenu : il n'est nulle part, il ne touche donc pas l'écran
+    let touch = stylus.touch().filter(|p| !running.held && p.x >= 0.0 && p.y >= 0.0 && p.x < W as f32 && p.y < H as f32);
     let (down, x, y) = touch.map_or((0u16, 0u16, 0u16), |p| (1, p.x as u16, p.y as u16));
     // La définition suit la fenêtre : un pixel d'image par pixel d'écran, ou 1 en rendu DS
     let mut ds_width = W as u16;
@@ -877,7 +939,32 @@ fn send_input(mut running: ResMut<Running>, input: Res<DsInput>, mouse_buttons: 
     if scale == 3 {
         scale = 4;
     }
-    let mut packet = [0u8; PACKET];
+    if running.frames.header().protocol >= 2 {
+        let mut keyboard = [0u32; 8];
+        for key in key_input.get_pressed() {
+            if let Some(code) = hid_usage(*key) {
+                keyboard[code as usize >> 5] |= 1 << (code & 31);
+            }
+        }
+        let mut buttons = 0u32;
+        for (bit, button) in [MouseButton::Left, MouseButton::Right, MouseButton::Middle].into_iter().enumerate() {
+            if mouse_buttons.pressed(button) {
+                buttons |= 1 << bit;
+            }
+        }
+        let focused = windows.get(screens.main_window()).is_ok_and(|w| w.focused);
+        let window = u16::from(running.held) | u16::from(focused) << 1;
+        let packet = packet_v2(keys, (down, x, y), ds_width, scale, running.mouse, window, buttons, running.wheel, &keyboard);
+        if packet != running.sent {
+            if let Some(stdin) = running.stdin.as_mut() {
+                let _ = stdin.write_all(&packet).and_then(|_| stdin.flush());
+            }
+            running.sent = packet;
+        }
+        return;
+    }
+    // Module d'avant le protocole 2
+    let mut packet = [0u8; PACKET_V1];
     packet[0..2].copy_from_slice(&keys.to_le_bytes());
     packet[2..4].copy_from_slice(&down.to_le_bytes());
     packet[4..6].copy_from_slice(&x.to_le_bytes());
@@ -886,8 +973,8 @@ fn send_input(mut running: ResMut<Running>, input: Res<DsInput>, mouse_buttons: 
     packet[10..12].copy_from_slice(&scale.to_le_bytes());
     packet[12..14].copy_from_slice(&running.mouse.0.to_le_bytes());
     packet[14..16].copy_from_slice(&running.mouse.1.to_le_bytes());
-    if packet != running.sent {
-        running.sent = packet;
+    if packet[..] != running.sent[..] {
+        running.sent = packet.to_vec();
         if let Some(stdin) = running.stdin.as_mut() {
             let _ = stdin.write_all(&packet).and_then(|_| stdin.flush());
         }
@@ -909,15 +996,35 @@ fn stop_module(mut commands: Commands, mut cursors: Query<&mut CursorOptions>) {
 mod tests {
     use super::*;
 
+    /// Disposition lue par `input_thread` de `present.c` : mots de 16 bits, puis boutons, molette et clavier.
     #[test]
-    fn c_et_v_donnent_les_bits_du_module() {
-        let off = FreeCamera::Off;
-        assert_eq!(off.key_bits(), 0);
-        assert_eq!(off.after_c().key_bits(), 1 << 12);
-        assert_eq!(off.after_v().key_bits(), 3 << 12);
-        // V reprend sans quitter la caméra ; C quitte même une scène gelée
-        assert_eq!(off.after_v().after_v(), FreeCamera::Moving);
-        assert_eq!(off.after_v().after_c(), FreeCamera::Off);
+    fn le_paquet_2_suit_present_c() {
+        let mut keyboard = [0u32; 8];
+        let c = hid_usage(KeyCode::KeyC).unwrap() as usize;
+        keyboard[c >> 5] |= 1 << (c & 31);
+        let p = packet_v2(0x0201, (1, 100, 50), 341, 4, (-3, 7), 3, 5, -2, &keyboard);
+        assert_eq!(p.len(), PACKET_V2);
+        let word = |i: usize| u16::from_le_bytes([p[2 * i], p[2 * i + 1]]);
+        assert_eq!([word(0), word(1), word(2), word(3), word(4), word(5), word(6)], [0x8002, 0x0201, 1, 100, 50, 341, 4]);
+        assert_eq!([word(7) as i16, word(8) as i16], [-3, 7]);
+        assert_eq!(word(9), 3);
+        assert_eq!(u32::from_le_bytes(p[20..24].try_into().unwrap()), 5);
+        assert_eq!(i32::from_le_bytes(p[24..28].try_into().unwrap()), -2);
+        // C = 0x06 : bit 6 du premier mot du clavier, à l'octet 32
+        assert_eq!(c, 0x06);
+        assert_eq!(p[32], 1 << 6);
+        // les touches du paquet 1 (12 bits du DS) ne prennent jamais la valeur du marqueur
+        assert!(PACKET_V2_TAG > 0x0FFF);
+    }
+
+    #[test]
+    fn les_codes_hid_sont_ceux_du_sdk() {
+        assert_eq!(hid_usage(KeyCode::KeyA), Some(0x04));
+        assert_eq!(hid_usage(KeyCode::KeyZ), Some(0x1D));
+        assert_eq!(hid_usage(KeyCode::Digit0), Some(0x27));
+        assert_eq!(hid_usage(KeyCode::F12), Some(0x45));
+        assert_eq!(hid_usage(KeyCode::ArrowUp), Some(0x52));
+        assert_eq!(hid_usage(KeyCode::ShiftLeft), Some(0xE1));
     }
 
     /// Le jeu ouvre l'objet par son nom (`os_shm_open`) et écrit l'en-tête que le launcher lit ; `drop` détruit le nom.
@@ -927,7 +1034,7 @@ mod tests {
         let name = shm_name("TEST");
         assert!(name.len() <= 31 && name.starts_with('/'));
         let frames = SharedFrames::new(&name).expect("shm_open + ftruncate + mmap");
-        assert_eq!(frames.header(), [0; 4]);
+        assert_eq!(frames.header(), Header::default());
         let c_name = std::ffi::CString::new(name.clone()).unwrap();
         // SAFETY: côté jeu : ouverture par le nom, taille lue par fstat, comme os_posix.c.
         unsafe {
@@ -944,7 +1051,7 @@ mod tests {
             header.add(1).write_volatile(256);
             // Le dernier octet de la mémoire des images
             (p as *mut u8).add(SHM_BYTES - 1).write_volatile(0xAB);
-            assert_eq!(frames.header(), [7, 256, 0, 0]);
+            assert_eq!((frames.header().seq, frames.header().width), (7, 256));
             assert_eq!(*frames.view.add(SHM_BYTES - 1), 0xAB);
             libc::munmap(p, st.st_size as usize);
         }

@@ -10,7 +10,8 @@ typedef u64 (*Fn)();
 
 enum { WM_OK = 0, WM_FAILED = 1, WM_OPERATING = 2, WM_ILLEGAL = 3, WM_NO_DATASET = 5, WM_NO_CHILD = 7 };
 enum { ST_PARENT_START = 0, ST_SCAN_START = 3, ST_NOT_FOUND = 4, ST_FOUND = 5, ST_CONNECT_START = 6, ST_CONNECTED = 7, ST_DISCONNECTED = 9, ST_MP_START = 10 };
-enum { MSG_INFO = 1, MSG_CONNECT, MSG_WELCOME, MSG_STEP, MSG_SET };
+/* MSG_MODS : empreinte du runtime et des mods (nds_mods_fingerprint) ; deux joueurs differents se desynchroniseraient */
+enum { MSG_INFO = 1, MSG_CONNECT, MSG_WELCOME, MSG_STEP, MSG_SET, MSG_MODS };
 
 #define NO_SOCKET OS_NO_SOCKET
 #define MAX_PEERS 4 /* aid 1 a 3 chez l'hote ; l'hote lui-meme chez l'invite */
@@ -25,6 +26,7 @@ typedef struct {
     u8 buf[BUF_SIZE];
     u32 have;
     int joined;
+    int same; /* meme empreinte que nous (MSG_MODS) */
     u8 steps[STEPS][DS_MAX];
     u32 step_r, step_w;
 } Peer;
@@ -86,6 +88,7 @@ static void peer_close(Peer *p) {
     p->sock = NO_SOCKET;
     p->have = 0;
     p->joined = 0;
+    p->same = 0;
     p->step_r = p->step_w = 0;
 }
 
@@ -132,8 +135,43 @@ static void parent_lost(int aid) {
     nds_log("reseau : invite %d perdu", aid);
 }
 
+static u32 text_len(const char *s) {
+    u32 n = 0;
+    while (s[n]) n++;
+    return n;
+}
+
+static void send_fingerprint(Peer *p) {
+    const char *mine = nds_mods_fingerprint();
+    peer_send(p, MSG_MODS, mine, text_len(mine), 0, 0);
+}
+
+/* l'autre joueur n'a pas le meme runtime ou les memes mods : la partie est refusee des deux cotes */
+static int check_fingerprint(Peer *p, const u8 *data, u32 size) {
+    const char *mine = nds_mods_fingerprint();
+    u32 n = text_len(mine);
+    int same = size == n;
+    for (u32 i = 0; same && i < n; i++) same = data[i] == (u8)mine[i];
+    if (same) return 1;
+    char theirs[512];
+    u32 k = size < sizeof theirs - 1 ? size : sizeof theirs - 1;
+    nds_copy(theirs, data, k);
+    theirs[k] = 0;
+    nds_log("reseau : partie refusee, ici [%s], la-bas [%s]", mine, theirs);
+    int fr = present_language()[0] == 'f';
+    present_notice(fr ? "Partie refusee : l'autre joueur n'a pas la meme version du jeu ou les memes mods."
+                      : "Game refused: the other player has another version of the game or other mods.", 6000);
+    peer_close(p);
+    return 0;
+}
+
 static void handle(Peer *p, int aid, u8 type, const u8 *data, u32 size) {
     switch (type) {
+    case MSG_MODS:
+        if (!check_fingerprint(p, data, size)) return;
+        if (!is_parent && !p->same) send_fingerprint(p); /* l'invite repond : l'hote verifie aussi */
+        p->same = 1;
+        break;
     case MSG_INFO:
         if (size == BSS_SIZE) {
             nds_copy(host_bss, data, BSS_SIZE);
@@ -141,6 +179,11 @@ static void handle(Peer *p, int aid, u8 type, const u8 *data, u32 size) {
         }
         break;
     case MSG_CONNECT:
+        if (is_parent && !p->same) {
+            nds_log("reseau : invite %d refuse, sans la meme empreinte", aid);
+            peer_close(p);
+            return;
+        }
         if (is_parent && !p->joined) {
             u16 welcome = (u16)aid;
             p->joined = 1;
@@ -208,6 +251,7 @@ static void net_pump(void) {
                 if (peers[aid].sock != NO_SOCKET) continue;
                 peers[aid].sock = s;
                 peer_send(&peers[aid], MSG_INFO, own_bss, BSS_SIZE, 0, 0);
+                send_fingerprint(&peers[aid]);
                 placed = 1;
             }
             if (!placed) os_tcp_close(s);

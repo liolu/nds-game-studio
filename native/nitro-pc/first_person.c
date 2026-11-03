@@ -8,6 +8,13 @@
 extern const u32 nds_fp_camera, nds_fp_players, nds_fp_index, nds_fp_matrix, nds_fp_yaw, nds_fp_heading_a, nds_fp_heading_b, nds_fp_render_obj, nds_fp_arm_slots;
 extern int nds_fp_mode;
 
+/* la vue a la premiere personne est demandee et ce jeu la permet */
+int nds_fp_active(void) {
+    static int active = -1;
+    if (active < 0) active = nds_fp_camera && nds_arg("--first-person", 0);
+    return active;
+}
+
 #define CAM_FLAGS 0x160
 #define CAM_ROTATION 0x14
 #define VIEW_DIRTY 0xCu /* la vue et le volume de vue sont a refaire */
@@ -127,15 +134,13 @@ void nds_fp_crosshair(u32 *screen, int w, int h, int k, int stride) {
 }
 
 void nds_hook_camera(u32 camera) {
-    static int active = -1;
     static int seen_x, seen_y;
     /* la camera libre passe avant : le corps redevient entier, et le regard repartira du personnage */
     if (nds_free_camera(camera)) {
         started = 0;
         return;
     }
-    if (active < 0) active = nds_fp_camera && nds_arg("--first-person", 0);
-    if (!active || camera != nds_fp_camera) return;
+    if (!nds_fp_active() || camera != nds_fp_camera) return;
     u32 hero = player();
     if (!hero) {
         started = 0;

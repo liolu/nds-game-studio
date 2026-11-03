@@ -1,6 +1,6 @@
 /* --free-camera : la camera se detache du jeu et se dirige a la souris et aux touches, en jeu comme dans une cinematique.
  *
- * Le launcher dit ce que le joueur a choisi avec les touches (present_free_camera) : bit 0 = camera libre, bit 1 = scene gelee. Le jeu ne recoit
+ * C et V du clavier (present.c, present_free_camera) : bit 0 = camera libre, bit 1 = scene gelee. Le jeu ne recoit
  * plus de touches pendant ce temps. La camera passe par l'accroche de la vue, comme la vue a la premiere personne (first_person.c).
  *
  * Pour geler une scene, rien de nouveau dans le jeu : la mise a jour du niveau ne tourne plus, ses taches sont coupees et ses objets recoivent le

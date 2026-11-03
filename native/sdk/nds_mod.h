@@ -56,14 +56,32 @@ typedef struct {
     nds_s32 mouse_dx, mouse_dy;           /* cumul des mouvements de la souris depuis le lancement */
     nds_u32 mouse_buttons;     /* bit 0 gauche, 1 droit, 2 milieu */
     nds_s32 wheel;             /* cumul de la molette */
-    nds_u32 keys[8];           /* clavier entier, un bit par touche (codes HID) */
+    nds_u32 keys[8];           /* clavier entier, un bit par touche (codes HID, NDS_KEY_*) */
+    nds_u32 window;            /* bit 0 : curseur retenu, bit 1 : fenetre active */
 } nds_input;
+
+/* touches du clavier (codes HID d'usage, page 7), par leur place et non leur lettre : NDS_KEY_Q est le A d'un clavier AZERTY */
+#define NDS_KEY_DOWN(in, k) ((in)->keys[(k) >> 5] >> ((k) & 31) & 1)
+enum {
+    NDS_KEY_A = 0x04, NDS_KEY_B, NDS_KEY_C, NDS_KEY_D, NDS_KEY_E, NDS_KEY_F, NDS_KEY_G, NDS_KEY_H, NDS_KEY_I, NDS_KEY_J,
+    NDS_KEY_K, NDS_KEY_L, NDS_KEY_M, NDS_KEY_N, NDS_KEY_O, NDS_KEY_P, NDS_KEY_Q, NDS_KEY_R, NDS_KEY_S, NDS_KEY_T, NDS_KEY_U,
+    NDS_KEY_V, NDS_KEY_W, NDS_KEY_X, NDS_KEY_Y, NDS_KEY_Z,
+    NDS_KEY_1 = 0x1E, NDS_KEY_2, NDS_KEY_3, NDS_KEY_4, NDS_KEY_5, NDS_KEY_6, NDS_KEY_7, NDS_KEY_8, NDS_KEY_9, NDS_KEY_0,
+    NDS_KEY_ENTER = 0x28, NDS_KEY_ESCAPE, NDS_KEY_BACKSPACE, NDS_KEY_TAB, NDS_KEY_SPACE,
+    NDS_KEY_F1 = 0x3A, NDS_KEY_F2, NDS_KEY_F3, NDS_KEY_F4, NDS_KEY_F5, NDS_KEY_F6, NDS_KEY_F7, NDS_KEY_F8, NDS_KEY_F9,
+    NDS_KEY_F10, NDS_KEY_F11, NDS_KEY_F12,
+    NDS_KEY_INSERT = 0x49, NDS_KEY_HOME, NDS_KEY_PAGE_UP, NDS_KEY_DELETE, NDS_KEY_END, NDS_KEY_PAGE_DOWN,
+    NDS_KEY_RIGHT = 0x4F, NDS_KEY_LEFT, NDS_KEY_DOWN, NDS_KEY_UP,
+    NDS_KEY_LEFT_CTRL = 0xE0, NDS_KEY_LEFT_SHIFT, NDS_KEY_LEFT_ALT, NDS_KEY_LEFT_META,
+    NDS_KEY_RIGHT_CTRL, NDS_KEY_RIGHT_SHIFT, NDS_KEY_RIGHT_ALT, NDS_KEY_RIGHT_META,
+};
 
 typedef struct nds_api {
     nds_u32 size;              /* sizeof(nds_api) du runtime : un champ au-dela n'existe pas */
     nds_u32 major, minor;      /* version de l'interface du runtime */
     const char *game_code;     /* "AL7E" */
     const char *platform;      /* "windows-x86", "windows-x86_64", "macos-arm64", "macos-x86_64" */
+    const char *language;      /* langue du launcher : "fr", "en" */
 
     /* ---- journal, reglages */
     void (*log)(nds_mod *mod, const char *fmt, ...);      /* une ligne ; %x %u %d %s ; prefixee du nom du mod */
@@ -107,11 +125,11 @@ typedef struct nds_api {
     /* lecture de la rom par le jeu : dst (deja rempli) peut etre modifie ; pos = position dans la rom */
     void (*on_rom_read)(nds_mod *mod, void (*fn)(void *user, nds_u32 pos, nds_u32 size, nds_u8 *dst), void *user);
 
-    /* ---- entrees (le detail du clavier et de la souris arrive avec le launcher qui les envoie) */
+    /* ---- entrees : touches du DS, stylet, souris et clavier entier, tels que le launcher les envoie */
     void (*input)(nds_input *out);              /* out->size doit etre rempli par le mod */
     void (*take_input)(nds_mod *mod, int on);   /* 1 : le jeu ne recoit plus de touches */
-    void (*capture_mouse)(nds_mod *mod, int on); /* 1 : le launcher retient le curseur */
-    void (*notice)(nds_mod *mod, const char *text, nds_u32 ms); /* message affiche par le launcher */
+    void (*capture_mouse)(nds_mod *mod, int on); /* 1 : le launcher retient le curseur (F7 le rend au joueur) */
+    void (*notice)(nds_mod *mod, const char *text, nds_u32 ms); /* message affiche par le launcher (UTF-8) */
 
     /* ---- tout le reste : fonction ou variable du runtime par son nom, 0 si absente. Sans promesse de stabilite :
      * le nom peut disparaitre a une version suivante du runtime. */

@@ -560,8 +560,8 @@ void nds_start(void) {
     load_arm9();
     arm7_init();
     io_init();
-    nds_mods_load();
     present_init();
+    nds_mods_load(); /* apres present_init : langue et messages vers le launcher */
     {
         extern const int nds_has_c;
         if (nds_has_c) {
