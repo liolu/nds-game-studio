@@ -95,6 +95,10 @@ pub enum Kind {
     PaletteTiles,
     /// Image 2D de `rom.bin` (moteur Amaze) : palette, carte et tuiles.
     RomImage,
+    /// Sprite de `rom.bin` (Les Sims 2) : ses OBJ, une ou plusieurs images ; tuiles et palette dans les fichiers voisins.
+    RomSprite,
+    /// Image 8 bpp de `rom.bin` (Les Sims 2), sa palette dedans ou au fichier d'avant.
+    RomBitmap,
     /// Fichier `.z` (Tom and Jerry) : image, écran ou texture une fois décompressé.
     ZImage,
     /// Animation `.anm` : un résumé, elle n'est pas jouée.
@@ -111,6 +115,8 @@ pub enum Kind {
     RawScreen,
     /// Script compilé (SB, DCPB) : montré en texte et en octets.
     Script,
+    /// Données d'un moteur maison sans image ni son (objets, niveaux, tables de `rom.bin`) : leur structure en texte.
+    GameData,
     /// Autres fichiers Nitro 3D sans rien à montrer (BTP0, BTA0...).
     Nitro3dOther,
     /// Autre fichier Nitro 2D (NANR, NMCR...).
@@ -139,7 +145,8 @@ impl Kind {
             Kind::PlainText => "texte",
             Kind::Texel | Kind::TextureRef | Kind::RawTexture | Kind::BsTexture => "texture",
             Kind::EngineGeometry | Kind::EngineMesh => "modele 3D",
-            Kind::Bitmap | Kind::ZImage | Kind::RomImage => "image",
+            Kind::Bitmap | Kind::ZImage | Kind::RomImage | Kind::RomBitmap => "image",
+            Kind::RomSprite => "sprite",
             Kind::PaletteTiles => "tuiles",
             Kind::AnmFile => "animation 2D",
             Kind::ZipFile => "archive",
@@ -152,6 +159,7 @@ impl Kind {
             Kind::RawPalette => "palette",
             Kind::RawScreen => "ecran",
             Kind::Script => "script",
+            Kind::GameData => "donnees",
             Kind::Nitro3dOther => "3D (anim)",
             Kind::Nitro2dOther => "2D (anim)",
             Kind::Other => "",
@@ -159,7 +167,7 @@ impl Kind {
     }
 
     pub fn viewable(self) -> bool {
-        matches!(self, Kind::Model | Kind::Textures | Kind::Palette | Kind::Tiles | Kind::Screen | Kind::Cells | Kind::ModelAnim | Kind::CellAnim | Kind::JCells | Kind::JLayout | Kind::Audio | Kind::AudioBank | Kind::Font | Kind::Messages | Kind::PaletteTiles | Kind::RomImage | Kind::ZImage | Kind::AnmFile | Kind::EngineGeometry | Kind::EngineMesh | Kind::RawTexture | Kind::BsTexture | Kind::Bitmap | Kind::ZipFile | Kind::Video | Kind::Texel | Kind::TextureRef | Kind::EngineBitmap | Kind::PlainText | Kind::Compressed | Kind::NestedRom | Kind::RawTiles | Kind::RawPalette | Kind::RawScreen | Kind::Script)
+        matches!(self, Kind::Model | Kind::Textures | Kind::Palette | Kind::Tiles | Kind::Screen | Kind::Cells | Kind::ModelAnim | Kind::CellAnim | Kind::JCells | Kind::JLayout | Kind::Audio | Kind::AudioBank | Kind::Font | Kind::Messages | Kind::PaletteTiles | Kind::RomImage | Kind::RomSprite | Kind::RomBitmap | Kind::ZImage | Kind::AnmFile | Kind::EngineGeometry | Kind::EngineMesh | Kind::RawTexture | Kind::BsTexture | Kind::Bitmap | Kind::ZipFile | Kind::Video | Kind::Texel | Kind::TextureRef | Kind::EngineBitmap | Kind::PlainText | Kind::Compressed | Kind::NestedRom | Kind::RawTiles | Kind::RawPalette | Kind::RawScreen | Kind::Script | Kind::GameData | Kind::Nitro3dOther)
     }
 }
 
