@@ -67,6 +67,10 @@ extern u32 nds_sp, nds_lr; /* pile ARM et retour de la fonction du jeu appelee, 
 void nds_copy(void *dst, const void *src, u32 n);
 void nds_zero(void *dst, u32 n);
 int nds_arg(const char *name, const char **value);
+void nds_mods_load(void); /* mods.c */
+int nds_hook_install(u32 addr, void *fn, void **original);
+extern int nds_fixed_clock; /* --fixed-clock (io.c) : images reproductibles */
+void snd_fixed_frame(void);
 /* context.c : fils verts (OS_SaveContext/OS_LoadContext) et piles de l'hote */
 extern uptr nds_last_load_sp;
 void nds_ctx_init(u32 ctx, u8 *stack, u32 size, void (*entry)(u32), u32 func); /* 1er OS_LoadContext(ctx) : entry(ctx) */

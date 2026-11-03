@@ -25,7 +25,11 @@ static u32 fifo_count(void) { return fifo_w - fifo_r; }
 
 static u32 clock_k; /* cycles par tic QPC, en virgule fixe 16 bits */
 
+int nds_fixed_clock;
+static u64 fixed_now;
+
 static u64 cycles64(void) {
+    if (nds_fixed_clock) return fixed_now += 1000;
     s64 now = os_time_now();
     return ((u64)(now - t0) * clock_k) >> 16;
 }
@@ -121,6 +125,7 @@ void io_poll(void) {
     u32 stat = REG16(IO + 4);
     if (now >= next_vblank) {
         gfx_render();
+        if (nds_fixed_clock) snd_fixed_frame();
         dma_vblank();
         present_frame();
         nds_frame++;
@@ -172,7 +177,7 @@ void io_wait_irq(void) {
             if (!(nds_cpsr & 0x80)) irq_deliver();
             return;
         }
-        os_sleep(1);
+        if (!nds_fixed_clock) os_sleep(1);
     }
 }
 

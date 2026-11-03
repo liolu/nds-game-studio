@@ -2,6 +2,7 @@
  * Registres de l'hote sauvegardes par l'appele, a cote de l'OSContext du SDK (native/MACOS.md 3.3) :
  *   i386 (Windows)        : ebx, esi, edi, ebp, esp, eip
  *   x86_64 (System V)     : rbx, rbp, r12-r15, rsp, rip
+ *   x86_64 (Windows)      : les memes, plus rdi, rsi et xmm6-xmm15
  *   arm64 (ABI d'Apple)   : x19-x29, x30 (lr), sp, d8-d15 ; x18 est reserve au systeme, on n'y touche pas
  * Sans en-tete systeme : le test sans rom (native/tests) compile ce fichier tel quel. */
 #include "nitro.h"
@@ -23,6 +24,16 @@ typedef struct {
 } Slot;
 #define SLOT_SP 4
 #define SLOT_PC 36
+#elif defined(__x86_64__) && defined(_WIN32)
+typedef struct {
+    u32 ctx, cpsr, func, fresh;
+    uptr sp, pc;
+    uptr rbx, rbp, r12, r13, r14, r15, rdi, rsi;
+    u64 xmm[20]; /* xmm6..xmm15 */
+} Slot;
+#define SLOT_SP 16
+#define SLOT_PC 24
+_Static_assert(__builtin_offsetof(Slot, rsi) == 88 && __builtin_offsetof(Slot, xmm) == 96, "decalages du Slot Windows x64");
 #elif defined(__x86_64__)
 typedef struct {
     u32 ctx, cpsr, func, fresh;
@@ -96,6 +107,34 @@ __asm__(
     "  mov 36(%eax), %ecx\n  mov $1, %eax\n  jmp *%ecx\n"
     FUNC(nds_run_on_stack)
     "  mov 8(%esp), %eax\n  mov 4(%esp), %esp\n  call *%eax\n  ud2\n");
+#elif defined(__x86_64__) && defined(_WIN32)
+/* comme System V, mais argument dans rcx, 32 octets reserves sous chaque call, et rdi, rsi, xmm6-xmm15 a garder */
+#define XMM_SAVE(op) op " %xmm6, 96(%rax)\n  " op " %xmm7, 112(%rax)\n  " op " %xmm8, 128(%rax)\n  " op " %xmm9, 144(%rax)\n  " \
+    op " %xmm10, 160(%rax)\n  " op " %xmm11, 176(%rax)\n  " op " %xmm12, 192(%rax)\n  " op " %xmm13, 208(%rax)\n  " \
+    op " %xmm14, 224(%rax)\n  " op " %xmm15, 240(%rax)\n"
+#define XMM_LOAD(op) op " 96(%rax), %xmm6\n  " op " 112(%rax), %xmm7\n  " op " 128(%rax), %xmm8\n  " op " 144(%rax), %xmm9\n  " \
+    op " 160(%rax), %xmm10\n  " op " 176(%rax), %xmm11\n  " op " 192(%rax), %xmm12\n  " op " 208(%rax), %xmm13\n  " \
+    op " 224(%rax), %xmm14\n  " op " 240(%rax), %xmm15\n"
+__asm__(
+    ".text\n"
+    FUNC(OS_SaveContext)
+    FUNC(nds_eh_save)
+    "  push %rcx\n  sub $32, %rsp\n  call " SYM(nds_save_slot) "\n  add $32, %rsp\n  pop %rcx\n"
+    "  mov (%rsp), %rcx\n  mov %rcx, 24(%rax)\n  lea 8(%rsp), %rcx\n  mov %rcx, 16(%rax)\n"
+    "  mov %rbx, 32(%rax)\n  mov %rbp, 40(%rax)\n  mov %r12, 48(%rax)\n  mov %r13, 56(%rax)\n"
+    "  mov %r14, 64(%rax)\n  mov %r15, 72(%rax)\n  mov %rdi, 80(%rax)\n  mov %rsi, 88(%rax)\n  "
+    XMM_SAVE("movups")
+    "  xor %eax, %eax\n  ret\n"
+    FUNC(OS_LoadContext)
+    "  sub $40, %rsp\n  call " SYM(nds_load_slot) "\n"
+    "  mov 16(%rax), %rsp\n  mov 32(%rax), %rbx\n  mov 40(%rax), %rbp\n  mov 48(%rax), %r12\n  mov 56(%rax), %r13\n"
+    "  mov 64(%rax), %r14\n  mov 72(%rax), %r15\n  mov 80(%rax), %rdi\n  mov 88(%rax), %rsi\n  "
+    XMM_LOAD("movups")
+    "  mov 24(%rax), %rcx\n  mov $1, %eax\n  jmp *%rcx\n"
+    FUNC(nds_ctx_start)
+    "  mov %rbx, %rcx\n  sub $32, %rsp\n  call *%r12\n  ud2\n"
+    FUNC(nds_run_on_stack)
+    "  mov %rcx, %rsp\n  xor %ebp, %ebp\n  sub $32, %rsp\n  call *%rdx\n  ud2\n");
 #elif defined(__x86_64__)
 /* a l'entree d'une fonction, rsp = 8 modulo 16 ; un call doit partir de rsp = 0 modulo 16 */
 __asm__(

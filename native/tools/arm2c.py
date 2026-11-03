@@ -91,6 +91,20 @@ static inline s32 SAT32(s64 v) { return v > 0x7FFFFFFFLL ? 0x7FFFFFFF : v < -0x8
     v = ((~(_a ^ _b) & (_a ^ res)) >> 31); n = res >> 31; z = res == 0; } while (0)
 #define SUBF(a, b, ci) ADDF((a), ~(u32)(b), (ci))
 #define NZ(x) (n = (u32)(x) >> 31, z = (u32)(x) == 0)
+/* accroches des mods (Lifter.hook_all) : la fonction du jeu f est une entree en assembleur qui saute a nds_hook_slot[k]
+ * si un mod l'a remplie, sinon a f__o, le corps traduit. Memes arguments, rien n'est recopie : un seul saut de plus. */
+#define HK_STR2(x) #x
+#define HK_STR(x) HK_STR2(x)
+#define HK_SYM(n) HK_STR(__USER_LABEL_PREFIX__) #n
+#if defined(__i386__)
+#define HOOK_ENTRY(f, k) __asm__(".text\\n.globl " HK_SYM(f) "\\n.p2align 4\\n" HK_SYM(f) ":\\n  movl " HK_SYM(nds_hook_slot) "+4*" #k ", %eax\\n  testl %eax, %eax\\n  jne 1f\\n  jmp " HK_SYM(f##__o) "\\n1:  jmp *%eax\\n")
+#elif defined(__x86_64__) && defined(_WIN32)
+#define HOOK_ENTRY(f, k) __asm__(".text\\n.globl " HK_SYM(f) "\\n.p2align 4\\n" HK_SYM(f) ":\\n  movq " HK_SYM(nds_hook_slot) "+8*" #k "(%rip), %rax\\n  testq %rax, %rax\\n  jne 1f\\n  jmp " HK_SYM(f##__o) "\\n1:  jmp *%rax\\n")
+#elif defined(__x86_64__)
+#define HOOK_ENTRY(f, k) __asm__(".text\\n.globl " HK_SYM(f) "\\n.p2align 4\\n" HK_SYM(f) ":\\n  movq " HK_SYM(nds_hook_slot) "+8*" #k "(%rip), %r11\\n  testq %r11, %r11\\n  jne 1f\\n  jmp " HK_SYM(f##__o) "\\n1:  jmp *%r11\\n")
+#elif defined(__aarch64__)
+#define HOOK_ENTRY(f, k) __asm__(".text\\n.globl " HK_SYM(f) "\\n.p2align 2\\n" HK_SYM(f) ":\\n  adrp x16, " HK_SYM(nds_hook_slot) "@PAGE\\n  add x16, x16, " HK_SYM(nds_hook_slot) "@PAGEOFF\\n  mov x17, #" #k "\\n  ldr x16, [x16, x17, lsl #3]\\n  cbnz x16, 1f\\n  b " HK_SYM(f##__o) "\\n1:  br x16\\n")
+#endif
 #ifdef NDS_EH
 /* exceptions C++ (arm2c.Lifter.eh_end_catch) : pile ARM continue, vraies adresses de retour et registres r4-r11 de l'appelant, le derouleur du jeu les lit */
 extern u32 nds_sp, nds_lr, nds_cs[8], nds_eh_regs[11]; extern u64 nds_eh_resume();
@@ -129,6 +143,8 @@ class Lifter:
         self.sizes = {}
         self.debug_pc = False
         self.eh_end_catch = None  # adresse de __end_catch : le jeu lance de vraies exceptions C++ (NDS_EH du PRELUDE)
+        self.hook_all = False  # chaque fonction traduite passe par HOOK_ENTRY : un mod peut la remplacer
+        self.hooked = {}  # adresse -> (nom, k) : nds_hook_slot[k] de la fonction
 
     def decode(self, addr, thumb):
         raw = self.memory(addr, 8)
@@ -674,7 +690,7 @@ class Lifter:
                 text = text.replace(marker, label + "\n" + marker, 1)
         args = ", ".join(["u32 r0", "u32 r1", "u32 r2", "u32 r3"] + ["u32 a%d" % i for i in range(STACK_ARGS)])
         head = [
-            "u64 %s(%s) {" % (name, args),
+            "u64 %s(%s) {" % (name + "__o" if self.hook_all else name, args),
             "  u32 stack_[%d]; u32 sp = HOST2DS(&stack_[%d]);" % (self.frame_words(out) + STACK_ARGS + 2, self.frame_words(out)),
             "  u32 r4=0,r5=0,r6=0,r7=0,r8=0,r9=0,r10=0,r11=0,r12=0,lr=MAGIC_LR,res=0,sh=0,pc_val=0; u32 n=0,z=0,c=0,v=0;",
             "  " + " ".join("stack_[%d]=a%d;" % (self.frame_words(out) + i, i) for i in range(STACK_ARGS)),
@@ -704,7 +720,22 @@ class Lifter:
         if entry in self.exit_hooks:
             fn = self.exit_hooks[entry]
             body = body.replace(RET, "{ extern void %s(void); %s(); %s }" % (fn, fn, RET))
+        if self.hook_all:
+            k = self.hooked.setdefault(entry, (name, len(self.hooked)))[1]
+            body += "HOOK_ENTRY(%s, %d);\n" % (name, k)
         return body
+
+    def hook_table(self):
+        """Fin de lifted.c : les cases des accroches et la table adresse DS -> case, corps d'origine (nitro-pc/hooks.c)."""
+        rows = sorted(self.hooked.items())
+        out = ["void *nds_hook_slot[%d];" % max(len(rows), 1)]
+        out += ["u64 %s__o();" % name for _, (name, _) in rows]
+        out.append("const struct { u32 arm; u32 slot; void *orig; } nds_hook_table[] = {")
+        out += ["  {0x%08xu, %d, (void *)%s__o}," % (addr, k, name) for addr, (name, k) in rows]
+        if not rows:
+            out.append("  {0, 0, 0},")
+        out.append("};\nconst unsigned nds_hook_count = %d;" % len(rows))
+        return "\n".join(out) + "\n"
 
     def landing_pad(self, entry, out):
         """Debut d'un bloc catch pas encore traduit : rien n'y saute, seul le derouleur y arrive. Il finit par __end_catch."""

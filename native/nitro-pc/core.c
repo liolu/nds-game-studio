@@ -18,14 +18,14 @@ uptr nds_mem; /* base de la fenetre DS, fixee par nds_start */
 extern void *const nds_entry_fn;
 
 /* ------------------------------------------------------------------ petites fonctions sans libc */
-#if defined(__i386__)
+#if defined(__i386__) || defined(_WIN32)
 void nds_copy(void *dst, const void *src, u32 n) {
     __asm__ volatile("rep movsb" : "+D"(dst), "+S"(src), "+c"(n) : : "memory");
 }
 void nds_zero(void *dst, u32 n) {
     __asm__ volatile("rep stosb" : "+D"(dst), "+c"(n) : "a"(0) : "memory");
 }
-#else /* 64 bits : libSystem fournit memcpy/memset */
+#else /* Mac : libSystem fournit memcpy/memset */
 void nds_copy(void *dst, const void *src, u32 n) { __builtin_memcpy(dst, src, n); }
 void nds_zero(void *dst, u32 n) { __builtin_memset(dst, 0, n); }
 #endif
@@ -535,6 +535,7 @@ static void run_game(void) {
 
 void nds_start(void) {
     parse_args();
+    nds_fixed_clock = nds_arg("--fixed-clock", 0);
     os_fault_install(on_exception);
 #if !NDS_IDENTITY
     nds_mem = (uptr)os_mem_window();
@@ -554,6 +555,7 @@ void nds_start(void) {
     load_arm9();
     arm7_init();
     io_init();
+    nds_mods_load();
     present_init();
     {
         extern const int nds_has_c;

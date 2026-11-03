@@ -6,6 +6,7 @@
   python3 native/tests/arm2c_test.py --arch x86_64   # macOS : version Intel, lancee par Rosetta sur Apple Silicon
 
 Couvre : RD/WR et la rotation de LDRW, les macros de drapeaux, CALLF a 10 arguments (fonction traduite et fonction C) et 14 (t_args14),
+les accroches des mods (HOOK_ENTRY du PRELUDE, nds_hook_install de nitro-pc/calltab.c, chaine de deux accroches),
 les sous-routines internes (GOSUB_TAG, gs_), nds_call_target sur des adresses ARM et Thumb, et les fils verts de
 nitro-pc/context.c (OS_SaveContext/OS_LoadContext, nds_run_on_stack : deux fils sur des piles de la fenetre se
 passent la main un million de fois chacun).
@@ -130,6 +131,7 @@ def lift():
                 if int.from_bytes(raw[i:i + 4], "little") in targets}
     lifter = arm2c.Lifter(memory, symbols, None, code_ptr)
     lifter.sizes = {a: f[1] for a, f in funcs.items()}
+    lifter.hook_all = True  # comme native_build.py : chaque fonction passe par HOOK_ENTRY
     for _ in range(4):  # comme native_build.py : drapeaux et sous-routines se decouvrent au fil des passes
         before = len(lifter.flag_funcs) + len(lifter.gosub_funcs)
         lifter.unhandled = []
@@ -138,12 +140,13 @@ def lift():
             break
     if lifter.unhandled or lifter.new_subs:
         sys.exit("traduction incomplete : %s %s" % (lifter.unhandled, lifter.new_subs))
+    bodies[None] = lifter.hook_table()
     return funcs, bodies
 
 
 def check_text(bodies):
     """Ce que le traducteur doit ecrire (verifie sur le C, avant de le compiler)."""
-    all_c = "\n".join(bodies.values())
+    all_c = "\n".join(b for n, b in bodies.items() if n)
     rules = [
         ("pas de pointeur de l'hote sur 32 bits", "(u32)&" not in all_c),
         ("pas de goto *(void *)", "goto *(void *)" not in all_c),
@@ -154,6 +157,7 @@ def check_text(bodies):
         ("t_gosub : retours par GOSUB_RET", bodies["t_gosub"].count("GOSUB_RET(lr)") == 2 and "GOSUB_RET(pc_val)" in bodies["t_gosub"]),
         ("t_thumb : 2 retours dans gs_", bodies["t_thumb"].count("&&L") == 2),
         ("sans sous-routine, pas de gs_", "gs_" not in bodies["t_call10"]),
+        ("accroche a l'entree de chaque fonction", all("HOOK_ENTRY(%s, " % n in b for n, b in bodies.items() if n)),
     ]
     bad = [r for r, ok in rules if not ok]
     for r in bad:
@@ -169,8 +173,10 @@ def write_sources(out, funcs, bodies):
     host = [(a, n, t) for a, n, t in HOST]
     every = sorted([(a, f[0], f[2]) for a, f in funcs.items()] + host)
     lines = [arm2c.PRELUDE]
-    lines += ["extern u64 %s();" % n for _, n, _ in host]
+    # host, et les entrees HOOK_ENTRY (assembleur) des fonctions traduites
+    lines += ["extern u64 %s();" % n for _, n, _ in every]
     lines += [bodies[n] for _, n, _ in every if n in bodies]
+    lines.append(bodies[None])
     lines.append("const struct { u32 arm; void *x86; } nds_fn_table[] = {")
     lines += ["  {0x%08xu, (void *)%s}," % (a, n) for a, n, _ in every]
     lines.append("}; const unsigned nds_fn_count = %d;" % len(every))

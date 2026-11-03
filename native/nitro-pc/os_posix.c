@@ -7,6 +7,7 @@
 
 #include <crt_externs.h>
 #include <dispatch/dispatch.h>
+#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -124,6 +125,9 @@ static int write_all(int fd, const void *data, u32 size) {
     }
     return 0;
 }
+
+void *os_lib_open(const char *path) { return dlopen(path, RTLD_NOW | RTLD_LOCAL); }
+void *os_lib_sym(void *lib, const char *name) { return dlsym(lib, name); }
 
 void *os_file_load(const char *path, u32 *size) {
     int fd = open_retry(path, O_RDONLY, 0);

@@ -30,3 +30,5 @@ CreateEventA@16
 SetEvent@4
 WaitForSingleObject@8
 GetActiveProcessorCount@4
+LoadLibraryA@4
+GetProcAddress@8

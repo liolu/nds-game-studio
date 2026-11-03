@@ -118,6 +118,17 @@ bash native/tools/run_game.sh AJTP "<rom>" 60 --mute --save test.sav --dump capt
 - `--peek "image:adresse:taille:fichier,..."` copie de la mémoire dans un fichier ; `--poke "image:adresse:valeur,..."` y écrit un mot ; `--dumpfrom image` commence les captures plus tard.
 - `--keys "image:masque[/x/y],..."` : touches (bits de KEYINPUT : A=1, B=2, Select=4, Start=8, droite=16, gauche=32,
   haut=64, bas=128, R=256, L=512, X=1024, Y=2048) et stylet.
+- `--fixed-clock` : images reproductibles, pour comparer deux modules image par image. L'horloge avance de 1000 cycles à chaque lecture, sans attente ; le dessin et le son tournent dans le fil du jeu. Le jeu va aussi vite que le PC le permet : le temps d'un passage mesure le coût d'une image. Tom et Jerry et Rayman donnent les mêmes images à chaque passage ; Lego, en jeu, varie encore.
+
+## Mods natifs (essai, étape 0 de ROADMAP-MODS.md)
+
+- Chaque fonction traduite passe par une entrée en assembleur (`HOOK_ENTRY` de `arm2c.py`) : si un mod a rempli sa case `nds_hook_slot[k]`, elle saute à l'accroche, sinon au corps traduit `f__o`. Les arguments ne sont pas recopiés. `native_build.py --no-hooks` enlève ce test, pour les mesures.
+- `--plugin a.dll,b.dll` charge des bibliothèques qui exportent `nds_mod_load(api)` (`mods.c`) ; `--no-mods` n'en charge aucune. `api->hook(adresse, remplacement, &original)` : le dernier mod chargé passe en premier et `original` mène au suivant, puis au jeu (`nds_hook_install`, `calltab.c`). Un mod qui ne se charge pas est refusé avec la raison, et le jeu démarre sans lui.
+- L'interface n'est pas encore figée : c'est l'étape 1.
+
+## Windows 64 bits (essai)
+
+`native_build.py --arch x86_64` sous Windows : la mémoire DS passe dans une fenêtre de 4 Go, comme sur Mac (`os_mem_window` de `os_win32.c`), et `context.c` suit l'ABI Windows x64. Sur Tom et Jerry et Rayman, les images sont les mêmes qu'en 32 bits sur 6000 images. Le module est plus gros (+37 % sur Tom et Jerry, +33 % sur Lego) et pas plus lent. Un mod 64 bits peut se servir de la bibliothèque C (UCRT). Le launcher lance toujours le 32 bits.
 
 ## Image
 

@@ -641,9 +641,17 @@ static void engine_output(const Eng *e, int index, int k, int w, int h, int marg
 /* ------------------------------------------------------------------ boucle du fil de rendu */
 static u32 *back_top, *back_bottom;
 
+static void render_once(void);
+
 static void render_thread(void *arg) {
     for (;;) {
         os_event_wait(worker_event);
+        render_once();
+    }
+}
+
+static void render_once(void) {
+    {
         int k, ds_width;
         present_config(&k, &ds_width);
         int w = ds_width * k, h = 192 * k;
@@ -681,9 +689,10 @@ void gfx_render(void) {
             os_thread_start(pool_thread, (void *)(uptr)i, 0x40000);
         }
         worker_event = os_event_create();
-        os_thread_start(render_thread, 0, 0x40000);
+        if (!nds_fixed_clock) os_thread_start(render_thread, 0, 0x40000);
     }
     gx_begin_frame();
+    if (nds_fixed_clock) { snapshot_take(); render_once(); return; } /* chaque image, dans l'ordre */
     if (worker_busy) return; /* le dessin precedent n'est pas fini : cette image n'est pas dessinee, le jeu continue */
     worker_busy = 1;
     snapshot_take();

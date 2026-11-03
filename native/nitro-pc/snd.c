@@ -19,7 +19,7 @@ static float pitch_table[768];   /* demi-ton / 64 -> rapport */
 static s16 vel_table[128];       /* volume 0..127 -> 1/10 dB */
 
 static double ln(double x) {
-#if defined(__i386__) /* sans libm sous Windows */
+#if defined(__i386__) || defined(_WIN32) /* sans libm sous Windows */
     double r;
     __asm__("fldln2\n fxch\n fyl2x" : "=t"(r) : "0"(x) : "st(1)");
     return r;
@@ -899,11 +899,17 @@ static void audio_thread(void *arg) {
     }
 }
 
+/* --fixed-clock : pas de fil audio, le son avance d'une image a chaque VBlank */
+void snd_fixed_frame(void) {
+    static s16 buf[(RATE / 60 + 1) * 2];
+    mix(buf, RATE / 60);
+}
+
 void snd_start_output(void) {
     tables_init();
     for (int p = 0; p < PLAYERS; p++)
         for (int t = 0; t < 16; t++) players[p].tracks[t] = 0xFF;
     for (int t = 0; t < TRACKS; t++) tracks[t].index = (u8)t;
     if (nds_arg("--mute", 0)) master = 0;
-    os_thread_start(audio_thread, 0, 0x40000);
+    if (!nds_fixed_clock) os_thread_start(audio_thread, 0, 0x40000);
 }

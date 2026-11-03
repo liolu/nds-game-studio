@@ -40,3 +40,25 @@ uptr nds_call_target(u32 a) {
     if (!f) nds_fatal("saut vers une adresse DS sans fonction : %x", a);
     return f;
 }
+
+/* ------------------------------------------------------------------ accroches des mods (mods.c)
+ * fin de lifted.c (arm2c.Lifter.hook_table) : une case par fonction traduite, triee par adresse DS */
+extern void *nds_hook_slot[];
+extern const struct { u32 arm; u32 slot; void *orig; } nds_hook_table[];
+extern const unsigned nds_hook_count;
+
+/* Le dernier installe passe en premier : *original recoit l'accroche precedente, ou le corps traduit. */
+int nds_hook_install(u32 addr, void *fn, void **original) {
+    u32 key = addr & ~1u;
+    unsigned lo = 0, hi = nds_hook_count;
+    while (lo < hi) {
+        unsigned mid = (lo + hi) / 2;
+        if (nds_hook_table[mid].arm < key) lo = mid + 1;
+        else hi = mid;
+    }
+    if (lo >= nds_hook_count || nds_hook_table[lo].arm != key) return -1;
+    void **slot = &nds_hook_slot[nds_hook_table[lo].slot];
+    if (original) *original = *slot ? *slot : nds_hook_table[lo].orig;
+    *slot = fn;
+    return 0;
+}

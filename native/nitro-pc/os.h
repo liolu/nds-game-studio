@@ -44,6 +44,10 @@ u32 os_stdin_read(void *buf, u32 max);
 /* Decoupe la ligne de commande : argv[0] = le programme. Renvoie argc (au plus `max`). Les chaines restent valides. */
 int os_get_args(const char **argv, int max);
 
+/* Bibliotheque partagee (mods natifs) : 0 si elle ne se charge pas ; os_lib_sym : 0 si le nom manque. */
+void *os_lib_open(const char *path);
+void *os_lib_sym(void *lib, const char *name);
+
 /* ------------------------------------------------------------------ fils */
 typedef void (*OsThreadFn)(void *arg);
 typedef void *OsEvent;

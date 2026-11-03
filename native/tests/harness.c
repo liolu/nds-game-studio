@@ -237,6 +237,38 @@ static void test_gosub(void) {
     CHECK_EQ((u32)C1(t_thumb, 2), 17);
 }
 
+/* accroches des mods : HOOK_ENTRY de chaque fonction traduite, nds_hook_install de calltab.c */
+int nds_hook_install(u32 addr, void *fn, void **original);
+typedef u64 (*HookFn)(u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32);
+static HookFn smax_a, smax_b, pack_a;
+#define HOOK_ARGS u32 r0, u32 r1, u32 r2, u32 r3, u32 a0, u32 a1, u32 a2, u32 a3, u32 a4, u32 a5, u32 a6, u32 a7, u32 a8, u32 a9
+#define HOOK_PASS(x, y) x, y, r2, r3, a0, a1, a2, a3, a4, a5, a6, a7, a8, a9
+static u64 hook_smax_a(HOOK_ARGS) { return smax_a(HOOK_PASS(r0, r1)) + 100; }
+static u64 hook_smax_b(HOOK_ARGS) { return smax_b(HOOK_PASS(r1, r0)) + 1000; }
+static u64 hook_pack(HOOK_ARGS) { return pack_a(HOOK_PASS(r0, r1)) + 1; }
+
+static void test_hooks(void) {
+    CHECK_EQ((u32)C2(t_smax, 5, 3), 5);
+    CHECK_EQ(nds_hook_install(A_t_smax, (void *)hook_smax_a, (void **)&smax_a), 0);
+    CHECK_EQ((u32)C2(t_smax, 5, 3), 105);              /* appel direct */
+    {   /* pointeur de code du jeu */
+        u32 r0 = 5, r1 = 3, r2 = 0, r3 = 0, sp = 0x02200000u;
+        CALLF(nds_call_target(A_t_smax));
+        CHECK_EQ(r0, 105);
+    }
+    CHECK_EQ(nds_hook_install(A_t_smax, (void *)hook_smax_b, (void **)&smax_b), 0);
+    CHECK_EQ(smax_b == hook_smax_a, 1);                /* le dernier installe recoit le precedent */
+    CHECK_EQ((u32)C2(t_smax, 5, 3), 1105);
+    CHECK_EQ(nds_hook_install(A_t_pack10, (void *)hook_pack, (void **)&pack_a), 0);
+    CHECK_EQ(C1(t_call10, 0), PACK10 + 1);             /* bl d'une fonction traduite vers une autre */
+    CHECK_EQ(nds_hook_install(A_t_smax + 4, (void *)hook_smax_a, 0), -1); /* pas une entree de fonction */
+    CHECK_EQ(nds_hook_install(A_h_pack10, (void *)hook_smax_a, 0), -1);   /* fonction de l'hote */
+    nds_hook_install(A_t_smax, 0, 0);
+    nds_hook_install(A_t_pack10, 0, 0);
+    CHECK_EQ((u32)C2(t_smax, 5, 3), 5);
+    CHECK_EQ(C1(t_call10, 0), PACK10);
+}
+
 static void test_call_target(void) {
     CHECK_EQ(nds_call_target(A_t_gosub), (uptr)t_gosub);
     CHECK_EQ(nds_call_target(A_t_gosub | 1), (uptr)t_gosub);
@@ -366,6 +398,7 @@ static void *run_tests(void *arg) {
     test_callf();
     test_gosub();
     test_call_target();
+    test_hooks();
     test_context();
     return arg;
 }

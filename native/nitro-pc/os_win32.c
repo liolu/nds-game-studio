@@ -1,11 +1,12 @@
-/* Couche systeme pour Windows 32 bits : tous les appels Win32 du runtime sont ici (kernel32.def, winmm.def). */
+/* Couche systeme pour Windows, 32 ou 64 bits : tous les appels Win32 du runtime sont ici (kernel32.def, winmm.def).
+ * DWORD = unsigned long (32 bits dans les deux cas) ; SIZE_T, DWORD_PTR et SOCKET = uptr (taille d'un pointeur). */
 #include "nitro.h"
 #include "os.h"
 
 #define WINAPI __attribute__((stdcall))
 #define IMPORT __attribute__((dllimport))
-IMPORT void *WINAPI VirtualAlloc(void *, unsigned long, unsigned long, unsigned long);
-IMPORT int WINAPI VirtualProtect(void *, unsigned long, unsigned long, unsigned long *);
+IMPORT void *WINAPI VirtualAlloc(void *, uptr, unsigned long, unsigned long);
+IMPORT int WINAPI VirtualProtect(void *, uptr, unsigned long, unsigned long *);
 IMPORT void *WINAPI AddVectoredExceptionHandler(unsigned long, void *);
 IMPORT void *WINAPI CreateFileA(const char *, unsigned long, unsigned long, void *, unsigned long, unsigned long, void *);
 IMPORT int WINAPI ReadFile(void *, void *, unsigned long, unsigned long *, void *);
@@ -18,8 +19,8 @@ IMPORT void WINAPI Sleep(unsigned long);
 IMPORT int WINAPI QueryPerformanceCounter(s64 *);
 IMPORT int WINAPI QueryPerformanceFrequency(s64 *);
 IMPORT const char *WINAPI GetCommandLineA(void);
-IMPORT void *WINAPI MapViewOfFile(void *, unsigned long, unsigned long, unsigned long, unsigned long);
-IMPORT void *WINAPI CreateThread(void *, unsigned long, void *, void *, unsigned long, unsigned long *);
+IMPORT void *WINAPI MapViewOfFile(void *, unsigned long, unsigned long, unsigned long, uptr);
+IMPORT void *WINAPI CreateThread(void *, uptr, void *, void *, unsigned long, unsigned long *);
 IMPORT int WINAPI SetThreadPriority(void *, int);
 IMPORT void *WINAPI GetCurrentThread(void);
 IMPORT void *WINAPI OpenFileMappingA(unsigned long, int, const char *);
@@ -33,17 +34,40 @@ IMPORT void *WINAPI CreateEventA(void *, int, int, const char *);
 IMPORT int WINAPI SetEvent(void *);
 IMPORT unsigned long WINAPI WaitForSingleObject(void *, unsigned long);
 IMPORT unsigned long WINAPI GetActiveProcessorCount(unsigned short);
+IMPORT void *WINAPI LoadLibraryA(const char *);
+IMPORT void *WINAPI GetProcAddress(void *, const char *);
 IMPORT unsigned WINAPI timeBeginPeriod(unsigned);
-IMPORT unsigned WINAPI waveOutOpen(void **, unsigned, const void *, unsigned long, unsigned long, unsigned long);
+IMPORT unsigned WINAPI waveOutOpen(void **, unsigned, const void *, uptr, uptr, unsigned long);
 IMPORT unsigned WINAPI waveOutPrepareHeader(void *, void *, unsigned);
 IMPORT unsigned WINAPI waveOutWrite(void *, void *, unsigned);
 
+#define MEM_COMMIT 0x1000
+#define MEM_RESERVE 0x2000
 #define MEM_COMMIT_RESERVE 0x3000
 #define PAGE_NOACCESS 1
 #define PAGE_READWRITE 4
 
+/* ------------------------------------------------------------------ bibliotheques */
+void *os_lib_open(const char *path) { return LoadLibraryA(path); }
+void *os_lib_sym(void *lib, const char *name) { return GetProcAddress(lib, name); }
+
 /* ------------------------------------------------------------------ memoire */
+#if !NDS_IDENTITY
+/* 64 bits : la memoire DS est dans une fenetre reservee (comme sur Mac, os_posix.c) ; os_mem_alloc y engage les zones */
+#define WINDOW_SIZE (0x100000000ull + 0x10000u)
+static u8 *window;
+
+void *os_mem_window(void) {
+    if (!window) window = VirtualAlloc(0, WINDOW_SIZE, MEM_RESERVE, PAGE_NOACCESS);
+    return window;
+}
+#endif
+
 void *os_mem_alloc(void *want, u32 size) {
+#if !NDS_IDENTITY
+    if (want && window && (u8 *)want >= window && (u8 *)want - window < WINDOW_SIZE)
+        return VirtualAlloc(want, size, MEM_COMMIT, PAGE_READWRITE);
+#endif
     return VirtualAlloc(want, size, MEM_COMMIT_RESERVE, PAGE_READWRITE);
 }
 
@@ -139,7 +163,7 @@ static struct { OsThreadFn fn; void *arg; } starts[MAX_STARTS];
 static volatile long start_count;
 
 static unsigned long WINAPI thread_entry(void *param) {
-    int i = (int)(u32)param;
+    int i = (int)(uptr)param;
     starts[i].fn(starts[i].arg);
     return 0;
 }
@@ -149,7 +173,7 @@ int os_thread_start(OsThreadFn fn, void *arg, u32 stack_size) {
     if (i >= MAX_STARTS) return 0;
     starts[i].fn = fn;
     starts[i].arg = arg;
-    return CreateThread(0, stack_size, thread_entry, (void *)(u32)i, 0, 0) != 0;
+    return CreateThread(0, stack_size, thread_entry, (void *)(uptr)i, 0, 0) != 0;
 }
 
 void os_thread_set_high_priority(void) { SetThreadPriority(GetCurrentThread(), 2); }
@@ -170,14 +194,25 @@ void *os_thread_self(void) {
 }
 
 int os_thread_sample(void *thread, uptr *ip, uptr *sp) {
-    /* CONTEXT x86 : ContextFlags = CONTEXT_CONTROL (0x10001) ; Eip (184) et Esp (196) servent */
-    static u32 ctx[256];
-    ctx[0] = 0x10001;
+    static u64 ctx[160] __attribute__((aligned(16))); /* CONTEXT : 716 octets en x86, 1232 en x64 */
+#if defined(__x86_64__)
+    /* CONTEXT x64 : ContextFlags (0x30) = CONTEXT_CONTROL (0x100001) ; Rsp (0x98) et Rip (0xF8) servent */
+    *(u32 *)((u8 *)ctx + 0x30) = 0x100001;
     SuspendThread(thread);
     GetThreadContext(thread, ctx);
     ResumeThread(thread);
-    *ip = ctx[184 / 4];
-    *sp = ctx[196 / 4];
+    *ip = *(u64 *)((u8 *)ctx + 0xF8);
+    *sp = *(u64 *)((u8 *)ctx + 0x98);
+#else
+    /* CONTEXT x86 : ContextFlags = CONTEXT_CONTROL (0x10001) ; Eip (184) et Esp (196) servent */
+    u32 *c = (u32 *)ctx;
+    c[0] = 0x10001;
+    SuspendThread(thread);
+    GetThreadContext(thread, c);
+    ResumeThread(thread);
+    *ip = c[184 / 4];
+    *sp = c[196 / 4];
+#endif
     return 1;
 }
 
@@ -222,14 +257,23 @@ void *os_shm_open(const char *name) {
 #define EXC_CONTINUE (-1)
 #define EXC_NEXT 0
 
-typedef struct { u32 code, flags; void *rec; void *addr; u32 nparams; u32 info[15]; } ExcRecord;
+typedef struct { u32 code, flags; void *rec; void *addr; u32 nparams; uptr info[15]; } ExcRecord;
 typedef struct { ExcRecord *rec; u8 *ctx; } ExcPointers;
-/* CONTEXT x86 : seuls Ebp (180), Eip (184), EFlags (192) et Esp (196) servent */
 #define CTX_U32(c, off) (*(u32 *)((c) + (off)))
+#define CTX_PTR(c, off) (*(uptr *)((c) + (off)))
+#if defined(__x86_64__)
+/* CONTEXT x64 : EFlags (0x44), Rsp (0x98), Rbp (0xA0), Rip (0xF8) */
+#define CTX_EBP 0xA0
+#define CTX_EIP 0xF8
+#define CTX_EFLAGS 0x44
+#define CTX_ESP 0x98
+#else
+/* CONTEXT x86 : seuls Ebp (180), Eip (184), EFlags (192) et Esp (196) servent */
 #define CTX_EBP 180
 #define CTX_EIP 184
 #define CTX_EFLAGS 192
 #define CTX_ESP 196
+#endif
 
 static OsFaultFn fault_fn;
 
@@ -251,7 +295,7 @@ void os_fault_install(OsFaultFn fn) {
 }
 
 uptr os_fault_reg(const OsFault *f, int reg) {
-    return CTX_U32((u8 *)f->ctx, reg == OS_REG_SP ? CTX_ESP : CTX_EBP);
+    return CTX_PTR((u8 *)f->ctx, reg == OS_REG_SP ? CTX_ESP : CTX_EBP);
 }
 
 void os_fault_set_step(OsFault *f, int on) {
@@ -261,10 +305,10 @@ void os_fault_set_step(OsFault *f, int on) {
 
 void os_fault_call(OsFault *f, void (*fn)(void)) {
     u8 *c = f->ctx;
-    u32 esp = CTX_U32(c, CTX_ESP) - 4;
-    *(u32 *)esp = CTX_U32(c, CTX_EIP);
-    CTX_U32(c, CTX_ESP) = esp;
-    CTX_U32(c, CTX_EIP) = (u32)fn;
+    uptr sp = CTX_PTR(c, CTX_ESP) - sizeof(uptr);
+    *(uptr *)sp = CTX_PTR(c, CTX_EIP);
+    CTX_PTR(c, CTX_ESP) = sp;
+    CTX_PTR(c, CTX_EIP) = (uptr)fn;
 }
 
 /* ------------------------------------------------------------------ son : waveOut, six tampons en anneau */
@@ -275,9 +319,11 @@ typedef struct {
 } __attribute__((packed)) WaveFmt;
 typedef struct {
     void *data;
-    u32 len, recorded, user, flags, loops;
+    u32 len, recorded;
+    uptr user;
+    u32 flags, loops;
     void *next;
-    u32 reserved;
+    uptr reserved;
 } WaveHdr;
 
 #define BUFFERS 6
@@ -325,18 +371,18 @@ void os_audio_submit(OsAudio *a) {
 
 /* ------------------------------------------------------------------ reseau TCP */
 typedef struct { u16 family, port; u32 addr; u8 zero[8]; } SockAddr;
-typedef struct { u32 name, aliases; u16 type, length; u32 **list; } HostEnt;
+typedef struct { char *name; char **aliases; s16 type, length; u32 **list; } HostEnt;
 IMPORT int WINAPI WSAStartup(u16, void *);
-IMPORT u32 WINAPI socket(int, int, int);
-IMPORT int WINAPI bind(u32, const SockAddr *, int);
-IMPORT int WINAPI listen(u32, int);
-IMPORT u32 WINAPI accept(u32, SockAddr *, int *);
-IMPORT int WINAPI connect(u32, const SockAddr *, int);
-IMPORT int WINAPI send(u32, const void *, int, int);
-IMPORT int WINAPI recv(u32, void *, int, int);
-IMPORT int WINAPI closesocket(u32);
-IMPORT int WINAPI ioctlsocket(u32, long, u32 *);
-IMPORT int WINAPI setsockopt(u32, int, int, const void *, int);
+IMPORT uptr WINAPI socket(int, int, int);
+IMPORT int WINAPI bind(uptr, const SockAddr *, int);
+IMPORT int WINAPI listen(uptr, int);
+IMPORT uptr WINAPI accept(uptr, SockAddr *, int *);
+IMPORT int WINAPI connect(uptr, const SockAddr *, int);
+IMPORT int WINAPI send(uptr, const void *, int, int);
+IMPORT int WINAPI recv(uptr, void *, int, int);
+IMPORT int WINAPI closesocket(uptr);
+IMPORT int WINAPI ioctlsocket(uptr, long, u32 *);
+IMPORT int WINAPI setsockopt(uptr, int, int, const void *, int);
 IMPORT int WINAPI WSAGetLastError(void);
 IMPORT u32 WINAPI inet_addr(const char *);
 IMPORT HostEnt *WINAPI gethostbyname(const char *);
@@ -359,7 +405,7 @@ static void tcp_setup(u32 s) {
 
 u32 os_tcp_listen(u32 port) {
     tcp_start();
-    u32 s = socket(2, 1, 6), on = 1;
+    u32 s = (u32)socket(2, 1, 6), on = 1;
     if (s == OS_NO_SOCKET) return s;
     setsockopt(s, 0xFFFF, 4, &on, 4); /* SO_REUSEADDR */
     SockAddr at = {2, (u16)(port << 8 | port >> 8), 0, {0}};
@@ -372,7 +418,7 @@ u32 os_tcp_listen(u32 port) {
 }
 
 u32 os_tcp_accept(u32 listener) {
-    u32 s = accept(listener, 0, 0);
+    u32 s = (u32)accept(listener, 0, 0);
     if (s != OS_NO_SOCKET) tcp_setup(s);
     return s;
 }
@@ -385,7 +431,7 @@ u32 os_tcp_connect(const char *host, u32 port) {
         if (!found || !found->list || !found->list[0]) return OS_NO_SOCKET;
         addr = *found->list[0];
     }
-    u32 s = socket(2, 1, 6);
+    u32 s = (u32)socket(2, 1, 6);
     if (s == OS_NO_SOCKET) return s;
     tcp_setup(s);
     SockAddr at = {2, (u16)(port << 8 | port >> 8), addr, {0}};
