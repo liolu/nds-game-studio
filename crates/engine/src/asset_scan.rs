@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::i18n::{t, tr};
 
 /// À changer quand le calcul change : l'index gardé est alors refait.
-const INDEX_VERSION: u32 = 13;
+const INDEX_VERSION: u32 = 14;
 const BIG_FILE: usize = 4 << 20;
 
 /// Une rom du dossier `rom` du launcher.
@@ -141,9 +141,15 @@ pub fn scan(rom_path: &Path) -> Vec<Entry> {
         let kind = guess_hom_format(kind, &path, data, is_hom);
         let dir = path.rsplit_once('/').map_or(String::new(), |(d, _)| d.to_string());
         let stem = stem_of(&path);
+        // Une table de positions au début d'un `.rom` (`SoundData.rom` des Sims 2) : des données en morceaux
+        let kind = if kind == Kind::Other && path.to_lowercase().ends_with(".rom") && !table_members(data).is_empty() { Kind::GameData } else { kind };
         entries.push(Entry { path: path.clone(), member_name: None, rom: rom_path.to_path_buf(), span, member: None, kind, size, dir, stem, rom_index: None });
         if path.rsplit('/').next().is_some_and(|n| n.eq_ignore_ascii_case("rom.bin")) {
             rom_bin = scan_rom_bin(rom_path, data, file.start);
+            // L'archive elle-même : sa table
+            if !rom_bin.is_empty() {
+                entries.last_mut().unwrap().kind = Kind::GameData;
+            }
         }
         if kind == Kind::NestedRom {
             // Une mini-rom a son propre NitroFS ; ses positions comptent depuis son début
@@ -682,6 +688,44 @@ fn bmg_lines(bytes: &[u8]) -> Vec<String> {
     lines
 }
 
+/// Ce que montre un fichier de données : sa table de morceaux, ses blocs nommés (`GMD1`, `XFRM`...) ou ses valeurs
+/// (u32 en hexadécimal et en virgule fixe 20.12 de la DS), puis ses textes et ses octets. Et le nom de cette forme.
+fn game_data_lines(bytes: &[u8]) -> (Vec<String>, String) {
+    const MOST_LINES: usize = 256;
+    let u32_at = |at: usize| bytes.get(at..at + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    let mut lines = Vec::new();
+    let what;
+    let members = table_members(bytes);
+    let tag = |at: usize| bytes.get(at..at + 4).filter(|t| t.iter().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == 0) && t[0].is_ascii_uppercase()).map(|t| String::from_utf8_lossy(t).trim_end_matches('\0').to_string());
+    if members.len() >= 2 {
+        what = t!("table of {} parts", "table de {} morceaux", members.len());
+        lines.extend(members.iter().take(MOST_LINES).enumerate().map(|(n, (start, end))| t!("{n:5}  at {start:#x}  {}", "{n:5}  a {start:#x}  {}", size_text(end - start))));
+    } else if let Some(name) = tag(0) {
+        what = name.clone();
+        lines.push(t!("{name} file", "fichier {name}"));
+        // Blocs : 4 lettres puis la taille
+        let mut at = 8;
+        while let (Some(block), Some(size)) = (tag(at), u32_at(at + 4)) {
+            lines.push(t!("block {block} at {at:#x}, {}", "bloc {block} a {at:#x}, {}", size_text(size as usize)));
+            at += 8 + size as usize;
+            if size == 0 || lines.len() > MOST_LINES {
+                break;
+            }
+        }
+    } else {
+        what = format!("{:02x}{:02x}", bytes.first().copied().unwrap_or(0), bytes.get(1).copied().unwrap_or(0));
+    }
+    lines.push(String::new());
+    lines.push(tr("offset   u32 (hex)  fixed 20.12", "position u32 (hexa)  virgule fixe 20.12").into());
+    for at in (0..bytes.len().min(MOST_LINES * 4)).step_by(4) {
+        let Some(v) = u32_at(at) else { break };
+        lines.push(format!("{at:#07x}  {v:08x}  {:>12.4}", v as i32 as f64 / 4096.0));
+    }
+    lines.push(String::new());
+    lines.extend(text_lines(bytes));
+    (lines, what)
+}
+
 /// Les fichiers Nitro collés dans un fichier maison (`.dat`, souvent) : leur en-tête donne leur taille.
 fn embedded_files(bytes: &[u8]) -> Vec<(usize, usize, &'static str)> {
     const SIGNATURES: [(&[u8; 4], &str); 12] = [
@@ -718,20 +762,65 @@ fn embedded_files(bytes: &[u8]) -> Vec<(usize, usize, &'static str)> {
 
 /// Les fichiers de l'archive numérotée rom.bin : `rom.bin#n`, nommés `<n sur 5 chiffres>.<ext>`.
 fn scan_rom_bin(rom_path: &Path, data: &[u8], base: usize) -> Vec<Entry> {
-    romarc::entries(data)
-        .into_iter()
+    let files: Vec<(usize, usize, Vec<u8>)> = romarc::entries(data).into_iter().map(|(at, size)| (at, size, unpack(romarc::unpack(&data[at..at + size])))).collect();
+    let mut kinds: Vec<(Kind, &str)> = files
+        .iter()
+        .map(|(_, _, bytes)| {
+            let kind = sniff(bytes);
+            if kind == Kind::Other && g2d::read_rom_image(bytes).is_some() { (Kind::RomImage, "img") } else { (kind, romarc::extension(bytes)) }
+        })
+        .collect();
+    rom_bin_house_formats(&files.iter().map(|f| f.2.as_slice()).collect::<Vec<_>>(), &mut kinds);
+    files
+        .iter()
+        .zip(kinds)
         .enumerate()
-        .map(|(n, (at, size))| {
-            let bytes = unpack(romarc::unpack(&data[at..at + size]));
-            let mut kind = sniff(&bytes);
-            let mut ext = romarc::extension(&bytes);
-            if kind == Kind::Other && g2d::read_rom_image(&bytes).is_some() {
-                (kind, ext) = (Kind::RomImage, "img");
-            }
+        .map(|(n, ((at, size, bytes), (kind, ext)))| {
             let name = format!("{n:05}.{ext}");
             Entry { path: format!("rom.bin#{n}"), member_name: Some(name), rom: rom_path.to_path_buf(), span: (base + at, base + at + size), member: None, kind, size: bytes.len(), dir: "rom.bin".into(), stem: n.to_string(), rom_index: Some(n as u32) }
         })
         .collect()
+}
+
+/// Les fichiers sans signature de rom.bin des Sims 2, reconnus avec leurs voisins : un sprite a ses tuiles juste avant
+/// et sa palette juste après ; une image 8 bpp sans palette a la sienne juste avant ; le reste des palettes se
+/// reconnaît à ses couleurs (bit 15 à 0).
+fn rom_bin_house_formats(files: &[&[u8]], kinds: &mut [(Kind, &str)]) {
+    let other = |kinds: &[(Kind, &str)], n: usize| kinds.get(n).is_some_and(|k| k.0 == Kind::Other);
+    let palette_like = |b: &[u8]| !b.is_empty() && b.len() <= 512 && b.len() % 32 == 0;
+    for n in 1..files.len().saturating_sub(1) {
+        if !other(kinds, n) || !other(kinds, n - 1) || !other(kinds, n + 1) || !palette_like(files[n + 1]) {
+            continue;
+        }
+        let Some(sprite) = g2d::read_rom_sprite(files[n]) else { continue };
+        if g2d::rom_sprite_tiles(&sprite, 0, files[n - 1]).is_some() {
+            kinds[n - 1] = (Kind::RawTiles, "chr");
+            kinds[n] = (Kind::RomSprite, "spr");
+            kinds[n + 1] = (Kind::RawPalette, "pal");
+        }
+    }
+    for n in 0..files.len() {
+        if !other(kinds, n) {
+            continue;
+        }
+        match g2d::rom_bitmap_shape(files[n]) {
+            Some((_, _, true)) => kinds[n] = (Kind::RomBitmap, "bm8"),
+            Some((_, _, false)) if n > 0 && files[n - 1].len() == 512 && matches!(kinds[n - 1].0, Kind::Other | Kind::RawPalette) => {
+                kinds[n] = (Kind::RomBitmap, "bm8");
+                kinds[n - 1] = (Kind::RawPalette, "pal");
+            }
+            _ => {}
+        }
+    }
+    for (n, bytes) in files.iter().enumerate() {
+        if other(kinds, n) && palette_like(bytes) && bytes.chunks_exact(2).all(|c| c[1] & 0x80 == 0) {
+            kinds[n] = (Kind::RawPalette, "pal");
+        }
+    }
+    // Le reste : objets, niveaux (BSP), modèles maison (GMD1), tables
+    for kind in kinds.iter_mut().filter(|k| k.0 == Kind::Other) {
+        kind.0 = Kind::GameData;
+    }
 }
 
 fn read_span(rom: &Path, (start, end): (usize, usize)) -> Result<Vec<u8>, String> {
@@ -939,6 +1028,12 @@ pub fn choices_for(entries: &[Entry], sel: usize) -> Choices {
             c.tiles = companions(entries, sel, &[Kind::RawTiles]);
             c.palettes = companions(entries, sel, &[Kind::RawPalette]);
         }
+        Kind::RomSprite => {
+            c.tiles = companions(entries, sel, &[Kind::RawTiles]);
+            c.palettes = companions(entries, sel, &[Kind::RawPalette]);
+        }
+        Kind::RomBitmap => c.palettes = companions(entries, sel, &[Kind::RawPalette]),
+        Kind::RomImage if read_entry(&entries[sel]).is_ok_and(|b| g2d::rom_image_needs_palette(&b)) => c.palettes = companions(entries, sel, &[Kind::RawPalette]),
         Kind::JLayout => {
             c.linked = companions(entries, sel, &[Kind::JCells]);
             // La palette va avec les cellules (`training_obj`), pas avec la mise en page (`training`)
@@ -1059,6 +1154,7 @@ pub fn kind_text(kind: Kind) -> &'static str {
         "video" => "video",
         "compresse" => tr("compressed", "compresse"),
         "vide" => tr("empty", "vide"),
+        "donnees" => tr("game data", "donnees du jeu"),
         other => other,
     }
 }
@@ -1402,9 +1498,36 @@ fn decode_inner(entries: &[Entry], sel: usize, c: &mut Choices) -> Result<Decode
             Ok(Decoded::Image { rgba: g2d::render_tiles(&tiles, &palette, 0, c.width), info })
         }
         Kind::RomImage => {
-            let image = g2d::read_rom_image(&bytes).ok_or(tr("unreadable image", "image illisible"))?;
+            let palette = if g2d::rom_image_needs_palette(&bytes) { load(&c.palettes, c.palette)?.map(|p| g2d::raw_palette(&p)) } else { None };
+            let image = g2d::read_rom_image_with(&bytes, palette.as_ref()).ok_or(tr("unreadable image", "image illisible"))?;
             let info = t!("{} x {} pixels, {} bpp", "{} x {} pixels, {} bpp", image.rgba.width, image.rgba.height, if image.bpp8 { 8 } else { 4 });
             Ok(Decoded::Image { rgba: image.rgba, info })
+        }
+        Kind::RomSprite => {
+            let sprite = g2d::read_rom_sprite(&bytes).ok_or(tr("unreadable sprite", "sprite illisible"))?;
+            let tiles = load(&c.tiles, c.tile)?.ok_or(tr("no tile file found", "aucun fichier de tuiles trouve"))?;
+            let palette = match load(&c.palettes, c.palette)? {
+                Some(p) => g2d::raw_palette(&p),
+                None => grey_palette(&g2d::raw_tiles(&[], None)),
+            };
+            let count = sprite.frames.len();
+            let info = t!("sprite {} x {}, {} frames", "sprite {} x {}, {} images", sprite.width, sprite.height, count);
+            let frames: Vec<Rgba> = (0..count).map(|f| g2d::rom_sprite_tiles(&sprite, f, &tiles).map(|t| g2d::render_rom_sprite(&sprite, f, &t, &palette))).collect::<Option<_>>().ok_or(tr("the tiles do not match the sprite", "les tuiles ne vont pas avec le sprite"))?;
+            if count == 1 {
+                return Ok(Decoded::Image { rgba: frames.into_iter().next().unwrap(), info });
+            }
+            // Le rythme de l'animation n'est pas dans le fichier : 10 images par seconde
+            Ok(Decoded::Frames { frames: frames.into_iter().map(|f| (f, 6)).collect(), info })
+        }
+        Kind::RomBitmap => {
+            let palette = load(&c.palettes, c.palette)?.map(|p| g2d::raw_palette(&p));
+            let rgba = g2d::render_rom_bitmap(&bytes, palette.as_ref()).ok_or(tr("no palette found", "aucune palette trouvee"))?;
+            let info = format!("{}x{}, 8 bpp", rgba.width, rgba.height);
+            Ok(Decoded::Image { rgba, info })
+        }
+        Kind::GameData => {
+            let (lines, what) = game_data_lines(&bytes);
+            Ok(Decoded::Text { lines, info: t!("Game data ({}): its structure, not drawn", "Donnees du jeu ({}) : leur structure, pas de dessin", what) })
         }
         Kind::AnmFile => Ok(Decoded::Text { lines: anm_lines(&bytes), info: t!("Animation not played: its content", "Animation pas jouee : son contenu") }),
         Kind::ZImage => {
@@ -1463,7 +1586,9 @@ fn decode_inner(entries: &[Entry], sel: usize, c: &mut Choices) -> Result<Decode
             Ok(Decoded::Image { rgba: p.swatches(), info: t!("{} colors", "{} couleurs", p.colors.len()) })
         }
         Kind::RawTiles | Kind::RawScreen => {
-            let unpacked = |b: Vec<u8>| decompress_any(&b).unwrap_or(b);
+            // Les tuiles codées d'un sprite de rom.bin : celles de sa première image
+            let rom_bin = entries[sel].rom_index.is_some();
+            let unpacked = |b: Vec<u8>| decompress_any(&b).or_else(|| rom_bin.then(|| g2d::read_rom_tiles(&b, 0, 64 * 1024)).flatten()).unwrap_or(b);
             let palette = load(&c.palettes, c.palette)?.map(|p| g2d::raw_palette(&unpacked(p)));
             let tiles_bytes = if kind == Kind::RawTiles { Some(bytes.clone()) } else { load(&c.tiles, c.tile)? };
             let tiles = g2d::raw_tiles(&unpacked(tiles_bytes.ok_or(tr("no tile file (.nbfc) found", "aucun fichier de tuiles (.nbfc) trouve"))?), palette.as_ref());
