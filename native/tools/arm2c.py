@@ -105,6 +105,12 @@ static inline s32 SAT32(s64 v) { return v > 0x7FFFFFFFLL ? 0x7FFFFFFF : v < -0x8
 #elif defined(__aarch64__)
 #define HOOK_ENTRY(f, k) __asm__(".text\\n.globl " HK_SYM(f) "\\n.p2align 2\\n" HK_SYM(f) ":\\n  adrp x16, " HK_SYM(nds_hook_slot) "@PAGE\\n  add x16, x16, " HK_SYM(nds_hook_slot) "@PAGEOFF\\n  mov x17, #" #k "\\n  ldr x16, [x16, x17, lsl #3]\\n  cbnz x16, 1f\\n  b " HK_SYM(f##__o) "\\n1:  br x16\\n")
 #endif
+/* accroches a une instruction (Lifter.insn_hooks) : registres dans nds_regs, rendus au code apres les rappels des mods */
+extern void *nds_insn_slot[]; void nds_insn_run(u32 k, u32 *regs);
+#define NDS_INSN(k, at) do { if (nds_insn_slot[k]) { u32 _g[17] = {r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, sp, lr, at, \
+    (n << 31) | (z << 30) | (c << 29) | (v << 28)}; nds_insn_run(k, _g); r0 = _g[0]; r1 = _g[1]; r2 = _g[2]; r3 = _g[3]; \
+    r4 = _g[4]; r5 = _g[5]; r6 = _g[6]; r7 = _g[7]; r8 = _g[8]; r9 = _g[9]; r10 = _g[10]; r11 = _g[11]; r12 = _g[12]; sp = _g[13]; \
+    lr = _g[14]; n = _g[16] >> 31; z = _g[16] >> 30 & 1; c = _g[16] >> 29 & 1; v = _g[16] >> 28 & 1; } } while (0)
 #ifdef NDS_EH
 /* exceptions C++ (arm2c.Lifter.eh_end_catch) : pile ARM continue, vraies adresses de retour et registres r4-r11 de l'appelant, le derouleur du jeu les lit */
 extern u32 nds_sp, nds_lr, nds_cs[8], nds_eh_regs[11]; extern u64 nds_eh_resume();
@@ -145,6 +151,7 @@ class Lifter:
         self.eh_end_catch = None  # adresse de __end_catch : le jeu lance de vraies exceptions C++ (NDS_EH du PRELUDE)
         self.hook_all = False  # chaque fonction traduite passe par HOOK_ENTRY : un mod peut la remplacer
         self.hooked = {}  # adresse -> (nom, k) : nds_hook_slot[k] de la fonction
+        self.insn_hooks = {}  # adresse d'instruction -> k : NDS_INSN avant elle, nds_insn_slot[k] ("instruction_hooks" des mods)
 
     def decode(self, addr, thumb):
         raw = self.memory(addr, 8)
@@ -648,6 +655,8 @@ class Lifter:
                         text = text.replace("CALLF(", "lr=0x%xu;CALLF(" % (pc + ins.size))
                     if self.debug_pc:
                         text = "nds_pc = 0x%x; nds_r[0]=r0; nds_r[1]=r1; nds_r[2]=r2; nds_r[3]=r3; nds_r[4]=r4; nds_r[5]=r5; %s" % (pc, text)
+                    if pc in self.insn_hooks:
+                        text = "NDS_INSN(%d, 0x%xu); %s" % (self.insn_hooks[pc], pc, text)
                     out[pc] = (text, pc + ins.size, ins.size)
                     self.prev_set_lr = ins.mnemonic.startswith("mov") and ins.op_str.startswith("lr, pc")
                     self.recent.append(ins)
@@ -735,6 +744,11 @@ class Lifter:
         if not rows:
             out.append("  {0, 0, 0},")
         out.append("};\nconst unsigned nds_hook_count = %d;" % len(rows))
+        insns = sorted(self.insn_hooks.items())
+        out.append("void *nds_insn_slot[%d];" % max(len(insns), 1))
+        out.append("const struct { u32 arm; u32 slot; } nds_insn_table[] = {")
+        out += ["  {0x%08xu, %d}," % (addr, k) for addr, k in insns] or ["  {0, 0},"]
+        out.append("};\nconst unsigned nds_insn_count = %d;" % len(insns))
         return "\n".join(out) + "\n"
 
     def landing_pad(self, entry, out):

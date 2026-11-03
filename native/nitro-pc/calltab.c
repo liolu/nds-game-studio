@@ -34,6 +34,11 @@ static uptr call_target_slow(u32 a) {
     return lo < nds_fn_count && nds_fn_table[lo].arm == key ? (uptr)nds_fn_table[lo].x86 : 0;
 }
 
+uptr nds_call_target_or_0(u32 a) {
+    u32 k = (a - CODE_LO) >> 1;
+    return k < CODE_N ? (uptr)code_map[k] : call_target_slow(a);
+}
+
 uptr nds_call_target(u32 a) {
     u32 k = (a - CODE_LO) >> 1; /* le bit Thumb tombe */
     uptr f = k < CODE_N ? (uptr)code_map[k] : call_target_slow(a); /* dans la table directe, rien d'autre a chercher */
@@ -60,5 +65,25 @@ int nds_hook_install(u32 addr, void *fn, void **original) {
     void **slot = &nds_hook_slot[nds_hook_table[lo].slot];
     if (original) *original = *slot ? *slot : nds_hook_table[lo].orig;
     *slot = fn;
+    return 0;
+}
+
+static int hook_find(u32 addr) {
+    u32 key = addr & ~1u;
+    unsigned lo = 0, hi = nds_hook_count;
+    while (lo < hi) {
+        unsigned mid = (lo + hi) / 2;
+        if (nds_hook_table[mid].arm < key) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo < nds_hook_count && nds_hook_table[lo].arm == key ? (int)lo : -1;
+}
+
+/* ce qu'un appel a addr execute maintenant : la derniere accroche, ou le corps traduit ; -1 si pas une fonction */
+int nds_hook_peek(u32 addr, void **current) {
+    int i = hook_find(addr);
+    if (i < 0) return -1;
+    void *slot = nds_hook_slot[nds_hook_table[i].slot];
+    *current = slot ? slot : nds_hook_table[i].orig;
     return 0;
 }

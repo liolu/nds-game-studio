@@ -97,6 +97,7 @@ static void write_bmp(u32 frame, const u32 *top, const u32 *bottom, int w, int h
 /* Fin d'une image dans le fil de rendu : les lignes vont d'un seul tenant dans le jeu d'images, et le launcher lit le jeu termine */
 void present_flip(int w, int h, u32 frame) {
     static u32 last_dump = 0xFFFFFFFFu;
+    if (nds_cb.present) nds_mods_present(frame_ptr(back_set, 0), frame_ptr(back_set, 1), w, h, MAX_W);
     if (dump_dir && frame >= dump_from && frame / every != last_dump) {
         last_dump = frame / every;
         write_bmp(frame, frame_ptr(back_set, 0), frame_ptr(back_set, 1), w, h);
@@ -122,7 +123,7 @@ void present_frame(void) {
     /* boutons X/Y : actifs a 0 ; bit 15 a 0 = couvercle ouvert */
     {
         u32 xy = 0x2C00; /* X = bit 10, Y = bit 11, debogage = bit 13 : relaches a 1, comme KEYINPUT */
-        u32 for_game = present_free_camera() ? 0 : keys_now; /* la camera libre garde les touches */
+        u32 for_game = present_free_camera() || nds_mods_input_taken ? 0 : keys_now; /* la camera libre et les mods qui les prennent gardent les touches */
         if (for_game & (1 << 10)) xy &= ~(1u << 10);
         if (for_game & (1 << 11)) xy &= ~(1u << 11);
         REG16(0x027FFFA8u) = (u16)xy;
@@ -284,7 +285,7 @@ static void peek_step(void) {
 }
 
 /* Touches vues par le jeu. Bits du launcher au-dela des 12 du DS : 12 = camera libre, 13 = scene gelee ; le jeu ne recoit alors plus rien. */
-u32 present_keys(void) { return present_free_camera() ? 0 : keys_now & 0x3FF; }
+u32 present_keys(void) { return present_free_camera() || nds_mods_input_taken ? 0 : keys_now & 0x3FF; }
 
 u32 present_pad(void) { return keys_now & 0xFFF; }
 

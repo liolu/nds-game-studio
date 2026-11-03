@@ -128,6 +128,7 @@ void io_poll(void) {
         if (nds_fixed_clock) snd_fixed_frame();
         dma_vblank();
         present_frame();
+        if (nds_cb.frame) nds_mods_frame(nds_frame);
         nds_frame++;
         if (stat & 8) io_raise(1);
         arm7_tick();
@@ -217,6 +218,7 @@ void irq_deliver(void) {
         REG32(IO + 0x214) = if_state;
         CLOSE();
         net_irq();
+        if (nds_cb.irq) nds_mods_irq(if_state);
         /* NDS_EH : la pile ARM du fil interrompu est en cours d'usage, l'interruption a la sienne comme sur le DS */
         u32 saved_sp = nds_sp, saved_lr = nds_lr;
         nds_sp = nds_dtcm_base() + 0x3F80u;
@@ -377,6 +379,7 @@ static int card_rom_read(void) {
     u32 size = blocks == 7 ? 4 : blocks ? 0x100u << blocks : 0;
     if (pos + size > nds_rom_size) nds_fatal("lecture de carte hors de la rom : %x + %x", pos, size);
     nds_copy(DS(REG32(IO + 0xB4 + channel * 12)), nds_rom + pos, size);
+    if (nds_cb.rom_read) nds_mods_rom_read(pos, size, DS(REG32(IO + 0xB4 + channel * 12)));
     REG32(IO + 0x1A4) &= 0x7F7FFFFFu;
     if (REG8(IO + 0x1A1) & 0x40) io_raise(1u << 19);
     return 1;
@@ -447,11 +450,13 @@ u32 nds_io_read(u32 a, u32 size) {
     }
     io_before_read(a);
     if (!in_irq && !(nds_cpsr & 0x80)) irq_deliver();
-    return size == 4 ? REG32(a) : size == 2 ? REG16(a) : REG8(a);
+    u32 v = size == 4 ? REG32(a) : size == 2 ? REG16(a) : REG8(a);
+    return nds_cb.io_read ? nds_mods_io_read(a, size, v) : v;
 }
 
 void nds_io_write(u32 a, u32 v, u32 size) {
     if (a < 0x01000000u || (s32)a < 0) return;
+    if (nds_cb.io_write && nds_mods_io_write(a, size, &v)) return;
     if (size == 4) REG32(a) = v;
     else if (size == 2) REG16(a) = (u16)v;
     else REG8(a) = (u8)v;

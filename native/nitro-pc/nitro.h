@@ -67,8 +67,25 @@ extern u32 nds_sp, nds_lr; /* pile ARM et retour de la fonction du jeu appelee, 
 void nds_copy(void *dst, const void *src, u32 n);
 void nds_zero(void *dst, u32 n);
 int nds_arg(const char *name, const char **value);
-void nds_mods_load(void); /* mods.c */
+/* mods.c : mods natifs (native/sdk/nds_mod.h). Une liste vide = rien a appeler, un seul test dans le runtime. */
+void nds_mods_load(void);
+void nds_mods_crash_note(void);
+typedef struct { void *frame, *gx, *polygon, *present, *audio, *io_read, *io_write, *irq, *rom_read; } NdsCallbacks;
+extern NdsCallbacks nds_cb;
+extern int nds_mods_input_taken, nds_mods_mouse_captured;
+void nds_mods_frame(u32 frame);
+int nds_mods_gx(u32 cmd, u32 *params, u32 count);
+int nds_mods_polygon(void *vertices, int n, u32 attr, u32 tex, u32 pal); /* nds_vertex de nds_mod.h */
+void nds_mods_present(u32 *top, u32 *bottom, int w, int h, int stride);
+void nds_mods_audio(s16 *stereo, u32 frames);
+u32 nds_mods_io_read(u32 addr, u32 size, u32 value);
+int nds_mods_io_write(u32 addr, u32 size, u32 *value);
+void nds_mods_irq(u32 bits);
+void nds_mods_rom_read(u32 pos, u32 size, u8 *dst);
+/* calltab.c : accroches des fonctions */
 int nds_hook_install(u32 addr, void *fn, void **original);
+int nds_hook_peek(u32 addr, void **current);
+uptr nds_call_target_or_0(u32 a);
 extern int nds_fixed_clock; /* --fixed-clock (io.c) : images reproductibles */
 void snd_fixed_frame(void);
 /* context.c : fils verts (OS_SaveContext/OS_LoadContext) et piles de l'hote */

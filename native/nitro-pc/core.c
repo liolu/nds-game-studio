@@ -62,11 +62,14 @@ static void vlog(const char *fmt, va_list ap) {
 
 void nds_log(const char *fmt, ...) { va_list ap; va_start(ap, fmt); vlog(fmt, ap); va_end(ap); }
 
+void nds_vlog(const char *fmt, va_list ap) { vlog(fmt, ap); }
+
 void nds_fatal(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     vlog(fmt, ap);
     va_end(ap);
+    nds_mods_crash_note();
     os_exit(3);
 }
 
@@ -420,6 +423,7 @@ static int on_exception(OsFault *e) {
             u32 v = st[i];
             if (v >= 0x10000000u && v < 0x11000000u) nds_log("    %x", v);
         }
+        nds_mods_crash_note();
         os_exit(4);
     }
     if (e->kind == OS_FAULT_STEP && pending_page) {
@@ -434,6 +438,7 @@ static int on_exception(OsFault *e) {
         return OS_FAULT_RESUME;
     }
     nds_log("exception %x a %x", e->code, e->ip);
+    nds_mods_crash_note();
     os_exit(5);
     return OS_FAULT_PASS;
 }

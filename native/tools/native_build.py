@@ -225,6 +225,7 @@ def main():
     ap.add_argument("--instrument", action="store_true", help="trace les entrees de fonctions (dernier appels au plantage)")
     ap.add_argument("--arch", default=None, help="macOS : arm64 ou x86_64 (par defaut celle de ce Mac) ; Windows : x86 (defaut) ou x86_64")
     ap.add_argument("--no-hooks", action="store_true", help="sans le test d'accroche a l'entree des fonctions traduites (mesures)")
+    ap.add_argument("--insn-hooks", default="", help="instructions accrochables (\"instruction_hooks\" des mods actifs) : 0x...,0x...")
     a = ap.parse_args()
     if not WIN32 and a.with_c:
         # le C matche utilise de vrais pointeurs, 64 bits ici : structures et pointeurs en memoire DS casses (MACOS.md 3.5)
@@ -360,6 +361,7 @@ def main():
     lifter = arm2c.Lifter(game.memory, symbols, None, code_ptr)
     lifter.debug_pc = a.instrument
     lifter.hook_all = not a.no_hooks
+    lifter.insn_hooks = {addr: k for k, addr in enumerate(sorted({int(x, 16) & ~1 for x in a.insn_hooks.split(",") if x.strip()}))}
     lifter.sizes = {addr: game.functions[addr][1] for addr in by_addr}
     lifter.hooks = {int(addr, 16): fn for addr, fn in patches.get("hooks", {}).items()}
     lifter.exit_hooks = {int(addr, 16): fn for addr, fn in patches.get("exit_hooks", {}).items()}
@@ -429,6 +431,13 @@ def main():
         gen.append("extern char %s[]; void *const nds_open_screen = %s;" % (open_screen, open_screen))
     else:
         gen.append("void *const nds_open_screen = 0;")
+    # api->runtime(nom) des mods : fonctions et variables globales du runtime, sans promesse de stabilite
+    rt_names = sorted({s[UNDERSCORE:] for syms in rt_syms.values() for t, s in syms if t in "TDBR"} - {"main"})
+    rt_names = [n for n in rt_names if re.fullmatch(r"[A-Za-z_]\w*", n)]
+    gen += ["extern char %s[];" % n for n in rt_names]
+    gen.append("const struct { const char *name; void *p; } nds_runtime_syms[] = {")
+    gen += ['  {"%s", %s},' % (n, n) for n in rt_names]
+    gen.append("}; const unsigned nds_runtime_sym_count = %d;" % len(rt_names))
     gen_path = out / "lift" / "tables.c"
     gen_path.write_text("\n".join(gen) + "\n")
     gobj = out / "obj" / "tables.o"

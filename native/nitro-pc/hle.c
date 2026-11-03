@@ -91,6 +91,7 @@ u32 RTC_GetDateTimeAsync(u32 d, u32 t, u32 cb, u32 arg) {
 u32 FSi_ReadRomCallback(u32 arc, u32 dst, u32 pos, u32 size) {
     if (pos + size > nds_rom_size) nds_fatal("lecture hors de la rom : %x + %x", pos, size);
     nds_copy(DS(dst), nds_rom + pos, size);
+    if (nds_cb.rom_read) nds_mods_rom_read(pos, size, DS(dst));
     return 0;
 }
 

@@ -247,7 +247,19 @@ static u64 hook_smax_a(HOOK_ARGS) { return smax_a(HOOK_PASS(r0, r1)) + 100; }
 static u64 hook_smax_b(HOOK_ARGS) { return smax_b(HOOK_PASS(r1, r0)) + 1000; }
 static u64 hook_pack(HOOK_ARGS) { return pack_a(HOOK_PASS(r0, r1)) + 1; }
 
+/* accroche a une instruction : nds_insn_run de mods.c, ici sans liste (une seule fonction de test) */
+static void (*insn_fn)(u32 *regs);
+void nds_insn_run(u32 k, u32 *regs) { if (k == 0 && insn_fn) insn_fn(regs); }
+static void insn_add7(u32 *regs) { regs[0] += 7; regs[16] |= 1u << 30; }
+
 static void test_hooks(void) {
+    extern void *nds_insn_slot[];
+    insn_fn = insn_add7;
+    nds_insn_slot[0] = (void *)1; /* non nul : NDS_INSN appelle nds_insn_run */
+    CHECK_EQ((u32)C2(t_smax, 5, 3), 12);               /* r0 modifie avant bx lr */
+    CHECK_EQ((u32)C2(t_smax, 2, 9), 16);
+    nds_insn_slot[0] = 0;
+    CHECK_EQ((u32)C2(t_smax, 2, 9), 9);
     CHECK_EQ((u32)C2(t_smax, 5, 3), 5);
     CHECK_EQ(nds_hook_install(A_t_smax, (void *)hook_smax_a, (void **)&smax_a), 0);
     CHECK_EQ((u32)C2(t_smax, 5, 3), 105);              /* appel direct */

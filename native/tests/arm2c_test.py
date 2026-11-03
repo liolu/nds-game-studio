@@ -6,7 +6,7 @@
   python3 native/tests/arm2c_test.py --arch x86_64   # macOS : version Intel, lancee par Rosetta sur Apple Silicon
 
 Couvre : RD/WR et la rotation de LDRW, les macros de drapeaux, CALLF a 10 arguments (fonction traduite et fonction C) et 14 (t_args14),
-les accroches des mods (HOOK_ENTRY du PRELUDE, nds_hook_install de nitro-pc/calltab.c, chaine de deux accroches),
+les accroches des mods (HOOK_ENTRY du PRELUDE, nds_hook_install de nitro-pc/calltab.c, chaine de deux accroches, NDS_INSN),
 les sous-routines internes (GOSUB_TAG, gs_), nds_call_target sur des adresses ARM et Thumb, et les fils verts de
 nitro-pc/context.c (OS_SaveContext/OS_LoadContext, nds_run_on_stack : deux fils sur des piles de la fenetre se
 passent la main un million de fois chacun).
@@ -132,6 +132,7 @@ def lift():
     lifter = arm2c.Lifter(memory, symbols, None, code_ptr)
     lifter.sizes = {a: f[1] for a, f in funcs.items()}
     lifter.hook_all = True  # comme native_build.py : chaque fonction passe par HOOK_ENTRY
+    lifter.insn_hooks = {BASE + 0x0e8: 0}  # t_smax, avant bx lr : accroche a une instruction (NDS_INSN)
     for _ in range(4):  # comme native_build.py : drapeaux et sous-routines se decouvrent au fil des passes
         before = len(lifter.flag_funcs) + len(lifter.gosub_funcs)
         lifter.unhandled = []
@@ -157,6 +158,7 @@ def check_text(bodies):
         ("t_gosub : retours par GOSUB_RET", bodies["t_gosub"].count("GOSUB_RET(lr)") == 2 and "GOSUB_RET(pc_val)" in bodies["t_gosub"]),
         ("t_thumb : 2 retours dans gs_", bodies["t_thumb"].count("&&L") == 2),
         ("sans sous-routine, pas de gs_", "gs_" not in bodies["t_call10"]),
+        ("accroche a une instruction", "NDS_INSN(0, 0x20000e8u);" in bodies["t_smax"]),
         ("accroche a l'entree de chaque fonction", all("HOOK_ENTRY(%s, " % n in b for n, b in bodies.items() if n)),
     ]
     bad = [r for r, ok in rules if not ok]

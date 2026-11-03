@@ -807,7 +807,14 @@ void snd_frame(void) {
 /* ------------------------------------------------------------------ mixeur */
 static float master = 0.6f;
 
+static void mix_ds(s16 *out, u32 frames);
+
 static void mix(s16 *out, u32 frames) {
+    mix_ds(out, frames);
+    if (nds_cb.audio) nds_mods_audio(out, frames);
+}
+
+static void mix_ds(s16 *out, u32 frames) {
     static u32 until_update;
     for (u32 f = 0; f < frames; f++) {
         if (until_update == 0) {

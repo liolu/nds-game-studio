@@ -120,11 +120,16 @@ bash native/tools/run_game.sh AJTP "<rom>" 60 --mute --save test.sav --dump capt
   haut=64, bas=128, R=256, L=512, X=1024, Y=2048) et stylet.
 - `--fixed-clock` : images reproductibles, pour comparer deux modules image par image. L'horloge avance de 1000 cycles à chaque lecture, sans attente ; le dessin et le son tournent dans le fil du jeu. Le jeu va aussi vite que le PC le permet : le temps d'un passage mesure le coût d'une image. Tom et Jerry et Rayman donnent les mêmes images à chaque passage ; Lego, en jeu, varie encore.
 
-## Mods natifs (essai, étape 0 de ROADMAP-MODS.md)
+## Mods natifs (interface 1.0)
 
-- Chaque fonction traduite passe par une entrée en assembleur (`HOOK_ENTRY` de `arm2c.py`) : si un mod a rempli sa case `nds_hook_slot[k]`, elle saute à l'accroche, sinon au corps traduit `f__o`. Les arguments ne sont pas recopiés. `native_build.py --no-hooks` enlève ce test, pour les mesures.
-- `--plugin a.dll,b.dll` charge des bibliothèques qui exportent `nds_mod_load(api)` (`mods.c`) ; `--no-mods` n'en charge aucune. `api->hook(adresse, remplacement, &original)` : le dernier mod chargé passe en premier et `original` mène au suivant, puis au jeu (`nds_hook_install`, `calltab.c`). Un mod qui ne se charge pas est refusé avec la raison, et le jeu démarre sans lui.
-- L'interface n'est pas encore figée : c'est l'étape 1.
+Un mod natif est une bibliothèque qui ne connaît que [`sdk/nds_mod.h`](sdk/nds_mod.h) (MIT) : elle exporte `nds_mod_load(api, mod)` et reçoit la table `nds_api`. Exemples : `tests/mod_essai`.
+
+- **Chargement** (`mods.c`) : `--plugins plugins.json` donne la liste, dans l'ordre. Pour chaque mod : `id`, `version`, `api` (`"1.0"`), `games` (liste de codes, ou objet code → SHA-1 vérifiés par le launcher), `plugin` (objet plateforme → chemin : `windows-x86`, `windows-x86_64`, `macos-arm64`, `macos-x86_64`) et `settings`. Le module refuse un mod d'une autre majeure, d'une mineure plus récente, d'un autre jeu ou sans bibliothèque pour cette machine, puis écrit l'état de chacun dans `status.json`, à côté (ou `--mod-status`). Un mod refusé ne bloque pas le jeu. `--plugin a.dll,b.dll` charge des bibliothèques sans manifeste, pour les essais ; `--no-mods` n'en charge aucune.
+- **Accroches** : chaque fonction traduite passe par une entrée en assembleur (`HOOK_ENTRY` de `arm2c.py`). Si un mod a rempli sa case `nds_hook_slot[k]`, elle saute à l'accroche, sinon au corps traduit `f__o`, sans recopier les arguments (`--no-hooks` enlève ce test, pour les mesures). Le dernier mod chargé passe en premier, et `original` mène au suivant, puis au jeu. Un mod qui se refuse pendant son chargement perd ses accroches.
+- **Accroches à une instruction** : `native_build.py --insn-hooks 0x...,0x...` place `NDS_INSN` avant ces instructions. Les registres passent par `nds_regs`, modifiables. Le launcher donnera les adresses `"instruction_hooks"` des mods actifs (étape 3).
+- **Moteur** : `on_frame`, `on_gx` (commandes 3D), `on_polygon` (sommets modifiables), `on_present` (images finales), `on_audio`, `on_io_read`, `on_io_write`, `on_irq`, `on_rom_read`. Sans mod, chacun ne coûte qu'un test de pointeur. `api->runtime(nom)` donne toute fonction ou variable globale du runtime (`nds_runtime_syms` de `tables.c`), sans promesse de stabilité.
+- **Entrées** : `input` donne les touches du DS, le stylet et la souris ; `take_input` retire les touches au jeu. Le clavier entier, `capture_mouse` et `notice` attendent le nouveau contrat avec le launcher (étape 2) : pour l'instant, `notice` écrit seulement dans le journal.
+- Un plantage écrit les mods chargés dans le journal.
 
 ## Windows 64 bits (essai)
 

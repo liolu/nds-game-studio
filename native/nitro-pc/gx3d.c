@@ -212,6 +212,13 @@ static void emit_poly(const Vtx *in, int n) {
     }
     int na = n;
     for (int i = 0; i < n; i++) a[i] = in[i];
+    if (nds_cb.polygon) {
+        /* nds_vertex : les 9 premiers champs de Vtx, dans le meme ordre */
+        float mv[4][9];
+        for (int i = 0; i < n; i++) nds_copy(mv[i], &a[i], sizeof mv[i]);
+        if (nds_mods_polygon(mv, n, cur_attr, cur_tex, cur_pal)) return;
+        for (int i = 0; i < n; i++) nds_copy(&a[i], mv[i], sizeof mv[i]);
+    }
     if (prim == 2) {
         /* dans une bande, un triangle sur deux a le sens inverse */
         if (strip_flip) { Vtx t = a[1]; a[1] = a[2]; a[2] = t; }
@@ -301,7 +308,21 @@ static void write_clip_readback(void) {
         for (int j = 0; j < 3; j++) REG32(IO + 0x680 + (i * 3 + j) * 4) = (u32)vec.m[i * 4 + j];
 }
 
+static void exec_cmd(u32 cmd, const u32 *p);
+
 static void exec(u32 cmd, const u32 *p) {
+    if (nds_cb.gx) {
+        u32 copy[32];
+        u32 n = param_count[cmd];
+        for (u32 i = 0; i < n && i < 32; i++) copy[i] = p[i];
+        if (nds_mods_gx(cmd, copy, n)) return;
+        exec_cmd(cmd, copy);
+        return;
+    }
+    exec_cmd(cmd, p);
+}
+
+static void exec_cmd(u32 cmd, const u32 *p) {
     switch (cmd) {
     case 0x10: mtx_mode = p[0] & 3; break;
     case 0x11:
