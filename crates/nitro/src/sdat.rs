@@ -77,12 +77,12 @@ pub fn files(file: &[u8]) -> Result<Vec<File>> {
     Ok(out)
 }
 
-const PCM8: u8 = 0;
+pub(crate) const PCM8: u8 = 0;
 const PCM16: u8 = 1;
-const IMA: u8 = 2;
+pub(crate) const IMA: u8 = 2;
 
 /// Une voie : `bytes` au codage `kind`. En IMA, 4 octets d'état avant les données (échantillon, index).
-fn voice(bytes: &[u8], kind: u8) -> Vec<i16> {
+pub(crate) fn voice(bytes: &[u8], kind: u8) -> Vec<i16> {
     match kind {
         PCM8 => bytes.iter().map(|b| (*b as i8 as i16) << 8).collect(),
         PCM16 => bytes.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect(),

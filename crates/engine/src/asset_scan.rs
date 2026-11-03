@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use nds_video::Video;
-use nds_nitro::{adx, decompress_any, g2d, gx_mesh, hom, looks_compressed, model3d, narc, nitrofs, packs, romarc, sadl, sdat, sniff, sseq, unpack, Kind, Rgba};
+use nds_nitro::{adx, decompress_any, g2d, gx_mesh, hom, looks_compressed, model3d, narc, nitrofs, packs, romarc, romsound, sadl, sdat, sniff, sseq, unpack, Kind, Rgba};
 use serde::{Deserialize, Serialize};
 
 use crate::i18n::{t, tr};
@@ -168,6 +168,52 @@ pub fn scan(rom_path: &Path) -> Vec<Entry> {
                 let inner = &data[f.start..f.end];
                 let name = format!("{}.{}", f.name.unwrap_or_else(|| format!("{n:04}")), f.ext);
                 entries.push(Entry { path: format!("{path}#{n}"), member_name: Some(name), rom: rom_path.to_path_buf(), span, member: Some((f.start, f.end)), kind: sniff(inner), size: f.end - f.start, dir: path.clone(), stem: String::new(), rom_index: None });
+            }
+            continue;
+        }
+        // Les sons d'un `SoundData.rom` d'Amaze : la liste, et chaque son à écouter
+        let sounds = if kind == Kind::GameData && path.to_lowercase().ends_with(".rom") { romsound::samples(data) } else { Vec::new() };
+        if !sounds.is_empty() {
+            entries.last_mut().unwrap().kind = Kind::TableArchive;
+            for (n, s) in sounds.iter().enumerate() {
+                let ext = if s.adpcm { "adpcm" } else { "pcm" };
+                entries.push(Entry { path: format!("{path}#{n}"), member_name: Some(format!("{n:04}.{ext}")), rom: rom_path.to_path_buf(), span, member: Some((s.start, s.end)), kind: Kind::RomSound, size: s.end - s.start, dir: path.clone(), stem: String::new(), rom_index: None });
+            }
+            continue;
+        }
+        // Un fichier avec son propre NitroFS (`dwc/utility.bin`) ou une archive `sar ` : chacun de leurs fichiers.
+        // Ceux de NitroFS finissent souvent par `.l` (compressés en LZ77) : le nom montré est celui d'après.
+        if matches!(kind, Kind::EmbeddedFs | Kind::SarArchive) && decompress_any(data).is_none() {
+            let members: Vec<(usize, usize, String, Kind)> = if kind == Kind::EmbeddedFs {
+                nitrofs::read_embedded(data)
+                    .into_iter()
+                    .map(|f| {
+                        let name = f.path.strip_suffix(".l").unwrap_or(&f.path).to_string();
+                        let member = &data[f.start..f.end];
+                        let kind = match by_extension(sniff_inner(member), &name) {
+                            Kind::Other => Kind::GameData,
+                            kind => kind,
+                        };
+                        (f.start, f.end, name, kind)
+                    })
+                    .collect()
+            } else {
+                hom::sar_members(data)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(n, (start, end))| {
+                        // Emplacement vide : quelques zéros compressés (en-tête LZ77, drapeaux à 0, puis les zéros)
+                        let empty = matches!(&data[start..end], [0x10, size, 0, 0, 0, rest @ ..] if *size <= 8 && rest.len() >= *size as usize && rest[..*size as usize].iter().all(|b| *b == 0));
+                        (start, end, format!("{n:03}.evt"), if empty { Kind::EmptySlot } else { Kind::EventScript })
+                    })
+                    .collect()
+            };
+            if !members.is_empty() {
+                entries.last_mut().unwrap().kind = Kind::TableArchive;
+            }
+            for (n, (start, end, name, kind)) in members.into_iter().enumerate() {
+                let stem = stem_of(&name);
+                entries.push(Entry { path: format!("{path}#{n}"), member_name: Some(name), rom: rom_path.to_path_buf(), span, member: Some((start, end)), kind, size: end - start, dir: path.clone(), stem, rom_index: None });
             }
             continue;
         }
@@ -1537,11 +1583,34 @@ fn decode_inner(entries: &[Entry], sel: usize, c: &mut Choices) -> Result<Decode
             } else {
                 t!("3D animation, {} frames: its values, not played", "Animation 3D, {} images : ses valeurs, pas jouee", u32::from_le_bytes([inner[0], inner[1], inner[2], inner[3]]))
             };
-            Ok(Decoded::Text { lines: hom::script_lines(&inner), info })
+            // Les morceaux d'une archive `sar ` nomment leurs événements (caméra, mouvements, sons...)
+            let names = hom::event_names(&inner);
+            let mut lines = Vec::new();
+            if !names.is_empty() {
+                lines.push(t!("Events: {}", "Evenements : {}", names.join(", ")));
+                lines.extend(text_lines(&inner));
+                lines.push(String::new());
+            }
+            lines.extend(hom::script_lines(&inner));
+            Ok(Decoded::Text { lines, info })
+        }
+        Kind::RomSound => {
+            let me = &entries[sel];
+            let container = entries.iter().find(|e| e.path == me.dir).ok_or(tr("sound file not found", "fichier de sons introuvable"))?;
+            let all = read_entry(container)?;
+            let sounds = romsound::samples(&all);
+            let n = sounds.iter().position(|s| Some((s.start, s.end)) == me.member).ok_or(tr("sound file changed since it was read", "fichier de sons change depuis la lecture"))?;
+            let codec = if sounds[n].adpcm { "IMA ADPCM" } else { "PCM 8 bits" };
+            Ok(audio(romsound::decode(&bytes, &sounds[n]), format!("{codec}, ")))
         }
         Kind::TableArchive | Kind::SoundArchive => {
             let me = &entries[sel];
-            let lines: Vec<String> = entries.iter().filter(|e| e.dir == me.path).map(|e| format!("{:<40}  {:<14}  {}", e.member_name.as_deref().unwrap_or(&e.path), kind_text(e.kind), size_text(e.size))).collect();
+            let mut lines: Vec<String> = entries.iter().filter(|e| e.dir == me.path).map(|e| format!("{:<40}  {:<14}  {}", e.member_name.as_deref().unwrap_or(&e.path), kind_text(e.kind), size_text(e.size))).collect();
+            // Un SDAT rangé compressé dans un autre fichier (`dwc/utility.bin`) : ses fichiers ne sont pas dans la liste
+            if lines.is_empty() && kind == Kind::SoundArchive {
+                let inner = unpacked(&bytes);
+                lines = sdat::files(&inner).unwrap_or_default().iter().enumerate().map(|(n, f)| format!("{:<40}  {}", format!("{}.{}", f.name.clone().unwrap_or_else(|| format!("{n:04}")), f.ext), size_text(f.end - f.start))).collect();
+            }
             let info = t!("Archive of {} files", "Archive de {} fichiers", lines.len());
             Ok(Decoded::Text { lines, info })
         }
@@ -1554,7 +1623,14 @@ fn decode_inner(entries: &[Entry], sel: usize, c: &mut Choices) -> Result<Decode
         }
         Kind::OffsetTable => {
             let pairs = hom::mat_entries(&unpacked(&bytes)).ok_or(tr("unreadable table", "table illisible"))?;
-            let lines = pairs.iter().enumerate().map(|(i, (at, size))| format!("{i:4}  {at:#08x}  {}", size_text(*size))).collect();
+            // L'archive voisine (`Archive.sar` pour `Archive.sar.mat`) : ce que chaque ligne y désigne
+            let me = &entries[sel];
+            let archive = me.path.get(..me.path.len() - 4).unwrap_or_default();
+            let members: Vec<&Entry> = entries.iter().filter(|e| e.dir == archive).collect();
+            let lines = pairs.iter().enumerate().map(|(i, (at, size))| match members.get(i) {
+                Some(m) => format!("{i:4}  {at:#08x}  {:<10}  {}  {}", size_text(*size), m.path, kind_text(m.kind)),
+                None => format!("{i:4}  {at:#08x}  {}", size_text(*size)),
+            }).collect();
             Ok(Decoded::Text { lines, info: t!("Table of {} files (position, size) of the archive next to it", "Table de {} fichiers (position, taille) de l'archive voisine", pairs.len()) })
         }
         Kind::EmbeddedFs => {
