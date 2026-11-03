@@ -1642,7 +1642,7 @@ fn rebuild_controls(mut commands: Commands, mut b: ResMut<AssetBrowser>, childre
         steps.push((Ctl::Link, format!("{what}: {}", name(&c.linked, c.link))));
     }
     if c.anims > 1 {
-        let what = if b.selected.is_some_and(|s| b.entries[s].kind == Kind::AudioBank) { tr("Sound", "Son") } else { "Animation" };
+        let what = if b.selected.is_some_and(|s| matches!(b.entries[s].kind, Kind::AudioBank | Kind::SequenceArchive)) { tr("Sound", "Son") } else { "Animation" };
         steps.push((Ctl::Anim, format!("{what}: {} / {}", c.anim + 1, c.anims)));
     }
     if c.models > 1 {

@@ -4,7 +4,7 @@
 //!   `primitives`, `decompress`, `util` et `errors` sont repris d'apicula
 //!   (<https://github.com/scurest/apicula>, licence 0BSD, voir LICENSE-apicula, commit 3d4e91e) ;
 //!   `model3d` en tire des maillages et des images RGBA prêts pour un moteur.
-//! - Son : `sadl`, archives `SDAT` (`sdat`).
+//! - Son : `sadl`, archives `SDAT` (`sdat`), musiques `SSEQ` / `SSAR` et instruments `SBNK` (`sseq`).
 //! - 2D : `.nclr` (palettes), `.ncgr` (tuiles), `.nscr` (écrans de tuiles), `.ncer` (cellules /
 //!   sprites), voir `g2d`.
 //! - Archives `.narc` (`narc`) et fichiers compressés LZ77 du BIOS (`decompress`).
@@ -27,6 +27,7 @@ pub mod primitives;
 pub mod adx;
 pub mod g2d;
 pub mod gx_mesh;
+pub mod hom;
 pub mod model3d;
 pub mod narc;
 pub mod nitrofs;
@@ -34,6 +35,7 @@ pub mod packs;
 pub mod romarc;
 pub mod sadl;
 pub mod sdat;
+pub mod sseq;
 
 pub use errors::Result;
 
@@ -66,6 +68,10 @@ pub enum Kind {
     Audio,
     /// Banque de sons (SWAR).
     AudioBank,
+    /// Musique (SSEQ), bruitages (SSAR) et instruments (SBNK) : joués avec les banques de leur archive de son.
+    Sequence,
+    SequenceArchive,
+    Instruments,
     /// Archive de son (SDAT) : ses fichiers sont listés à part.
     SoundArchive,
     /// Police (NFTR).
@@ -111,6 +117,27 @@ pub enum Kind {
     RawScreen,
     /// Script compilé (SB, DCPB) : montré en texte et en octets.
     Script,
+    /// Sprite de Heroes of Mana fait de six blocs (`hom::read_shape`) : joué comme une animation.
+    HomSprite,
+    /// Textures d'un modèle 3D de Heroes of Mana (`model00.bin`...) ; la géométrie n'est pas lue.
+    HomModelTextures,
+    /// Planche de Heroes of Mana : palette de 256 couleurs puis tuiles 4 bpp ; les fonds et sprites de la fin ne sont
+    /// pas assemblés.
+    HomSheet,
+    /// Tuiles 4 bpp dont la palette est le premier morceau de la même table (`ending.dat` de Heroes of Mana).
+    SiblingPaletteTiles,
+    /// Script d'événement de Heroes of Mana (`event/*.bin`) : ses commandes en mots de 32 bits.
+    EventScript,
+    /// Animation 3D maison (`modelanim01.bin`) : ses valeurs, elle n'est pas jouée.
+    HouseModelAnim,
+    /// Fichiers qui en contiennent d'autres, montrés par la liste de ce qu'ils contiennent : table de positions au début
+    /// (`.dat`, `.bin`), archive `sar `, table `.mat` (position, taille), fichier avec son propre NitroFS.
+    TableArchive,
+    SarArchive,
+    OffsetTable,
+    EmbeddedFs,
+    /// Emplacement vide d'une table (quelques octets à zéro).
+    EmptySlot,
     /// Autres fichiers Nitro 3D sans rien à montrer (BTP0, BTA0...).
     Nitro3dOther,
     /// Autre fichier Nitro 2D (NANR, NMCR...).
@@ -134,6 +161,9 @@ impl Kind {
             Kind::JLayout => "mise en page",
             Kind::Audio => "son",
             Kind::AudioBank => "banque de sons",
+            Kind::Sequence => "musique",
+            Kind::SequenceArchive => "bruitages",
+            Kind::Instruments => "instruments",
             Kind::SoundArchive => "archive de son",
             Kind::Font => "police",
             Kind::PlainText => "texte",
@@ -151,7 +181,14 @@ impl Kind {
             Kind::RawTiles => "tuiles",
             Kind::RawPalette => "palette",
             Kind::RawScreen => "ecran",
-            Kind::Script => "script",
+            Kind::Script | Kind::EventScript => "script",
+            Kind::HomSprite => "sprite",
+            Kind::HomModelTextures => "textures 3D",
+            Kind::HomSheet | Kind::SiblingPaletteTiles => "tuiles",
+            Kind::HouseModelAnim => "animation 3D",
+            Kind::TableArchive | Kind::SarArchive | Kind::EmbeddedFs => "archive",
+            Kind::OffsetTable => "table",
+            Kind::EmptySlot => "vide",
             Kind::Nitro3dOther => "3D (anim)",
             Kind::Nitro2dOther => "2D (anim)",
             Kind::Other => "",
@@ -159,7 +196,7 @@ impl Kind {
     }
 
     pub fn viewable(self) -> bool {
-        matches!(self, Kind::Model | Kind::Textures | Kind::Palette | Kind::Tiles | Kind::Screen | Kind::Cells | Kind::ModelAnim | Kind::CellAnim | Kind::JCells | Kind::JLayout | Kind::Audio | Kind::AudioBank | Kind::Font | Kind::Messages | Kind::PaletteTiles | Kind::RomImage | Kind::ZImage | Kind::AnmFile | Kind::EngineGeometry | Kind::EngineMesh | Kind::RawTexture | Kind::BsTexture | Kind::Bitmap | Kind::ZipFile | Kind::Video | Kind::Texel | Kind::TextureRef | Kind::EngineBitmap | Kind::PlainText | Kind::Compressed | Kind::NestedRom | Kind::RawTiles | Kind::RawPalette | Kind::RawScreen | Kind::Script)
+        matches!(self, Kind::Model | Kind::Textures | Kind::Palette | Kind::Tiles | Kind::Screen | Kind::Cells | Kind::ModelAnim | Kind::CellAnim | Kind::JCells | Kind::JLayout | Kind::Audio | Kind::AudioBank | Kind::Font | Kind::Messages | Kind::PaletteTiles | Kind::RomImage | Kind::ZImage | Kind::AnmFile | Kind::EngineGeometry | Kind::EngineMesh | Kind::RawTexture | Kind::BsTexture | Kind::Bitmap | Kind::ZipFile | Kind::Video | Kind::Texel | Kind::TextureRef | Kind::EngineBitmap | Kind::PlainText | Kind::Compressed | Kind::NestedRom | Kind::RawTiles | Kind::RawPalette | Kind::RawScreen | Kind::Script | Kind::Sequence | Kind::SequenceArchive | Kind::Instruments | Kind::SoundArchive | Kind::HomSprite | Kind::HomModelTextures | Kind::HomSheet | Kind::SiblingPaletteTiles | Kind::EventScript | Kind::HouseModelAnim | Kind::TableArchive | Kind::SarArchive | Kind::OffsetTable | Kind::EmbeddedFs | Kind::EmptySlot)
     }
 }
 
@@ -180,6 +217,9 @@ pub fn sniff(head: &[u8]) -> Kind {
         Some(b"JNCL") => Kind::JLayout,
         Some(b"sadl" | b"STRM" | b"SWAV") => Kind::Audio,
         Some(b"SWAR") => Kind::AudioBank,
+        Some(b"SSEQ") => Kind::Sequence,
+        Some(b"SSAR") => Kind::SequenceArchive,
+        Some(b"SBNK") => Kind::Instruments,
         Some(b"SDAT") => Kind::SoundArchive,
         Some(b"RTFN") => Kind::Font,
         Some(b"MESG" | b"GNAL") => Kind::Messages,
