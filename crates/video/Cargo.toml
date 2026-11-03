@@ -1,0 +1,9 @@
+[package]
+name = "nds-video"
+version.workspace = true
+edition.workspace = true
+description = "Lecture des videos des jeux DS : VX (Actimagine), MODS (Mobiclip), Bink 1. Portage en Rust des decodeurs de FFmpeg et mobipeg"
+license = "LGPL-2.1-or-later"
+
+[dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }

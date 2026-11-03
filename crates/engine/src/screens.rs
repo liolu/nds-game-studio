@@ -121,7 +121,7 @@ impl Aspect {
             Aspect::Ds => "4:3 (DS)",
             Aspect::Wide16x9 => "16:9",
             Aspect::Wide16x10 => "16:10",
-            Aspect::Fill => "remplir la fenetre",
+            Aspect::Fill => crate::i18n::tr("fill the window", "remplir la fenetre"),
         }
     }
 

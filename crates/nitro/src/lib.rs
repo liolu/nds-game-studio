@@ -4,9 +4,11 @@
 //!   `primitives`, `decompress`, `util` et `errors` sont repris d'apicula
 //!   (<https://github.com/scurest/apicula>, licence 0BSD, voir LICENSE-apicula, commit 3d4e91e) ;
 //!   `model3d` en tire des maillages et des images RGBA prêts pour un moteur.
+//! - Son : `sadl`, archives `SDAT` (`sdat`), musiques `SSEQ` / `SSAR` et instruments `SBNK` (`sseq`).
 //! - 2D : `.nclr` (palettes), `.ncgr` (tuiles), `.nscr` (écrans de tuiles), `.ncer` (cellules /
 //!   sprites), voir `g2d`.
 //! - Archives `.narc` (`narc`) et fichiers compressés LZ77 du BIOS (`decompress`).
+//! - Les fichiers d'une rom, lus dans la rom : NitroFS (`nitrofs`), archives numérotées `rom.bin` (`romarc`).
 
 #![allow(mismatched_lifetime_syntaxes)]
 
@@ -22,9 +24,21 @@ pub mod nds;
 pub mod nitro;
 pub mod primitives;
 
+pub mod adx;
+pub mod ahx;
+pub mod amaze;
 pub mod g2d;
+pub mod gx_mesh;
+pub mod hom;
 pub mod model3d;
 pub mod narc;
+pub mod nitrofs;
+pub mod packs;
+pub mod romarc;
+pub mod romsound;
+pub mod sadl;
+pub mod sdat;
+pub mod sseq;
 
 pub use errors::Result;
 
@@ -46,7 +60,111 @@ pub enum Kind {
     Screen,
     Cells,
     Archive,
-    /// Animations ou autres fichiers Nitro 3D sans rien à montrer (BCA0, BTP0, BTA0...).
+    /// Animation de squelette (BCA0), jouée sur un modèle.
+    ModelAnim,
+    /// Animation de cellules (RNAN).
+    CellAnim,
+    /// Cellules et tuiles dans un seul fichier, et leur mise en page (JNCD, JNCL : Nintendogs).
+    JCells,
+    JLayout,
+    /// Son (sadl, STRM, SWAV).
+    Audio,
+    /// Banque de sons (SWAR).
+    AudioBank,
+    /// Musique (SSEQ), bruitages (SSAR) et instruments (SBNK) : joués avec les banques de leur archive de son.
+    Sequence,
+    SequenceArchive,
+    Instruments,
+    /// Archive de son (SDAT) : ses fichiers sont listés à part, elle montre leur liste.
+    SoundArchive,
+    /// Archive `NITRO Archive 1` (Pokémon Dash) : la liste de ses fichiers.
+    NitroArchive,
+    /// Module `NITRO RelocMod 1` (Pokémon Dash : niveaux et modèles) : données compressées et pointeurs à reloger,
+    /// montrées en mots de 32 bits.
+    RelocModule,
+    /// Police en tuiles brutes : `.bin` de 8x16, ou de 16x16 avec les largeurs de son `.fwa` (Pokémon Dash).
+    TileFont,
+    /// Images compressées les unes après les autres, leurs tailles dans un `.siz` et une palette de 16 couleurs
+    /// chacune dans un `.pal` (`agbpoke.img` de Pokémon Dash : les Pokémon de la GBA).
+    LzSprites,
+    /// Police (NFTR).
+    Font,
+    /// Messages (BMG).
+    Messages,
+    /// Texture d'un moteur maison (Rayman Raving Rabbids 2, Battle of Giants, Star Wars III...) : ses pixels
+    /// (`LXET`, avec le format et la taille de la DS à la fin) et le fichier qui la relie à sa palette (`TXET`).
+    Texel,
+    TextureRef,
+    /// Image plein format du même moteur (` PMB` : une image 8 bits compressée en LZ77).
+    EngineBitmap,
+    /// Maillage du même moteur (`GEOM` : commandes de la DS) et ce qui le relie à sa texture (`MESH`).
+    EngineGeometry,
+    EngineMesh,
+    /// Pixels d'une texture sans en-tête (`.ntft`), avec sa palette `.ntfp`.
+    RawTexture,
+    /// Texture avec son en-tête et sa palette (`.bstga`, MySims).
+    BsTexture,
+    /// Image Windows (`.bmp`).
+    Bitmap,
+    /// Archive `.zip` : la liste de ses fichiers.
+    ZipFile,
+    /// Vidéo (Bink, VX, Mobiclip) : ses caractéristiques, elle n'est pas lue.
+    Video,
+    /// Planche de tuiles avec sa palette au début (Heroes of Mana).
+    PaletteTiles,
+    /// Image 2D de `rom.bin` (moteur Amaze) : palette, carte et tuiles.
+    RomImage,
+    /// Sprite de `rom.bin` (Les Sims 2) : ses OBJ, une ou plusieurs images ; tuiles et palette dans les fichiers voisins.
+    RomSprite,
+    /// Image 8 bpp de `rom.bin` (Les Sims 2), sa palette dedans ou au fichier d'avant.
+    RomBitmap,
+    /// Son de `SoundData.rom` (moteur Amaze) : sa fiche est dans le même fichier (`romsound`).
+    RomSound,
+    /// Sprite de `rom.bin` (The Simpsons Game) : son descripteur et ses tuiles, deux fichiers voisins, voir `amaze`.
+    ChainSprite,
+    ChainSpriteTiles,
+    /// Tuiles d'un niveau (`rom.bin`, The Simpsons Game).
+    RomLevelTiles,
+    /// Fichier `.z` (Tom and Jerry) : image, écran ou texture une fois décompressé.
+    ZImage,
+    /// Animation `.anm` : un résumé, elle n'est pas jouée.
+    AnmFile,
+    /// Texte brut (`.txt`, `.ini`...).
+    PlainText,
+    /// Fichier compressé en LZ77 sans format connu dedans (`.lz`, `.cat`).
+    Compressed,
+    /// Mini-rom pour le téléchargement sans fil (`.srl`).
+    NestedRom,
+    /// Tuiles, palette, écran bruts, sans en-tête (`.nbfc`, `.nbfp`, `.nbfs`) : reconnus par leur extension.
+    RawTiles,
+    RawPalette,
+    RawScreen,
+    /// Script compilé (SB, DCPB) : montré en texte et en octets.
+    Script,
+    /// Sprite de Heroes of Mana fait de six blocs (`hom::read_shape`) : joué comme une animation.
+    HomSprite,
+    /// Textures d'un modèle 3D de Heroes of Mana (`model00.bin`...) ; la géométrie n'est pas lue.
+    HomModelTextures,
+    /// Planche de Heroes of Mana : palette de 256 couleurs puis tuiles 4 bpp ; les fonds et sprites de la fin ne sont
+    /// pas assemblés.
+    HomSheet,
+    /// Tuiles 4 bpp dont la palette est le premier morceau de la même table (`ending.dat` de Heroes of Mana).
+    SiblingPaletteTiles,
+    /// Script d'événement de Heroes of Mana (`event/*.bin`) : ses commandes en mots de 32 bits.
+    EventScript,
+    /// Animation 3D maison (`modelanim01.bin`) : ses valeurs, elle n'est pas jouée.
+    HouseModelAnim,
+    /// Fichiers qui en contiennent d'autres, montrés par la liste de ce qu'ils contiennent : table de positions au début
+    /// (`.dat`, `.bin`), archive `sar `, table `.mat` (position, taille), fichier avec son propre NitroFS.
+    TableArchive,
+    SarArchive,
+    OffsetTable,
+    EmbeddedFs,
+    /// Emplacement vide d'une table (quelques octets à zéro).
+    EmptySlot,
+    /// Données d'un moteur maison sans image ni son (objets, niveaux, tables de `rom.bin`) : leur structure en texte.
+    GameData,
+    /// Autres fichiers Nitro 3D sans rien à montrer (BTP0, BTA0...).
     Nitro3dOther,
     /// Autre fichier Nitro 2D (NANR, NMCR...).
     Nitro2dOther,
@@ -63,6 +181,47 @@ impl Kind {
             Kind::Screen => "ecran",
             Kind::Cells => "cellules",
             Kind::Archive => "archive",
+            Kind::ModelAnim => "animation 3D",
+            Kind::CellAnim => "animation 2D",
+            Kind::JCells => "cellules J",
+            Kind::JLayout => "mise en page",
+            Kind::Audio | Kind::RomSound => "son",
+            Kind::AudioBank => "banque de sons",
+            Kind::Sequence => "musique",
+            Kind::SequenceArchive => "bruitages",
+            Kind::Instruments => "instruments",
+            Kind::SoundArchive => "archive de son",
+            Kind::NitroArchive => "archive",
+            Kind::RelocModule => "module",
+            Kind::Font | Kind::TileFont => "police",
+            Kind::LzSprites => "image",
+            Kind::PlainText => "texte",
+            Kind::Texel | Kind::TextureRef | Kind::RawTexture | Kind::BsTexture => "texture",
+            Kind::EngineGeometry | Kind::EngineMesh => "modele 3D",
+            Kind::Bitmap | Kind::ZImage | Kind::RomImage | Kind::RomBitmap => "image",
+            Kind::RomSprite => "sprite",
+            Kind::ChainSprite | Kind::ChainSpriteTiles => "sprite",
+            Kind::RomLevelTiles => "tuiles",
+            Kind::PaletteTiles => "tuiles",
+            Kind::AnmFile => "animation 2D",
+            Kind::ZipFile => "archive",
+            Kind::Video => "video",
+            Kind::EngineBitmap => "image",
+            Kind::Compressed => "compresse",
+            Kind::NestedRom => "mini rom",
+            Kind::Messages => "messages",
+            Kind::RawTiles => "tuiles",
+            Kind::RawPalette => "palette",
+            Kind::RawScreen => "ecran",
+            Kind::Script | Kind::EventScript => "script",
+            Kind::HomSprite => "sprite",
+            Kind::HomModelTextures => "textures 3D",
+            Kind::HomSheet | Kind::SiblingPaletteTiles => "tuiles",
+            Kind::HouseModelAnim => "animation 3D",
+            Kind::TableArchive | Kind::SarArchive | Kind::EmbeddedFs => "archive",
+            Kind::OffsetTable => "table",
+            Kind::EmptySlot => "vide",
+            Kind::GameData => "donnees",
             Kind::Nitro3dOther => "3D (anim)",
             Kind::Nitro2dOther => "2D (anim)",
             Kind::Other => "",
@@ -70,22 +229,47 @@ impl Kind {
     }
 
     pub fn viewable(self) -> bool {
-        matches!(self, Kind::Model | Kind::Textures | Kind::Palette | Kind::Tiles | Kind::Screen | Kind::Cells)
+        matches!(self, Kind::Model | Kind::Textures | Kind::Palette | Kind::Tiles | Kind::Screen | Kind::Cells | Kind::ModelAnim | Kind::CellAnim | Kind::JCells | Kind::JLayout | Kind::Audio | Kind::AudioBank | Kind::Font | Kind::Messages | Kind::PaletteTiles | Kind::RomImage | Kind::ZImage | Kind::AnmFile | Kind::EngineGeometry | Kind::EngineMesh | Kind::RawTexture | Kind::BsTexture | Kind::Bitmap | Kind::ZipFile | Kind::Video | Kind::Texel | Kind::TextureRef | Kind::EngineBitmap | Kind::PlainText | Kind::Compressed | Kind::NestedRom | Kind::RawTiles | Kind::RawPalette | Kind::RawScreen | Kind::Script | Kind::Sequence | Kind::SequenceArchive | Kind::Instruments | Kind::SoundArchive | Kind::HomSprite | Kind::HomModelTextures | Kind::HomSheet | Kind::SiblingPaletteTiles | Kind::EventScript | Kind::HouseModelAnim | Kind::TableArchive | Kind::SarArchive | Kind::OffsetTable | Kind::EmbeddedFs | Kind::EmptySlot | Kind::GameData | Kind::Nitro3dOther | Kind::RomSprite | Kind::RomBitmap | Kind::RomSound | Kind::ChainSprite | Kind::ChainSpriteTiles | Kind::RomLevelTiles | Kind::NitroArchive | Kind::RelocModule | Kind::TileFont | Kind::LzSprites)
     }
 }
 
 /// Sorte d'un fichier d'après ses premiers octets.
 pub fn sniff(head: &[u8]) -> Kind {
+    if head.starts_with(b"NITRO RelocMod") {
+        return Kind::RelocModule;
+    }
+    if head.starts_with(b"NITRO Archive") {
+        return Kind::NitroArchive;
+    }
     match head.get(0..4) {
         Some(b"BMD0") => Kind::Model,
         Some(b"BTX0") => Kind::Textures,
-        Some(b"BCA0" | b"BTP0" | b"BTA0" | b"BMA0" | b"BVA0") => Kind::Nitro3dOther,
-        Some(b"RLCN" | b"NCLR" | b"RPCN") => Kind::Palette,
-        Some(b"RGCN" | b"NCGR" | b"RCBN") => Kind::Tiles,
-        Some(b"RCSN" | b"NSCR") => Kind::Screen,
+        Some(b"BCA0") => Kind::ModelAnim,
+        Some(b"BTP0" | b"BTA0" | b"BMA0" | b"BVA0") => Kind::Nitro3dOther,
+        Some(b"RLCN" | b"NCLR" | b"RPCN" | b"NCCL" | b"TTLP" | b"NCL\0") => Kind::Palette,
+        Some(b"RGCN" | b"NCGR" | b"RCBN" | b"NCCG" | b"NCG\0") => Kind::Tiles,
+        Some(b"RCSN" | b"NSCR" | b"NCSC" | b"NSC\0") => Kind::Screen,
         Some(b"RECN" | b"NCER") => Kind::Cells,
         Some(b"NARC") => Kind::Archive,
-        Some(b"RNAN" | b"RCMN" | b"RNMN" | b"RTFN") => Kind::Nitro2dOther,
+        Some(b"RNAN") => Kind::CellAnim,
+        Some(b"JNCD") => Kind::JCells,
+        Some(b"JNCL") => Kind::JLayout,
+        Some(b"sadl" | b"STRM" | b"SWAV") => Kind::Audio,
+        Some(b"SWAR") => Kind::AudioBank,
+        Some(b"SSEQ") => Kind::Sequence,
+        Some(b"SSAR") => Kind::SequenceArchive,
+        Some(b"SBNK") => Kind::Instruments,
+        Some(b"SDAT") => Kind::SoundArchive,
+        Some(b"RTFN") => Kind::Font,
+        Some(b"MESG" | b"GNAL") => Kind::Messages,
+        Some(b"MOEG") => Kind::EngineGeometry,
+        Some(b"HSEM") => Kind::EngineMesh,
+        Some(b"BIKb" | b"BIKd" | b"BIKf" | b"BIKg" | b"BIKh" | b"BIKi" | b"VXDS" | b"MODS") => Kind::Video,
+        Some(b"LXET") => Kind::Texel,
+        Some(b"TXET") => Kind::TextureRef,
+        Some(b" PMB") => Kind::EngineBitmap,
+        Some(b"SB  " | b"DCPB") => Kind::Script,
+        Some(b"RCMN" | b"RNMN") => Kind::Nitro2dOther,
         _ => Kind::Other,
     }
 }
@@ -93,14 +277,39 @@ pub fn sniff(head: &[u8]) -> Kind {
 /// Le fichier, décompressé s'il est compressé en LZ77 (0x10 / 0x11) et que le résultat est un
 /// fichier Nitro reconnu ; sinon tel quel.
 pub fn unpack(bytes: Vec<u8>) -> Vec<u8> {
-    if sniff(&bytes) == Kind::Other && matches!(bytes.first(), Some(0x10 | 0x11)) {
-        if let Ok(out) = decompress::decompress(util::cur::Cur::new(&bytes)) {
-            if sniff(&out.data) != Kind::Other {
-                return out.data;
+    if sniff(&bytes) == Kind::Other {
+        if let Some(out) = decompress_any(&bytes) {
+            if sniff(&out) != Kind::Other {
+                return out;
             }
         }
     }
     bytes
+}
+
+/// Le premier octet d'un fichier compressé par le BIOS de la DS : LZ77 (0x10, 0x11), RLE (0x30), Huffman (0x24, 0x28),
+/// ou simplement stocké avec le même en-tête (0).
+pub fn looks_compressed(first: Option<&u8>) -> bool {
+    matches!(first, Some(0x00 | 0x10 | 0x11 | 0x24 | 0x28 | 0x30))
+}
+
+/// Le contenu d'un fichier compressé par le BIOS, quel qu'il soit ; `None` si ce n'en est pas un.
+pub fn decompress_any(bytes: &[u8]) -> Option<Vec<u8>> {
+    const MAX_SIZE: usize = 64 << 20;
+    if !looks_compressed(bytes.first()) || bytes.len() < 4 {
+        return None;
+    }
+    let size = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize >> 8;
+    if size == 0 || size > MAX_SIZE {
+        return None;
+    }
+    match bytes[0] {
+        // Stocké : la taille annoncée doit être celle du fichier (à l'alignement près), sinon c'est autre chose
+        0x00 => (size + 4 <= bytes.len() && bytes.len() - size - 4 < 4).then(|| bytes[4..4 + size].to_vec()),
+        0x10 | 0x11 => decompress::decompress(util::cur::Cur::new(bytes)).ok().map(|out| out.data),
+        0x30 => romarc::rle(bytes, size),
+        _ => romarc::huffman(bytes, size),
+    }
 }
 
 /// Couleur DS BGR555 -> RGBA.

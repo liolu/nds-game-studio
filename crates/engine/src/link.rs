@@ -15,12 +15,13 @@
 //! Fermer une des fenêtres quitte l'application.
 
 use bevy::ecs::system::NonSendMarker;
+use bevy::input::mouse::MouseButtonInput;
 use bevy::prelude::*;
 use bevy::sprite::Anchor;
 use bevy::window::{WindowCloseRequested, WindowMoved, WindowResolution};
 use bevy::winit::WINIT_WINDOWS;
 
-use crate::titlebar::TITLE_H;
+use crate::titlebar::{is_maximized, release_for_system_drag, TITLE_H};
 use crate::screens::{display_camera, DisplayCamera, DsScreens, Screen, ScreenLayout, ScreenPlaces, SCREEN_H};
 use crate::studio::StudioState;
 
@@ -28,6 +29,8 @@ use crate::studio::StudioState;
 const SNAP_DISTANCE: f32 = 64.0;
 /// Délai sans déplacement après lequel on considère qu'une fenêtre a été lâchée.
 const DROP_DELAY: f32 = 0.15;
+/// Le moteur suit lui-même la souris pendant le geste Alt + clic. Ailleurs, le système déplace la fenêtre.
+const MANUAL_DRAG: bool = cfg!(any(windows, target_os = "macos"));
 /// Couche du message affiché dans la fenêtre principale (format choisi...).
 pub(crate) const TOAST_LAYER: usize = 20;
 
@@ -103,12 +106,8 @@ fn main_window_logical_h(entity: Entity) -> f32 {
     WINIT_WINDOWS.with_borrow(|w| w.get_window(entity).map_or(0.0, |w| w.inner_size().height as f32 / w.scale_factor() as f32))
 }
 
-fn is_maximized(entity: Entity) -> bool {
-    WINIT_WINDOWS.with_borrow(|windows| windows.get_window(entity).is_some_and(|w| w.is_maximized()))
-}
-
 #[cfg(windows)]
-fn global_cursor() -> Option<IVec2> {
+fn global_cursor(_window: Entity) -> Option<IVec2> {
     use windows_sys::Win32::Foundation::POINT;
     use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
     let mut p = POINT { x: 0, y: 0 };
@@ -123,7 +122,52 @@ fn button_held(button: MouseButton) -> bool {
     (unsafe { GetAsyncKeyState(vk as i32) } as u16 & 0x8000) != 0
 }
 
-#[cfg(not(windows))]
+/// Position du curseur sur tout le bureau, dans le repère des positions de winit pour cette fenêtre.
+#[cfg(target_os = "macos")]
+fn global_cursor(window: Entity) -> Option<IVec2> {
+    use std::ffi::c_void;
+    #[repr(C)]
+    struct CGPoint {
+        x: f64,
+        y: f64,
+    }
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGEventCreate(source: *const c_void) -> *const c_void;
+        fn CGEventGetLocation(event: *const c_void) -> CGPoint;
+    }
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFRelease(object: *const c_void);
+    }
+    let scale = WINIT_WINDOWS.with_borrow(|w| w.get_window(window).map(|w| w.scale_factor()))?;
+    // SAFETY: l'événement vide créé ici ne sert qu'à lire la position, et il est rendu aussitôt.
+    let point = unsafe {
+        let event = CGEventCreate(std::ptr::null());
+        if event.is_null() {
+            return None;
+        }
+        let point = CGEventGetLocation(event);
+        CFRelease(event);
+        point
+    };
+    Some(IVec2::new((point.x * scale) as i32, (point.y * scale) as i32))
+}
+
+/// Bouton enfoncé, même hors des fenêtres : le système peut garder le clic pendant un déplacement.
+#[cfg(target_os = "macos")]
+fn button_held(button: MouseButton) -> bool {
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGEventSourceButtonState(state: i32, button: u32) -> bool;
+    }
+    const COMBINED_SESSION_STATE: i32 = 0;
+    let index = if button == MouseButton::Middle { 2 } else { 0 };
+    // SAFETY: simple lecture de l'état de la souris.
+    unsafe { CGEventSourceButtonState(COMBINED_SESSION_STATE, index) }
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 fn button_held(_button: MouseButton) -> bool {
     false
 }
@@ -146,7 +190,7 @@ fn keys(keys: Res<ButtonInput<KeyCode>>, mut layout: ResMut<ScreenLayout>, mut t
     if keys.just_pressed(KeyCode::F8) {
         layout.aspect = layout.aspect.next();
         info!("F8 : format {}", layout.aspect.label());
-        say(format!("Format : {}  (F8)", layout.aspect.label()));
+        say(crate::i18n::t!("Format: {}  (F8)", "Format : {}  (F8)", layout.aspect.label()));
     }
 }
 
@@ -167,6 +211,7 @@ fn gestures(
     mut layout: ResMut<ScreenLayout>,
     mut drag: ResMut<Drag>,
     mut windows: Query<&mut Window>,
+    mut released: MessageWriter<MouseButtonInput>,
 ) {
     // Le launcher n'a pas d'écrans à détacher
     if *state.get() != StudioState::Playing {
@@ -191,10 +236,11 @@ fn gestures(
         if screen == Screen::Bottom && screens.bottom_window.is_none() {
             continue; // fusionné, clic sur l'écran du haut : c'est la fenêtre principale qui bouge
         }
-        if cfg!(windows) {
+        if MANUAL_DRAG {
             *drag = Drag { window: Some(place.window), grab: (cursor * window.scale_factor()).as_ivec2(), button: Some(button) };
         } else {
             window.start_drag_move();
+            release_for_system_drag(&mut released, button, place.window);
         }
         return;
     }
@@ -247,7 +293,7 @@ fn reconcile(
                 Some((inner, _, _)) => WindowPosition::At(inner + IVec2::new((48.0 * scale) as i32, ((single_h + 120.0) * scale) as i32)),
                 None => WindowPosition::Automatic,
             };
-            let title = format!("{} - ecran tactile", main_window.title);
+            let title = crate::i18n::t!("{} - touch screen", "{} - ecran tactile", main_window.title);
             let mut resolution = WindowResolution::new(w.max(128.0) as u32, single_h as u32);
             resolution.set_scale_factor_override(main_window.resolution.scale_factor_override());
             let bottom = commands.spawn(Window { title, resolution, position, decorations: false, ..default() }).id();
@@ -265,17 +311,19 @@ fn reconcile(
 }
 
 /// Fenêtre tenue par le geste Alt + clic / clic molette : elle suit la souris jusqu'au relâchement.
-fn manual_drag(mut drag: ResMut<Drag>, mut watch: ResMut<DropWatch>, _main_thread: NonSendMarker) {
+fn manual_drag(mut drag: ResMut<Drag>, mut watch: ResMut<DropWatch>, mut released: MessageWriter<MouseButtonInput>, _main_thread: NonSendMarker) {
     let (Some(window), Some(button)) = (drag.window, drag.button) else { return };
     if !button_held(button) {
+        // La fenêtre détachée a pu prendre le relâchement à celle qui avait reçu le clic
+        release_for_system_drag(&mut released, button, window);
         *drag = Drag::default();
         // Lâchée : on regarde tout de suite si elle doit se fusionner
         watch.moved = true;
         watch.since = DROP_DELAY;
         return;
     }
-    #[cfg(windows)]
-    if let Some(cursor) = global_cursor() {
+    #[cfg(any(windows, target_os = "macos"))]
+    if let Some(cursor) = global_cursor(window) {
         move_inner_to(window, cursor - drag.grab);
     }
 }

@@ -1,5 +1,6 @@
 id = "switch-pro"
-name = "Manette Nintendo Switch Pro"
+name = "Nintendo Switch Pro Controller"
+name_fr = "Manette Nintendo Switch Pro"
 names = ["pro controller", "switch pro", "nintendo switch"]
 vendor_ids = [0x057E]
 product_ids = [0x2009]

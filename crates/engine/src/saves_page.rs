@@ -15,6 +15,7 @@ use bevy::prelude::*;
 use bevy::ui::Pressed;
 use bevy::ui_widgets::{Activate, Button};
 
+use crate::i18n::{self, t, tr, Lang};
 use crate::save::{delete_save, list_saves, saves_dir, SaveInfo};
 use crate::studio::GameRegistry;
 
@@ -72,9 +73,9 @@ fn item_node() -> Node {
 
 /// Contenu de la page (appelé par `options` quand on ouvre la page).
 pub fn spawn_page(c: &mut ChildSpawnerCommands) {
-    c.spawn(label("Sauvegardes", 24.0, TEXT));
+    c.spawn(label(tr("Saves", "Sauvegardes"), 24.0, TEXT));
     c.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(12), ..default() }).with_children(|row| {
-        row.spawn((Button, Hovered::default(), item_node(), BackgroundColor(ITEM), OpenFolderButton)).observe(open_folder).with_child(label("Ouvrir le dossier", 15.0, TEXT));
+        row.spawn((Button, Hovered::default(), item_node(), BackgroundColor(ITEM), OpenFolderButton)).observe(open_folder).with_child(label(tr("Open the folder", "Ouvrir le dossier"), 15.0, TEXT));
         row.spawn(label(saves_dir().display().to_string(), 13.0, DIM));
     });
     c.spawn((Node { flex_direction: FlexDirection::Column, row_gap: px(6), max_height: px(560), overflow: Overflow::clip(), ..default() }, SavesList::default()));
@@ -99,39 +100,50 @@ fn open_folder(_: On<Activate>) {
     }
 }
 
-/// Taille lisible : « 512 o », « 3,4 Ko », « 1,2 Mo ».
+/// Taille lisible dans la langue choisie.
 pub fn format_size(bytes: u64) -> String {
+    size_in(i18n::lang(), bytes)
+}
+
+/// « 512 B », « 3.4 KB », « 1.2 MB » ; en français « 512 o », « 3,4 Ko », « 1,2 Mo ».
+fn size_in(lang: Lang, bytes: u64) -> String {
     const KO: u64 = 1024;
     const MO: u64 = 1024 * 1024;
+    let (byte, kilo, mega, point) = if lang == Lang::Fr { ("o", "Ko", "Mo", ",") } else { ("B", "KB", "MB", ".") };
     let decimal = |value: u64, unit: u64, name: &str| {
         let tenths = (value * 10 + unit / 2) / unit;
-        if tenths >= 100 { format!("{} {name}", tenths / 10) } else { format!("{},{} {name}", tenths / 10, tenths % 10) }
+        if tenths >= 100 { format!("{} {name}", tenths / 10) } else { format!("{}{point}{} {name}", tenths / 10, tenths % 10) }
     };
     if bytes < KO {
-        format!("{bytes} o")
+        format!("{bytes} {byte}")
     } else if bytes < MO {
-        decimal(bytes, KO, "Ko")
+        decimal(bytes, KO, kilo)
     } else {
-        decimal(bytes, MO, "Mo")
+        decimal(bytes, MO, mega)
     }
 }
 
-/// Âge lisible à partir d'un nombre de secondes : « a l'instant », « il y a 5 min », « il y a 2 h »,
-/// « il y a 3 j ».
+/// Âge lisible dans la langue choisie, à partir d'un nombre de secondes.
 pub fn format_age(seconds: u64) -> String {
-    match seconds {
-        0..60 => "a l'instant".into(),
-        60..3600 => format!("il y a {} min", seconds / 60),
-        3600..86400 => format!("il y a {} h", seconds / 3600),
-        _ => format!("il y a {} j", seconds / 86400),
-    }
+    age_in(i18n::lang(), seconds)
+}
+
+/// « just now », « 5 min ago », « 2 h ago », « 3 d ago » ; en français « a l'instant », « il y a 5 min »...
+fn age_in(lang: Lang, seconds: u64) -> String {
+    let (amount, unit) = match seconds {
+        0..60 => return if lang == Lang::Fr { "a l'instant".into() } else { "just now".into() },
+        60..3600 => (seconds / 60, "min"),
+        3600..86400 => (seconds / 3600, "h"),
+        _ => (seconds / 86400, if lang == Lang::Fr { "j" } else { "d" }),
+    };
+    if lang == Lang::Fr { format!("il y a {amount} {unit}") } else { format!("{amount} {unit} ago") }
 }
 
 fn age_of(modified: Option<SystemTime>, now: SystemTime) -> String {
     match modified {
         // Date dans le futur (horloge changée) : comptée comme maintenant
         Some(time) => format_age(now.duration_since(time).map_or(0, |d| d.as_secs())),
-        None => "date inconnue".into(),
+        None => tr("unknown date", "date inconnue").into(),
     }
 }
 
@@ -217,14 +229,14 @@ fn refresh_list(mut commands: Commands, time: Res<Time<Real>>, registry: Option<
                             row.spawn((label(age, 14.0, DIM), Node { width: px(140), ..default() }));
                             row.spawn((Button, Hovered::default(), Node { min_width: px(120), ..item_node() }, BackgroundColor(if pending { DANGER } else { ITEM }), DeleteButton { game: info.game, slot: info.slot }))
                                 .observe(delete_clicked)
-                                .with_child(label(if pending { "Confirmer ?" } else { "Supprimer" }, 14.0, TEXT));
+                                .with_child(label(if pending { tr("Confirm?", "Confirmer ?") } else { tr("Delete", "Supprimer") }, 14.0, TEXT));
                         });
                     }
                     Line::More(n) => {
-                        c.spawn((label(format!("+{n} autres (voir le dossier)"), 14.0, DIM), Node { margin: UiRect::top(px(6)), ..default() }));
+                        c.spawn((label(t!("+{n} more (see the folder)", "+{n} autres (voir le dossier)"), 14.0, DIM), Node { margin: UiRect::top(px(6)), ..default() }));
                     }
                     Line::Empty => {
-                        c.spawn(label("Aucune sauvegarde pour l'instant. Les jeux enregistrent ici leur progression.", 15.0, DIM));
+                        c.spawn(label(tr("No saves yet. Games store their progress here.", "Aucune sauvegarde pour l'instant. Les jeux enregistrent ici leur progression."), 15.0, DIM));
                     }
                 }
             }
@@ -271,26 +283,32 @@ mod tests {
 
     #[test]
     fn sizes_are_readable() {
-        assert_eq!(format_size(0), "0 o");
-        assert_eq!(format_size(512), "512 o");
-        assert_eq!(format_size(1023), "1023 o");
-        assert_eq!(format_size(1024), "1,0 Ko");
-        assert_eq!(format_size(3500), "3,4 Ko");
-        assert_eq!(format_size(20 * 1024), "20 Ko");
-        assert_eq!(format_size(1024 * 1024 + 200 * 1024), "1,2 Mo");
+        assert_eq!(size_in(Lang::Fr, 0), "0 o");
+        assert_eq!(size_in(Lang::Fr, 512), "512 o");
+        assert_eq!(size_in(Lang::Fr, 1023), "1023 o");
+        assert_eq!(size_in(Lang::Fr, 1024), "1,0 Ko");
+        assert_eq!(size_in(Lang::Fr, 3500), "3,4 Ko");
+        assert_eq!(size_in(Lang::Fr, 20 * 1024), "20 Ko");
+        assert_eq!(size_in(Lang::Fr, 1024 * 1024 + 200 * 1024), "1,2 Mo");
+        assert_eq!(size_in(Lang::En, 512), "512 B");
+        assert_eq!(size_in(Lang::En, 3500), "3.4 KB");
+        assert_eq!(size_in(Lang::En, 1024 * 1024 + 200 * 1024), "1.2 MB");
     }
 
     #[test]
     fn ages_are_relative() {
-        assert_eq!(format_age(0), "a l'instant");
-        assert_eq!(format_age(59), "a l'instant");
-        assert_eq!(format_age(5 * 60 + 10), "il y a 5 min");
-        assert_eq!(format_age(2 * 3600 + 5), "il y a 2 h");
-        assert_eq!(format_age(3 * 86400 + 7), "il y a 3 j");
+        assert_eq!(age_in(Lang::Fr, 0), "a l'instant");
+        assert_eq!(age_in(Lang::Fr, 59), "a l'instant");
+        assert_eq!(age_in(Lang::Fr, 5 * 60 + 10), "il y a 5 min");
+        assert_eq!(age_in(Lang::Fr, 2 * 3600 + 5), "il y a 2 h");
+        assert_eq!(age_in(Lang::Fr, 3 * 86400 + 7), "il y a 3 j");
+        assert_eq!(age_in(Lang::En, 0), "just now");
+        assert_eq!(age_in(Lang::En, 5 * 60 + 10), "5 min ago");
+        assert_eq!(age_in(Lang::En, 3 * 86400 + 7), "3 d ago");
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
-        assert_eq!(age_of(Some(now - Duration::from_secs(120)), now), "il y a 2 min");
-        assert_eq!(age_of(Some(now + Duration::from_secs(50)), now), "a l'instant");
-        assert_eq!(age_of(None, now), "date inconnue");
+        assert_eq!(age_of(Some(now - Duration::from_secs(120)), now), "2 min ago");
+        assert_eq!(age_of(Some(now + Duration::from_secs(50)), now), "just now");
+        assert_eq!(age_of(None, now), "unknown date");
     }
 
     #[test]
@@ -300,7 +318,7 @@ mod tests {
         assert!(matches!(lines(vec![], None, &PendingDelete::default(), now)[..], [Line::Empty]));
         let pending = PendingDelete(Some(("a".into(), "2".into(), 0.0)));
         let keys: Vec<String> = lines(vec![save("a", "1"), save("a", "2"), save("b", "1")], None, &pending, now).iter().map(Line::key).collect();
-        assert_eq!(keys, ["g:a", "s:a/1:10 o:a l'instant:false", "s:a/2:10 o:a l'instant:true", "g:b", "s:b/1:10 o:a l'instant:false"]);
+        assert_eq!(keys, ["g:a", "s:a/1:10 B:just now:false", "s:a/2:10 B:just now:true", "g:b", "s:b/1:10 B:just now:false"]);
         let many: Vec<SaveInfo> = (0..15).map(|i| save("a", &format!("{i:02}"))).collect();
         let out = lines(many, None, &PendingDelete::default(), now);
         assert_eq!(out.len(), 1 + MAX_ROWS + 1);

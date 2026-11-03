@@ -1,12 +1,15 @@
-//! Fenêtre Assets (F6) : les fichiers d'un jeu décompilé, modèles 3D et images aux formats
+//! Fenêtre Assets (F6) : les fichiers d'un jeu, lus dans sa rom, modèles 3D et images aux formats
 //! Nintendo standard, pour reconnaître et nommer les objets du jeu.
 //!
-//! - les jeux sont les dossiers `<projets>/<jeu>/extract/<version>/files` (NitroFS extrait par
-//!   dsd) ; `<projets>` = `--projects=<dossier>`, la variable `NDS_DECOMP_PROJECTS`, ou
-//!   `D:\... logiciel\decomp\decomp ds\projets` ;
+//! - les jeux sont les roms du dossier `rom` du launcher (`library`) ;
 //! - la liste montre chaque fichier avec son chemin dans NitroFS (celui que le code du jeu
 //!   charge ; `archive.narc#n` pour le n-ième fichier d'une archive), reconnu par sa signature ;
-//!   taper du texte filtre la liste, la molette la fait défiler ;
+//!   taper du texte filtre la liste (dans tout le jeu), la molette ou la barre la font défiler ;
+//! - les flèches se déplacent dans la liste, la grille et les menus (Page préc./suiv., Début et Fin aussi),
+//!   Droite ou Entrée ouvrent un dossier, Gauche remonte ;
+//! - un curseur règle la vitesse des animations (aperçu et vignettes) ;
+//! - la liste se parcourt par dossiers, et une archive s'ouvre comme un dossier (clic pour entrer, `..` ou
+//!   Retour arrière pour remonter) ; le bouton « A plat » montre tous les fichiers d'un coup ;
 //! - clic = aperçu : `.nsbmd` en 3D (glisser = tourner, clic droit / milieu = déplacer, molette =
 //!   zoom), textures `.nsbtx`, palettes `.nclr`, tuiles `.ncgr`/`.ncbr`, écrans `.nscr`, cellules
 //!   `.ncer` ; la palette, les tuiles ou les textures qui vont avec sont devinées (même dossier,
@@ -17,14 +20,17 @@
 //! - « Copier le chemin » met le chemin NitroFS dans le presse-papiers (pour le relier aux
 //!   fonctions du jeu dans DS Decomp Studio) ;
 //! - section « rom.bin » : les fichiers de l'archive numérotée rom.bin (Lego Star Wars II, Les
-//!   Sims 2...) sortis par `studio/gametools/romarc.py extract` dans `<jeu>/build/romarc`, montrés
-//!   `rom.bin#n` ; « Copier le chemin » y copie le n° n seul (clé de DS Decomp Studio) et les
+//!   Sims 2...), lus et dépaquetés depuis la rom (`romarc`), montrés `rom.bin#n` ; « Copier le chemin » y copie le n° n seul (clé de DS Decomp Studio) et les
 //!   textures d'un modèle sont cherchées dans les `.nsbtx` aux numéros les plus proches.
 //!
 //! Lecture des formats : crate `nds-nitro` (code d'apicula pour la 3D).
 
+pub mod review;
+
+use std::collections::BTreeMap;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bevy::asset::RenderAssetUsages;
@@ -35,18 +41,21 @@ use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerD
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::input::mouse::MouseScrollUnit;
 use bevy::mesh::{Indices, PrimitiveTopology};
-use bevy::picking::events::{PointerDrag, PointerScroll};
+use bevy::picking::events::{PointerDrag, PointerDragEnd, PointerPress, PointerScroll};
 use bevy::picking::hover::Hovered;
 use bevy::picking::pointer::PointerButton;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::render::view::Tonemapping;
-use bevy::ui::Pressed;
+use bevy::ui::{Pressed, UiGlobalTransform};
 use bevy::ui_widgets::{Activate, Button};
 use bevy::window::{WindowRef, WindowResolution};
 use nds_nitro::{model3d, Kind, Rgba};
 
-use crate::asset_scan::{all_formats, choices_for, decode, find_games, run_index, scan, size_text, Choices, Decoded, Entry, FormatStat, GameDir, IndexState};
+use crate::video::{VideoAudio, VideoPlayer};
+use crate::i18n::{t, tr, Language, Tr};
+use crate::library;
+use crate::asset_scan::{all_formats, choices_for, decode, find_games, run_index, scan, thumbnail, kind_text, size_text, Choices, Decoded, Entry, FormatStat, GameDir, IndexState};
 
 /// La fenêtre des assets (la fermer ne quitte pas le studio).
 #[derive(Component)]
@@ -56,11 +65,17 @@ pub struct AssetsWindow;
 #[derive(Message)]
 pub struct ToggleAssets;
 
-const DEFAULT_PROJECTS: &str = r"D:\... logiciel\decomp\decomp ds\projets";
 /// Calque des modèles 3D montrés (ni les jeux ni les écrans ne l'utilisent).
 const LAYER: usize = 24;
 const ROWS: usize = 36;
+/// Vue en grille : colonnes et lignes de vignettes, fils qui les dessinent, vignettes gardées en mémoire.
+const GRID_COLUMNS: usize = 4;
+const GRID_LINES: usize = 6;
+const GRID_THREADS: usize = 2;
+const GRID_KEPT: usize = 400;
 const ROW_H: f32 = 21.0;
+/// Lignes montrées de l'aperçu en texte.
+const TEXT_ROWS: usize = 42;
 /// Menus déroulants : largeur, lignes visibles, hauteur d'une ligne, largeur d'une colonne.
 const MENU_W: f32 = 860.0;
 const MENU_ROWS: usize = 28;
@@ -69,6 +84,16 @@ const MENU_COLUMN: f32 = 100.0;
 /// Taille de l'image où la vue 3D est rendue.
 const VIEW_W: u32 = 1280;
 const VIEW_H: u32 = 960;
+/// Barres de défilement : largeur et plus petite part de la barre pour le bouton (il reste attrapable avec des milliers de fichiers).
+const BAR_W: f32 = 14.0;
+const BAR_MIN_THUMB: f32 = 0.06;
+/// Colonne de gauche : les marges, la barre et les colonnes de vignettes (une vignette et ses marges : 138).
+const LEFT_W: f32 = 22.0 + BAR_W + 4.0 + GRID_COLUMNS as f32 * 138.0;
+/// Vitesse des animations : bornes, et écart autour de x1 où le curseur s'accroche.
+const SPEED_MIN: f32 = 0.1;
+const SPEED_MAX: f32 = 4.0;
+const SPEED_SNAP: f32 = 0.06;
+const SPEED_W: f32 = 240.0;
 
 const BG: Color = Color::srgb(0.1, 0.11, 0.13);
 const SIDEBAR: Color = Color::srgb(0.075, 0.08, 0.095);
@@ -97,7 +122,17 @@ enum Ctl {
     Width,
     Cell,
     Model,
+    Link,
+    Anim,
 }
+
+/// Le texte montré pour un fichier qu'on ne sait pas décoder.
+#[derive(Component)]
+struct PreviewText;
+
+/// Le son en cours (arrêté en changeant de fichier).
+#[derive(Component)]
+struct PreviewSound;
 
 #[derive(Resource)]
 pub(crate) struct AssetBrowser {
@@ -111,19 +146,28 @@ pub(crate) struct AssetBrowser {
     camera3d: Option<Entity>,
     light: Option<Entity>,
     view3d: Handle<Image>,
-    root: PathBuf,
     games: Vec<GameDir>,
     game: Option<usize>,
     menu: Menu,
     menu_query: String,
     menu_scroll: usize,
     menu_len: usize,
+    /// La ligne du menu choisie aux flèches (Entrée la prend).
+    menu_cursor: usize,
     menu_dirty: bool,
     index: Arc<Mutex<IndexState>>,
     index_started: bool,
     index_seen: u64,
-    entries: Vec<Entry>,
+    entries: Arc<Vec<Entry>>,
     shown: Vec<usize>,
+    /// Vue par dossiers : le dossier ouvert (vide = la racine), les lignes de dossiers avant ses fichiers, et où
+    /// chaque dossier en était quand on l'a quitté.
+    folder_mode: bool,
+    folder: String,
+    folders: Vec<FolderLine>,
+    folder_scroll: HashMap<String, usize>,
+    /// Le dossier où les flèches se sont arrêtées (un fichier, lui, est choisi et montré).
+    folder_cursor: Option<String>,
     filter: String,
     /// Format choisi dans le menu des formats : seuls ses fichiers sont listés.
     format_filter: Option<String>,
@@ -147,6 +191,63 @@ pub(crate) struct AssetBrowser {
     /// Fichier à montrer quand la lecture est finie.
     want_file: Option<String>,
     start_menu: Option<(Menu, String)>,
+    /// Aperçu animé : images 2D (poignée, durée en secondes) ou modèle 3D.
+    frames: Vec<(Handle<Image>, f32)>,
+    model_anim: Option<ModelAnim>,
+    /// Vue en grille, et les vignettes déjà prêtes (par n° de fichier ; vide = pas d'image).
+    grid: bool,
+    thumbs: HashMap<usize, Vec<(Handle<Image>, f32)>>,
+    jobs: Arc<ThumbJobs>,
+    anim_time: f32,
+    anim_speed: f32,
+    sound: Option<Handle<bevy::audio::AudioSource>>,
+    video: Option<VideoPlayer>,
+    /// Aperçu en texte, et sa première ligne visible.
+    text_lines: Vec<String>,
+    text_scroll: usize,
+    text_font: Option<Handle<Font>>,
+    text_shown: Option<(usize, usize)>,
+    /// Mode validation (`review`) : le clavier et F6 lui reviennent ; change à chaque aperçu dessiné.
+    review: bool,
+    review_unfocused: bool,
+    preview_serial: u64,
+}
+
+/// Une ligne de dossier : où elle mène, ce qu'elle affiche, ses fichiers (`None` pour `..`).
+#[derive(Clone)]
+struct FolderLine {
+    path: String,
+    name: String,
+    files: Option<usize>,
+}
+
+/// Les vignettes à dessiner (plusieurs fils) et celles qui sont prêtes.
+#[derive(Default)]
+struct ThumbJobs {
+    queue: Mutex<VecDeque<usize>>,
+    done: Mutex<Vec<(usize, Option<Vec<(Rgba, u16)>>)>>,
+    running: AtomicUsize,
+}
+
+/// Une vignette de la grille : le fichier qu'elle montre.
+#[derive(Component)]
+struct GridThumb(usize);
+
+#[derive(Component)]
+struct GridToggle;
+
+#[derive(Component)]
+struct FolderToggle;
+
+/// Une ligne ou une tuile qui ouvre ce dossier.
+#[derive(Component)]
+struct FolderRow(String);
+
+struct ModelAnim {
+    meshes: Vec<Handle<Mesh>>,
+    frames: Vec<Vec<(Vec<[f32; 3]>, Vec<[f32; 3]>)>>,
+    seconds_per_frame: f32,
+    shown: usize,
 }
 
 impl Default for AssetBrowser {
@@ -162,19 +263,24 @@ impl Default for AssetBrowser {
             camera3d: None,
             light: None,
             view3d: Handle::default(),
-            root: PathBuf::new(),
             games: Vec::new(),
             game: None,
             menu: Menu::None,
             menu_query: String::new(),
             menu_scroll: 0,
             menu_len: 0,
+            menu_cursor: 0,
             menu_dirty: false,
             index: Arc::default(),
             index_started: false,
             index_seen: 0,
-            entries: Vec::new(),
+            entries: Arc::new(Vec::new()),
             shown: Vec::new(),
+            folder_mode: true,
+            folder: String::new(),
+            folders: Vec::new(),
+            folder_scroll: HashMap::new(),
+            folder_cursor: None,
             filter: String::new(),
             format_filter: None,
             all_files: false,
@@ -193,6 +299,22 @@ impl Default for AssetBrowser {
             scanning: None,
             want_file: None,
             start_menu: None,
+            frames: Vec::new(),
+            model_anim: None,
+            grid: false,
+            thumbs: HashMap::new(),
+            jobs: Arc::new(ThumbJobs::default()),
+            anim_time: 0.0,
+            anim_speed: 1.0,
+            sound: None,
+            video: None,
+            text_lines: Vec::new(),
+            text_scroll: 0,
+            text_font: None,
+            text_shown: None,
+            review: false,
+            review_unfocused: false,
+            preview_serial: 0,
         }
     }
 }
@@ -251,17 +373,38 @@ struct PathText;
 #[derive(Component)]
 struct Preview3d;
 
+/// Ce que fait défiler une barre.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
+enum Bar {
+    List,
+    Menu,
+}
+
+/// Le bouton de la barre (il suit la position).
+#[derive(Component)]
+struct BarThumb(Bar);
+
+#[derive(Component)]
+struct SpeedTrack;
+
+#[derive(Component)]
+struct SpeedKnob;
+
+#[derive(Component)]
+struct SpeedText;
+
+/// La ligne du menu où sont les flèches.
+#[derive(Component)]
+struct MenuCursor;
+
 pub struct AssetBrowserPlugin;
 
 impl Plugin for AssetBrowserPlugin {
     fn build(&self, app: &mut App) {
-        let mut browser = AssetBrowser::default();
-        let mut projects = std::env::var_os("NDS_DECOMP_PROJECTS").map(PathBuf::from);
+        let mut browser = AssetBrowser { anim_speed: load_speed(), ..default() };
         let (mut game, mut file, mut open) = (None, None, false);
         for arg in std::env::args().skip(1) {
-            if let Some(v) = arg.strip_prefix("--projects=") {
-                projects = Some(PathBuf::from(v));
-            } else if arg == "--assets" {
+            if arg == "--assets" {
                 open = true;
             } else if let Some(v) = arg.strip_prefix("--assets=") {
                 (open, game) = (true, Some(v.to_string()));
@@ -273,13 +416,12 @@ impl Plugin for AssetBrowserPlugin {
                 browser.start_menu = Some((if menu == "formats" { Menu::Formats } else { Menu::Games }, query.to_string()));
             }
         }
-        browser.root = projects.unwrap_or_else(|| PathBuf::from(DEFAULT_PROJECTS));
         if open {
             browser.start = Some((game.unwrap_or_default(), file));
         }
         app.insert_resource(browser).add_message::<ToggleAssets>().add_systems(
             Update,
-            (toggle_window, poll_scan, type_filter, rebuild_menu, rebuild_list, render_preview, rebuild_controls, refresh_texts, fit_image, place_camera, looks).chain(),
+            (redo_on_language, toggle_window, poll_scan, type_filter, rebuild_menu, rebuild_list, render_preview, play_preview, update_grid, show_preview_text, rebuild_controls, refresh_texts, fit_image, place_camera, looks, update_bars, update_speed).chain(),
         );
     }
 }
@@ -306,25 +448,228 @@ fn matches_words(text: &str, words: &[String]) -> bool {
 // --------------------------------------------------------------------------------------------
 
 impl AssetBrowser {
-    /// Dossier des projets de décompilation.
-    pub(crate) fn projects_root(&self) -> PathBuf {
-        self.root.clone()
+    fn page_size(&self) -> usize {
+        if self.grid { GRID_COLUMNS * GRID_LINES } else { ROWS }
     }
 
-    /// Ouvre la fenêtre (si besoin) sur ce projet.
-    pub(crate) fn show_game(&mut self, project: &str) {
-        self.start = Some((project.to_string(), None));
+    /// Les lignes de la liste : les dossiers, puis les fichiers.
+    fn row_count(&self) -> usize {
+        self.folders.len() + self.shown.len()
     }
 
+    /// Les dossiers de la page montrée.
+    fn page_folders(&self) -> Vec<FolderLine> {
+        self.folders.iter().skip(self.scroll).take(self.page_size()).cloned().collect()
+    }
+
+    /// Les fichiers de la page montrée, sous ses dossiers.
+    fn page_files(&self) -> Vec<usize> {
+        let folders = self.folders.len().saturating_sub(self.scroll).min(self.page_size());
+        self.shown.iter().skip(self.scroll.saturating_sub(self.folders.len())).take(self.page_size() - folders).copied().collect()
+    }
+
+    /// Une recherche ou un format cherchent dans tout le jeu : les dossiers s'effacent.
+    fn folder_view(&self) -> bool {
+        self.folder_mode && self.filter.is_empty() && self.format_filter.is_none()
+    }
+
+    /// La ligne où sont les flèches : le dossier retenu, sinon le fichier choisi s'il est dans la liste.
+    fn cursor_row(&self) -> Option<usize> {
+        if let Some(i) = self.folder_cursor.as_ref().and_then(|path| self.folders.iter().position(|f| f.path == *path)) {
+            return Some(i);
+        }
+        let selected = self.selected?;
+        self.shown.iter().position(|&s| s == selected).map(|i| i + self.folders.len())
+    }
+
+    /// Aller à une ligne : un fichier est montré, un dossier attend Entrée ; la page suit.
+    fn move_to_row(&mut self, row: usize) {
+        let total = self.row_count();
+        if total == 0 {
+            return;
+        }
+        let row = row.min(total - 1);
+        let (page, step) = (self.page_size(), if self.grid { GRID_COLUMNS } else { 1 });
+        let wanted = if row < self.scroll {
+            row / step * step
+        } else if row >= self.scroll + page {
+            (row / step + 1) * step - page
+        } else {
+            self.scroll
+        };
+        if wanted != self.scroll {
+            self.scroll = wanted;
+            self.list_dirty = true;
+        }
+        if self.cursor_row() == Some(row) {
+            return;
+        }
+        match self.folders.get(row) {
+            Some(folder) => self.folder_cursor = Some(folder.path.clone()),
+            None => self.select(self.shown[row - self.folders.len()]),
+        }
+    }
+
+    fn move_cursor(&mut self, delta: i64) {
+        // Rien de choisi : la première flèche prend la première ligne de la page
+        let row = match self.cursor_row() {
+            Some(row) => (row as i64 + delta).max(0) as usize,
+            None => self.scroll,
+        };
+        self.move_to_row(row);
+    }
+
+    /// Droite ou Entrée sur un dossier : il s'ouvre.
+    fn open_cursor_folder(&mut self) {
+        let path = self.cursor_row().and_then(|row| self.folders.get(row)).map(|f| f.path.clone());
+        if let Some(path) = path {
+            self.open_folder(path);
+        }
+    }
+
+    fn move_menu_cursor(&mut self, delta: i64) {
+        let last = self.menu_len.saturating_sub(1) as i64;
+        self.menu_cursor = (self.menu_cursor as i64 + delta).clamp(0, last) as usize;
+        if self.menu_cursor < self.menu_scroll {
+            self.menu_scroll = self.menu_cursor;
+        } else if self.menu_cursor >= self.menu_scroll + MENU_ROWS {
+            self.menu_scroll = self.menu_cursor + 1 - MENU_ROWS;
+        }
+        self.menu_dirty = true;
+    }
+
+    /// Position, nombre de lignes et lignes visibles de ce que fait défiler une barre.
+    fn bar_range(&self, bar: Bar) -> (usize, usize, usize) {
+        match bar {
+            Bar::List => (self.scroll, self.row_count(), self.page_size()),
+            Bar::Menu => (self.menu_scroll, self.menu_len, MENU_ROWS),
+        }
+    }
+
+    /// Fait défiler d'après la place du pointeur dans la barre (0 = en haut, 1 = en bas).
+    fn scroll_bar_to(&mut self, bar: Bar, place: f32) {
+        let (position, total, page) = self.bar_range(bar);
+        let max = total.saturating_sub(page);
+        if max == 0 {
+            return;
+        }
+        let share = thumb_share(total, page);
+        let ratio = ((place - share / 2.0) / (1.0 - share)).clamp(0.0, 1.0);
+        let mut wanted = (ratio * max as f32).round() as usize;
+        if bar == Bar::List && self.grid {
+            wanted = wanted / GRID_COLUMNS * GRID_COLUMNS;
+        }
+        if wanted == position {
+            return;
+        }
+        match bar {
+            Bar::List => {
+                self.scroll = wanted;
+                self.list_dirty = true;
+            }
+            Bar::Menu => {
+                self.menu_scroll = wanted;
+                self.menu_cursor = wanted;
+                self.menu_dirty = true;
+            }
+        }
+    }
+
+    fn open_folder(&mut self, path: String) {
+        self.folder_cursor = None;
+        let scroll = self.scroll;
+        self.folder_scroll.insert(std::mem::take(&mut self.folder), scroll);
+        self.scroll = self.folder_scroll.get(&path).copied().unwrap_or(0);
+        self.folder = path;
+        self.list_dirty = true;
+    }
+
+    fn folder_up(&mut self) {
+        let parent = self.folder.rsplit_once('/').map_or(String::new(), |(parent, _)| parent.to_string());
+        let left = self.folder.clone();
+        self.open_folder(parent);
+        // Les flèches repartent du dossier qu'on vient de quitter
+        self.folder_cursor = Some(left);
+    }
+
+    /// Les fils en cours finissent sur l'ancienne file : leurs résultats ne servent plus.
+    fn reset_thumbs(&mut self) {
+        self.jobs.queue.lock().unwrap().clear();
+        self.jobs = Arc::new(ThumbJobs::default());
+        self.thumbs.clear();
+    }
+
+    /// Demande les vignettes de la page montrée (celles des autres pages attendront).
+    fn request_thumbs(&mut self) {
+        let wanted: VecDeque<usize> = self.page_files().into_iter().filter(|i| !self.thumbs.contains_key(i)).collect();
+        let count = wanted.len();
+        *self.jobs.queue.lock().unwrap() = wanted;
+        for _ in 0..count.min(GRID_THREADS) {
+            if self.jobs.running.fetch_add(1, Ordering::SeqCst) >= GRID_THREADS {
+                self.jobs.running.fetch_sub(1, Ordering::SeqCst);
+                break;
+            }
+            let (jobs, entries) = (self.jobs.clone(), self.entries.clone());
+            std::thread::spawn(move || {
+                loop {
+                    let next = jobs.queue.lock().unwrap().pop_front();
+                    let Some(index) = next else { break };
+                    let thumb = thumbnail(&entries, index);
+                    jobs.done.lock().unwrap().push((index, thumb));
+                }
+                jobs.running.fetch_sub(1, Ordering::SeqCst);
+            });
+        }
+    }
+
+    /// Ouvre la fenêtre (si besoin) sur cette rom (nom de fichier).
+    pub(crate) fn show_game(&mut self, file: &str) {
+        self.start = Some((file.to_string(), None));
+    }
+
+    /// Une rom par son nom de fichier ou son libellé (« Titre (CODE) », ou son début).
     fn find_game(&self, game: &str) -> Option<usize> {
         let wanted = game.to_lowercase();
-        self.games.iter().position(|g| g.label.to_lowercase() == wanted).or_else(|| self.games.iter().position(|g| !wanted.is_empty() && g.label.to_lowercase().starts_with(&wanted)))
+        let ending = format!("/{}", wanted.replace('\\', "/"));
+        let file_is = |g: &GameDir| g.rom.to_string_lossy().replace('\\', "/").to_lowercase().ends_with(&ending);
+        self.games.iter().position(file_is).or_else(|| self.games.iter().position(|g| g.label.to_lowercase() == wanted)).or_else(|| self.games.iter().position(|g| !wanted.is_empty() && g.label.to_lowercase().starts_with(&wanted)))
+    }
+
+    /// Relit le dossier des roms (une rom a pu être ajoutée dans le launcher). Si la liste a changé,
+    /// l'index est complété dès que le calcul en cours est fini.
+    fn refresh_games(&mut self) {
+        let current = self.game.map(|g| self.games[g].rom.clone());
+        let found = find_games(&library::rom_dir());
+        let same = found.len() == self.games.len() && found.iter().zip(&self.games).all(|(a, b)| a.rom == b.rom);
+        self.games = found;
+        self.game = current.as_ref().and_then(|rom| self.games.iter().position(|g| g.rom == *rom));
+        if current.is_some() && self.game.is_none() {
+            self.entries = Arc::new(Vec::new());
+            self.reset_thumbs();
+            self.folder.clear();
+            self.folder_scroll.clear();
+            self.selected = None;
+            self.image = None;
+            self.is3d = false;
+            self.info.clear();
+            self.list_dirty = true;
+            self.controls_dirty = true;
+            self.preview_dirty = true;
+        }
+        if !same {
+            let index = self.index.lock().unwrap();
+            if index.done >= index.total {
+                self.index_started = false;
+            }
+            drop(index);
+        }
     }
 
     fn open_menu(&mut self, menu: Menu) {
         self.menu = if self.menu == menu { Menu::None } else { menu };
         self.menu_query.clear();
         self.menu_scroll = 0;
+        self.menu_cursor = 0;
         self.menu_dirty = true;
     }
 
@@ -348,7 +693,7 @@ impl AssetBrowser {
     fn pick_format(&mut self, ext: &str, all_viewable: bool) {
         self.close_menu();
         if self.game.is_none() {
-            self.status = "Choisissez d'abord un jeu : le format filtre ses fichiers".into();
+            self.status = tr("Choose a game first: the format filters its files", "Choisissez d'abord un jeu : le format filtre ses fichiers").into();
             return;
         }
         self.filter.clear();
@@ -361,12 +706,16 @@ impl AssetBrowser {
     fn open_game(&mut self, index: usize) {
         self.game = Some(index);
         self.close_menu();
-        self.entries.clear();
+        self.entries = Arc::new(Vec::new());
+        self.reset_thumbs();
         self.format_filter = None;
+        self.folder.clear();
+        self.folder_scroll.clear();
+        self.folder_cursor = None;
         let result = Arc::new(Mutex::new(None));
-        let (files, out) = (self.games[index].files.clone(), result.clone());
+        let (rom, out) = (self.games[index].rom.clone(), result.clone());
         std::thread::spawn(move || {
-            let entries = scan(&files);
+            let entries = scan(&rom);
             *out.lock().unwrap() = Some(entries);
         });
         self.scanning = Some(result);
@@ -379,25 +728,28 @@ impl AssetBrowser {
         self.list_dirty = true;
         self.controls_dirty = true;
         self.preview_dirty = true;
-        self.status = format!("Lecture des fichiers de {}...", self.games[index].label);
+        self.status = t!("Reading the files of {}...", "Lecture des fichiers de {}...", self.games[index].label);
     }
 
     fn scan_done(&mut self, entries: Vec<Entry>) {
-        self.entries = entries;
+        self.entries = Arc::new(entries);
+        self.reset_thumbs();
         self.scanning = None;
         self.list_dirty = true;
         let viewable = self.entries.iter().filter(|e| e.kind.viewable()).count();
-        self.status = format!("{} fichiers, {} montrables (formats Nintendo standard)", self.entries.len(), viewable);
-        let files = self.game.map(|g| self.games[g].files.clone()).unwrap_or_default();
+        // Rien de montrable (Myst) : la liste montre tous les fichiers plutôt que rien
+        if viewable == 0 {
+            self.all_files = true;
+        }
+        self.status = t!("{} files, {} viewable (standard Nintendo formats)", "{} fichiers, {} montrables (formats Nintendo standard)", self.entries.len(), viewable);
         let romarc = self.entries.iter().filter(|e| e.rom_index.is_some()).count();
         if romarc > 0 {
-            self.status += &format!(" ; rom.bin : {romarc} fichiers (build/romarc, filtre 'rom.bin')");
-        } else if files.join("rom.bin").is_file() {
-            self.status += " ; rom.bin pas encore extrait : dans le dossier du jeu, python ../../studio/gametools/romarc.py extract";
+            self.status += &t!(" ; rom.bin: {romarc} files (filter 'rom.bin')", " ; rom.bin : {romarc} fichiers (filtre 'rom.bin')");
         }
         if let Some(i) = self.want_file.take().and_then(|f| self.entries.iter().position(|e| e.path.eq_ignore_ascii_case(&f))) {
+            self.folder = self.entries[i].folder();
             self.filter_entries();
-            self.scroll = self.shown.iter().position(|&s| s == i).unwrap_or(0).saturating_sub(ROWS / 2);
+            self.scroll = (self.folders.len() + self.shown.iter().position(|&s| s == i).unwrap_or(0)).saturating_sub(self.page_size() / 2);
             self.select(i);
         }
     }
@@ -417,10 +769,43 @@ impl AssetBrowser {
                 words.iter().all(|w| hay.contains(w.as_str()))
             })
             .collect();
-        self.scroll = self.scroll.min(self.shown.len().saturating_sub(ROWS));
+        self.split_into_folders();
+        self.scroll = self.scroll.min(self.row_count().saturating_sub(self.page_size()));
+    }
+
+    /// Vue par dossiers : ne garde que les fichiers du dossier ouvert, les autres comptent pour ses sous-dossiers.
+    fn split_into_folders(&mut self) {
+        self.folders.clear();
+        if !self.folder_view() {
+            return;
+        }
+        let prefix = if self.folder.is_empty() { String::new() } else { format!("{}/", self.folder) };
+        let mut children: BTreeMap<String, usize> = BTreeMap::new();
+        let mut here = Vec::new();
+        for &i in &self.shown {
+            let folder = self.entries[i].folder();
+            if folder == self.folder {
+                here.push(i);
+            } else if let Some(rest) = folder.strip_prefix(&prefix) {
+                let child = rest.split('/').next().unwrap_or(rest);
+                *children.entry(format!("{prefix}{child}")).or_default() += 1;
+            }
+        }
+        // Une archive ouverte est son dossier : pas besoin de sa ligne de fichier en plus
+        here.retain(|&i| !children.contains_key(&self.entries[i].path));
+        self.shown = here;
+        if !self.folder.is_empty() {
+            let parent = self.folder.rsplit_once('/').map_or(String::new(), |(parent, _)| parent.to_string());
+            self.folders.push(FolderLine { path: parent, name: "..".to_string(), files: None });
+        }
+        for (path, files) in children {
+            let name = path.rsplit('/').next().unwrap_or(&path).to_string();
+            self.folders.push(FolderLine { path, name, files: Some(files) });
+        }
     }
 
     fn select(&mut self, index: usize) {
+        self.folder_cursor = None;
         self.selected = Some(index);
         self.choices = choices_for(&self.entries, index);
         self.orbit = Orbit::default();
@@ -432,6 +817,16 @@ impl AssetBrowser {
 // --------------------------------------------------------------------------------------------
 //  Fenêtre
 // --------------------------------------------------------------------------------------------
+
+/// Les listes sont refaites dans la nouvelle langue.
+fn redo_on_language(language: Res<Language>, mut browser: ResMut<AssetBrowser>) {
+    if language.is_changed() && !language.is_added() {
+        browser.menu_dirty = true;
+        browser.list_dirty = true;
+        browser.controls_dirty = true;
+        browser.preview_dirty = true;
+    }
+}
 
 fn toggle_window(
     mut commands: Commands,
@@ -449,11 +844,13 @@ fn toggle_window(
     }
     let start = browser.start.take();
     let requested = requests.read().count() % 2 == 1;
-    if !keys.just_pressed(KeyCode::F6) && !requested && start.is_none() {
+    let pressed = keys.just_pressed(KeyCode::F6) && !browser.review;
+    if !pressed && !requested && start.is_none() {
         return;
     }
     // Déjà ouverte et un jeu demandé (launcher) : elle reste ouverte et montre ce jeu
     if let (Some(_), Some((game, _))) = (browser.window, &start) {
+        browser.refresh_games();
         if let Some(i) = browser.find_game(game) {
             browser.menu = Menu::None;
             browser.menu_dirty = true;
@@ -468,7 +865,7 @@ fn toggle_window(
         }
         return;
     }
-    let window = commands.spawn((Window { title: "Nds Game Studio - Assets (F6)".into(), resolution: WindowResolution::new(1500, 920), ..default() }, AssetsWindow)).id();
+    let window = commands.spawn((Window { title: "Nds Game Studio - Assets (F6)".into(), resolution: WindowResolution::new(1500, 920), focused: !browser.review_unfocused, ..default() }, AssetsWindow)).id();
     let camera = commands
         .spawn((Camera2d, Camera { order: 7, clear_color: ClearColorConfig::Custom(BG), ..default() }, RenderTarget::Window(WindowRef::Entity(window)), RenderLayers::none()))
         .id();
@@ -492,10 +889,10 @@ fn toggle_window(
         .spawn((Node { width: percent(100), height: percent(100), flex_direction: FlexDirection::Row, ..default() }, UiTargetCamera(camera)))
         .with_children(|root| {
             // Colonne de gauche : jeu, filtre, liste des fichiers
-            root.spawn((Node { width: px(560), flex_shrink: 0.0, height: percent(100), flex_direction: FlexDirection::Column, padding: UiRect::all(px(10)), row_gap: px(6), ..default() }, BackgroundColor(SIDEBAR)))
+            root.spawn((Node { width: px(LEFT_W), flex_shrink: 0.0, height: percent(100), flex_direction: FlexDirection::Column, padding: UiRect::all(px(10)), row_gap: px(6), ..default() }, BackgroundColor(SIDEBAR)))
                 .with_children(|side| {
                     side.spawn(Node { flex_direction: FlexDirection::Row, column_gap: px(8), align_items: AlignItems::Center, ..default() }).with_children(|row| {
-                        row.spawn(label("Jeu :", 15.0, DIM));
+                        row.spawn((label(tr("Game:", "Jeu :"), 15.0, DIM), Tr("Game:", "Jeu :")));
                         row.spawn((Button, Hovered::default(), Node { flex_grow: 1.0, justify_content: JustifyContent::FlexStart, ..item_node() }, BackgroundColor(ITEM), GameButton))
                             .observe(|_: On<Activate>, mut b: ResMut<AssetBrowser>| {
                                 b.open_menu(Menu::Games);
@@ -503,6 +900,19 @@ fn toggle_window(
                             .with_child((label("", 15.0, TEXT), GameButton));
                     });
                     side.spawn(Node { flex_direction: FlexDirection::Row, column_gap: px(8), align_items: AlignItems::Center, ..default() }).with_children(|row| {
+                        row.spawn((Button, Hovered::default(), item_node(), BackgroundColor(ITEM)))
+                            .observe(|_: On<Activate>, mut b: ResMut<AssetBrowser>| {
+                                b.grid = !b.grid;
+                                b.list_dirty = true;
+                            })
+                            .with_child((label("", 14.0, TEXT), GridToggle));
+                        row.spawn((Button, Hovered::default(), item_node(), BackgroundColor(ITEM)))
+                            .observe(|_: On<Activate>, mut b: ResMut<AssetBrowser>| {
+                                b.folder_mode = !b.folder_mode;
+                                b.scroll = 0;
+                                b.list_dirty = true;
+                            })
+                            .with_child((label("", 14.0, TEXT), FolderToggle));
                         row.spawn((Button, Hovered::default(), item_node(), BackgroundColor(ITEM), FilterButton))
                             .observe(|_: On<Activate>, mut b: ResMut<AssetBrowser>| {
                                 b.all_files = !b.all_files;
@@ -518,14 +928,18 @@ fn toggle_window(
                         row.spawn((Button, Hovered::default(), item_node(), BackgroundColor(ITEM), PageButton(1))).observe(page).with_child(label("v", 14.0, TEXT));
                     });
                     side.spawn((label("", 13.0, DIM), ListTitle));
+                    let mut list_row = side.spawn(Node { flex_grow: 1.0, flex_basis: px(0), min_height: px(0), flex_direction: FlexDirection::Row, column_gap: px(4), ..default() });
+                    list_row.with_children(|side| {
                     let list = side
-                        .spawn((Node { flex_grow: 1.0, flex_direction: FlexDirection::Column, overflow: Overflow::clip(), ..default() }, Pickable::default()))
+                        .spawn((Node { flex_grow: 1.0, flex_basis: px(0), min_width: px(0), flex_direction: FlexDirection::Column, overflow: Overflow::clip(), ..default() }, Pickable::default()))
                         .observe(|scroll: On<PointerScroll>, mut b: ResMut<AssetBrowser>| {
                             let lines = match scroll.unit {
                                 MouseScrollUnit::Line => scroll.y * 3.0,
                                 MouseScrollUnit::Pixel => scroll.y / ROW_H,
                             };
-                            let max = b.shown.len().saturating_sub(ROWS) as i64;
+                            // En grille, une ligne de vignettes à la fois
+                            let lines = if b.grid { lines.signum() * GRID_COLUMNS as f32 } else { lines };
+                            let max = b.row_count().saturating_sub(b.page_size()) as i64;
                             let wanted = (b.scroll as i64 - lines.round() as i64).clamp(0, max.max(0)) as usize;
                             if wanted != b.scroll {
                                 b.scroll = wanted;
@@ -534,6 +948,8 @@ fn toggle_window(
                         })
                         .id();
                     ids.insert("list", list);
+                    spawn_bar(side, Bar::List, Node { width: px(BAR_W), flex_shrink: 0.0, ..default() });
+                    });
                 });
             // Aperçu
             root.spawn(Node { flex_grow: 1.0, height: percent(100), flex_direction: FlexDirection::Column, padding: UiRect::all(px(14)), row_gap: px(8), ..default() }).with_children(|panel| {
@@ -544,19 +960,64 @@ fn toggle_window(
                             // rom.bin : le n° seul, la clé de DS Decomp Studio (onglet Data, « Archive (rom.bin) »)
                             let path = b.entries[sel].rom_index.map_or_else(|| b.entries[sel].path.clone(), |n| n.to_string());
                             b.status = match clipboard.set_text(path.clone()) {
-                                Ok(()) => format!("Copie : {path}"),
-                                Err(e) => format!("Presse-papiers indisponible : {e:?}"),
+                                Ok(()) => t!("Copied: {path}", "Copie : {path}"),
+                                Err(e) => t!("Clipboard unavailable: {e:?}", "Presse-papiers indisponible : {e:?}"),
                             };
                         })
-                        .with_child(label("Copier le chemin", 14.0, TEXT));
+                        .with_child((label(tr("Copy the path", "Copier le chemin"), 14.0, TEXT), Tr("Copy the path", "Copier le chemin")));
+                    for (open_file, en, fr) in [(false, "Open its folder", "Ouvrir son dossier"), (true, "Open the file", "Ouvrir le fichier")] {
+                        row.spawn((Button, Hovered::default(), item_node(), BackgroundColor(ITEM), CopyButton))
+                            .observe(move |_: On<Activate>, mut b: ResMut<AssetBrowser>| {
+                                let Some(sel) = b.selected else { return };
+                                let (rom, path) = (b.entries[sel].rom.clone(), b.entries[sel].path.clone());
+                                b.status = crate::mods::reveal(&rom, &path, open_file);
+                            })
+                            .with_child((label(tr(en, fr), 14.0, TEXT), Tr(en, fr)));
+                    }
                     row.spawn((label("", 18.0, TEXT), PathText));
                 });
                 panel.spawn((label("", 13.0, DIM), InfoText));
+                panel.spawn(Node { flex_direction: FlexDirection::Row, column_gap: px(10), align_items: AlignItems::Center, ..default() }).with_children(|row| {
+                    row.spawn((label(tr("Animation speed", "Vitesse des animations"), 14.0, DIM), Tr("Animation speed", "Vitesse des animations")));
+                    row.spawn((Node { width: px(SPEED_W), height: px(18), justify_content: JustifyContent::Center, ..default() }, BackgroundColor(Color::NONE), Pickable::default(), SpeedTrack))
+                        .observe(|press: On<PointerPress>, tracks: Query<(&ComputedNode, &UiGlobalTransform)>, mut b: ResMut<AssetBrowser>| {
+                            if let Ok((node, transform)) = tracks.get(press.entity) {
+                                b.anim_speed = speed_at(track_place(press.pointer.position, node, transform).x);
+                                save_speed(b.anim_speed);
+                            }
+                        })
+                        .observe(|drag: On<PointerDrag>, tracks: Query<(&ComputedNode, &UiGlobalTransform)>, mut b: ResMut<AssetBrowser>| {
+                            if let Ok((node, transform)) = tracks.get(drag.entity) {
+                                b.anim_speed = speed_at(track_place(drag.pointer.position, node, transform).x);
+                            }
+                        })
+                        .observe(|_: On<PointerDragEnd>, b: Res<AssetBrowser>| save_speed(b.anim_speed))
+                        .with_children(|track| {
+                            track.spawn((Node { position_type: PositionType::Absolute, left: px(0), right: px(0), top: px(7), height: px(4), border_radius: BorderRadius::all(px(2)), ..default() }, BackgroundColor(ITEM), Pickable::IGNORE));
+                            track.spawn((Node { position_type: PositionType::Absolute, top: px(1), width: px(16), height: px(16), border_radius: BorderRadius::all(px(8)), ..default() }, BackgroundColor(ITEM_ON), Pickable::IGNORE, SpeedKnob));
+                        });
+                    row.spawn((label("", 14.0, TEXT), Node { width: px(48), ..default() }, SpeedText));
+                    row.spawn((Button, Hovered::default(), item_node(), BackgroundColor(ITEM), CopyButton))
+                        .observe(|_: On<Activate>, mut b: ResMut<AssetBrowser>| {
+                            b.anim_speed = 1.0;
+                            save_speed(1.0);
+                        })
+                        .with_child(label("x1", 14.0, TEXT));
+                });
                 let controls = panel.spawn(Node { flex_direction: FlexDirection::Row, column_gap: px(14), row_gap: px(6), flex_wrap: FlexWrap::Wrap, ..default() }).id();
                 ids.insert("controls", controls);
                 let image_box = panel
-                    .spawn((Node { flex_grow: 1.0, width: percent(100), justify_content: JustifyContent::Center, align_items: AlignItems::Center, overflow: Overflow::clip(), ..default() }, BackgroundColor(Color::srgb(0.13, 0.14, 0.16))))
+                    .spawn((Node { flex_grow: 1.0, width: percent(100), justify_content: JustifyContent::Center, align_items: AlignItems::Center, overflow: Overflow::clip(), ..default() }, BackgroundColor(Color::srgb(0.13, 0.14, 0.16)), Pickable::default()))
+                    .observe(|scroll: On<PointerScroll>, mut b: ResMut<AssetBrowser>| {
+                        let lines = match scroll.unit {
+                            MouseScrollUnit::Line => scroll.y * 3.0,
+                            MouseScrollUnit::Pixel => scroll.y / ROW_H,
+                        };
+                        let max = b.text_lines.len().saturating_sub(TEXT_ROWS) as i64;
+                        b.text_scroll = (b.text_scroll as i64 - lines.round() as i64).clamp(0, max) as usize;
+                    })
                     .with_children(|b| {
+                        b.spawn((Text::new(""), TextFont::from_font_size(14.0), TextColor(TEXT), Node { position_type: PositionType::Absolute, left: px(10), top: px(8), display: Display::None, ..default() }, PreviewText));
                         let node = b
                             .spawn((ImageNode::default(), Node { width: px(1), height: px(1), ..default() }, Visibility::Hidden, Pickable::default()))
                             .observe(orbit_drag)
@@ -572,7 +1033,7 @@ fn toggle_window(
     // Menus déroulants des jeux et des formats (par-dessus tout)
     let overlay = commands
         .spawn((
-            Node { position_type: PositionType::Absolute, top: px(48), left: px(10), width: px(MENU_W), flex_direction: FlexDirection::Column, row_gap: px(2), padding: UiRect::all(px(10)), border_radius: BorderRadius::all(px(8)), display: Display::None, ..default() },
+            Node { position_type: PositionType::Absolute, top: px(48), left: px(10), width: px(MENU_W), flex_direction: FlexDirection::Column, row_gap: px(2), padding: UiRect::new(px(10), px(12.0 + BAR_W), px(10), px(10)), border_radius: BorderRadius::all(px(8)), display: Display::None, ..default() },
             BackgroundColor(Color::srgb(0.13, 0.14, 0.17)),
             GlobalZIndex(10),
             UiTargetCamera(camera),
@@ -591,8 +1052,19 @@ fn toggle_window(
             }
         })
         .id();
+    // À côté du menu et pas dedans : le menu est refait pendant qu'on tire la barre
+    let menu_bar = commands
+        .spawn((
+            bar_bundle(Bar::Menu, Node { position_type: PositionType::Absolute, left: px(10.0 + MENU_W - BAR_W - 6.0), width: px(BAR_W), display: Display::None, ..default() }),
+            GlobalZIndex(11),
+            UiTargetCamera(camera),
+        ))
+        .observe(bar_press)
+        .observe(bar_drag)
+        .with_child(thumb_bundle(Bar::Menu))
+        .id();
     browser.window = Some(window);
-    browser.parts = vec![camera, camera3d, light, root, overlay];
+    browser.parts = vec![camera, camera3d, light, root, overlay, menu_bar];
     browser.list = ids.get("list").copied();
     browser.controls = ids.get("controls").copied();
     browser.image_box = ids.get("image_box").copied();
@@ -604,13 +1076,12 @@ fn toggle_window(
     browser.list_dirty = true;
     browser.controls_dirty = true;
     browser.preview_dirty = true;
-    if browser.games.is_empty() {
-        browser.games = find_games(&browser.root);
-        let root_dir = browser.root.display().to_string();
+    browser.refresh_games();
+    if browser.game.is_none() {
         browser.status = if browser.games.is_empty() {
-            format!("Aucun jeu dans {root_dir} (--projects=<dossier> ou NDS_DECOMP_PROJECTS)")
+            tr("No games: drag a rom into the launcher", "Aucun jeu : glissez une rom dans le launcher").to_string()
         } else {
-            format!("{} jeux dans {root_dir} : choisissez un jeu", browser.games.len())
+            t!("{} games: choose a game", "{} jeux : choisissez un jeu", browser.games.len())
         };
     }
     browser.menu = if browser.game.is_none() && !browser.games.is_empty() { Menu::Games } else { Menu::None };
@@ -620,8 +1091,8 @@ fn toggle_window(
     // Pourcentages et formats de tous les jeux, calculés une fois puis gardés
     if !browser.index_started {
         browser.index_started = true;
-        let (root_dir, state) = (browser.root.clone(), browser.index.clone());
-        std::thread::spawn(move || run_index(&root_dir, &state, false));
+        let state = browser.index.clone();
+        std::thread::spawn(move || run_index(&library::rom_dir(), &state, false));
     }
     if let Some((game, file)) = start {
         if let Some(i) = browser.find_game(&game) {
@@ -635,6 +1106,117 @@ fn toggle_window(
     }
 }
 
+fn bar_bundle(bar: Bar, node: Node) -> impl Bundle {
+    (Node { border_radius: BorderRadius::all(px(BAR_W / 2.0)), ..node }, BackgroundColor(Color::srgb(0.13, 0.14, 0.17)), Pickable::default(), bar)
+}
+
+fn thumb_bundle(bar: Bar) -> impl Bundle {
+    (Node { position_type: PositionType::Absolute, left: px(2), right: px(2), border_radius: BorderRadius::all(px(BAR_W / 2.0 - 2.0)), ..default() }, BackgroundColor(Color::srgb(0.4, 0.43, 0.5)), Pickable::IGNORE, BarThumb(bar))
+}
+
+fn spawn_bar(c: &mut ChildSpawnerCommands, bar: Bar, node: Node) {
+    c.spawn(bar_bundle(bar, node)).observe(bar_press).observe(bar_drag).with_child(thumb_bundle(bar));
+}
+
+/// La part de la barre prise par son bouton.
+fn thumb_share(total: usize, page: usize) -> f32 {
+    (page as f32 / total.max(1) as f32).clamp(BAR_MIN_THUMB, 1.0)
+}
+
+/// Où est le pointeur dans ce noeud : (0, 0) en haut à gauche, (1, 1) en bas à droite.
+fn track_place(pointer: Vec2, node: &ComputedNode, transform: &UiGlobalTransform) -> Vec2 {
+    (pointer / node.inverse_scale_factor() - transform.translation) / node.size().max(Vec2::ONE) + Vec2::splat(0.5)
+}
+
+fn bar_press(press: On<PointerPress>, tracks: Query<(&Bar, &ComputedNode, &UiGlobalTransform)>, mut b: ResMut<AssetBrowser>) {
+    if let Ok((bar, node, transform)) = tracks.get(press.entity) {
+        b.scroll_bar_to(*bar, track_place(press.pointer.position, node, transform).y);
+    }
+}
+
+fn bar_drag(drag: On<PointerDrag>, tracks: Query<(&Bar, &ComputedNode, &UiGlobalTransform)>, mut b: ResMut<AssetBrowser>) {
+    if let Ok((bar, node, transform)) = tracks.get(drag.entity) {
+        b.scroll_bar_to(*bar, track_place(drag.pointer.position, node, transform).y);
+    }
+}
+
+/// Les boutons suivent la position ; la barre du menu suit le menu.
+fn update_bars(b: Res<AssetBrowser>, computed: Query<&ComputedNode>, mut thumbs: Query<(&BarThumb, &mut Node), Without<Bar>>, mut bars: Query<(&Bar, &mut Node), Without<BarThumb>>) {
+    if b.window.is_none() {
+        return;
+    }
+    for (thumb, mut node) in &mut thumbs {
+        let (position, total, page) = b.bar_range(thumb.0);
+        let max = total.saturating_sub(page);
+        let display = if max == 0 { Display::None } else { Display::Flex };
+        if node.display != display {
+            node.display = display;
+        }
+        let share = thumb_share(total, page);
+        let (height, top) = (percent(share * 100.0), percent(position as f32 / max.max(1) as f32 * (1.0 - share) * 100.0));
+        if node.height != height || node.top != top {
+            node.height = height;
+            node.top = top;
+        }
+    }
+    for (bar, mut node) in &mut bars {
+        if *bar != Bar::Menu {
+            continue;
+        }
+        let display = if b.menu == Menu::None { Display::None } else { Display::Flex };
+        if node.display != display {
+            node.display = display;
+        }
+        let Some(area) = b.menu_overlay.and_then(|o| computed.get(o).ok()) else { continue };
+        let (top, height) = (px(menu_top(b.menu) + 8.0), px((area.size().y * area.inverse_scale_factor() - 16.0).max(0.0)));
+        if node.top != top || node.height != height {
+            node.top = top;
+            node.height = height;
+        }
+    }
+}
+
+fn menu_top(menu: Menu) -> f32 {
+    if menu == Menu::Formats { 80.0 } else { 48.0 }
+}
+
+fn speed_path() -> std::path::PathBuf {
+    crate::save::data_dir().join("assets_speed.txt")
+}
+
+fn load_speed() -> f32 {
+    std::fs::read_to_string(speed_path()).ok().and_then(|text| text.trim().parse().ok()).filter(|v: &f32| v.is_finite()).unwrap_or(1.0f32).clamp(SPEED_MIN, SPEED_MAX)
+}
+
+fn save_speed(speed: f32) {
+    let _ = crate::save::write_atomic(&speed_path(), &speed.to_string());
+}
+
+/// Échelle logarithmique : x1 tombe vers le milieu, et le ralenti a autant de place que l'accéléré.
+fn speed_at(place: f32) -> f32 {
+    let speed = SPEED_MIN * (SPEED_MAX / SPEED_MIN).powf(place.clamp(0.0, 1.0));
+    if (speed - 1.0).abs() < SPEED_SNAP { 1.0 } else { speed }
+}
+
+fn speed_place(speed: f32) -> f32 {
+    (speed / SPEED_MIN).ln() / (SPEED_MAX / SPEED_MIN).ln()
+}
+
+fn update_speed(b: Res<AssetBrowser>, mut knobs: Query<&mut Node, With<SpeedKnob>>, mut texts: Query<&mut Text, With<SpeedText>>) {
+    let left = px(speed_place(b.anim_speed) * (SPEED_W - 16.0));
+    for mut node in &mut knobs {
+        if node.left != left {
+            node.left = left;
+        }
+    }
+    let wanted = format!("x{:.1}", b.anim_speed);
+    for mut text in &mut texts {
+        if text.0 != wanted {
+            text.0 = wanted.clone();
+        }
+    }
+}
+
 fn poll_scan(mut b: ResMut<AssetBrowser>) {
     let done = b.scanning.as_ref().and_then(|r| r.lock().ok()?.take());
     if let Some(entries) = done {
@@ -644,8 +1226,9 @@ fn poll_scan(mut b: ResMut<AssetBrowser>) {
 
 fn page(activate: On<Activate>, pages: Query<&PageButton>, mut b: ResMut<AssetBrowser>) {
     let Ok(PageButton(dir)) = pages.get(activate.entity) else { return };
-    let max = b.shown.len().saturating_sub(ROWS) as i64;
-    b.scroll = (b.scroll as i64 + *dir as i64 * (ROWS as i64 - 2)).clamp(0, max.max(0)) as usize;
+    let (size, overlap) = if b.grid { (b.page_size(), GRID_COLUMNS) } else { (ROWS, 2) };
+    let max = b.row_count().saturating_sub(size) as i64;
+    b.scroll = (b.scroll as i64 + *dir as i64 * (size - overlap) as i64).clamp(0, max.max(0)) as usize;
     b.list_dirty = true;
 }
 
@@ -653,6 +1236,9 @@ fn page(activate: On<Activate>, pages: Query<&PageButton>, mut b: ResMut<AssetBr
 /// Échap vide puis ferme le menu, Entrée prend le premier résultat du menu).
 fn type_filter(mut b: ResMut<AssetBrowser>, mut typed: MessageReader<KeyboardInput>, windows: Query<&Window>) {
     let Some(window) = b.window else { return };
+    if b.review {
+        return;
+    }
     let focused = windows.get(window).is_ok_and(|w| w.focused);
     let in_menu = b.menu != Menu::None;
     let mut changed = false;
@@ -663,7 +1249,13 @@ fn type_filter(mut b: ResMut<AssetBrowser>, mut typed: MessageReader<KeyboardInp
         let b = &mut *b;
         let query = if in_menu { &mut b.menu_query } else { &mut b.filter };
         match &key.logical_key {
-            Key::Backspace => changed |= query.pop().is_some(),
+            Key::Backspace => {
+                if query.pop().is_some() {
+                    changed = true;
+                } else if !in_menu && b.folder_view() && !b.folder.is_empty() {
+                    b.folder_up();
+                }
+            }
             Key::Escape => {
                 if in_menu && query.is_empty() {
                     b.close_menu();
@@ -677,21 +1269,48 @@ fn type_filter(mut b: ResMut<AssetBrowser>, mut typed: MessageReader<KeyboardInp
             }
             Key::Enter => {
                 if in_menu {
+                    let cursor = b.menu_cursor;
                     match b.menu {
                         Menu::Games => {
-                            if let Some(&first) = b.matching_games().first() {
-                                b.open_game(first);
+                            if let Some(&game) = b.matching_games().get(cursor) {
+                                b.open_game(game);
                             }
                         }
                         _ => {
-                            if let Some((ext, stat)) = b.matching_formats().first() {
+                            if let Some((ext, stat)) = b.matching_formats().get(cursor) {
                                 b.pick_format(ext, stat.viewable == stat.count);
                             }
                         }
                     }
                     return;
                 }
+                b.open_cursor_folder();
             }
+            Key::ArrowUp | Key::ArrowDown | Key::PageUp | Key::PageDown | Key::Home | Key::End if in_menu => {
+                let delta = match &key.logical_key {
+                    Key::ArrowUp => -1,
+                    Key::ArrowDown => 1,
+                    Key::PageUp => -(MENU_ROWS as i64),
+                    Key::PageDown => MENU_ROWS as i64,
+                    Key::Home => i64::MIN / 2,
+                    _ => i64::MAX / 2,
+                };
+                b.move_menu_cursor(delta);
+            }
+            Key::ArrowUp => b.move_cursor(-(if b.grid { GRID_COLUMNS as i64 } else { 1 })),
+            Key::ArrowDown => b.move_cursor(if b.grid { GRID_COLUMNS as i64 } else { 1 }),
+            Key::ArrowLeft if !in_menu && b.grid => b.move_cursor(-1),
+            Key::ArrowRight if !in_menu && b.grid => b.move_cursor(1),
+            Key::ArrowLeft if !in_menu => {
+                if b.folder_view() && !b.folder.is_empty() {
+                    b.folder_up();
+                }
+            }
+            Key::ArrowRight if !in_menu => b.open_cursor_folder(),
+            Key::PageUp if !in_menu => b.move_cursor(-(b.page_size() as i64)),
+            Key::PageDown if !in_menu => b.move_cursor(b.page_size() as i64),
+            Key::Home if !in_menu => b.move_to_row(0),
+            Key::End if !in_menu => b.move_to_row(usize::MAX),
             _ => {
                 if let Some(text) = &key.text {
                     let text: String = text.chars().filter(|c| !c.is_control()).collect();
@@ -706,6 +1325,7 @@ fn type_filter(mut b: ResMut<AssetBrowser>, mut typed: MessageReader<KeyboardInp
     if changed {
         if in_menu {
             b.menu_scroll = 0;
+            b.menu_cursor = 0;
             b.menu_dirty = true;
         } else {
             b.scroll = 0;
@@ -735,7 +1355,7 @@ fn rebuild_menu(mut commands: Commands, mut b: ResMut<AssetBrowser>, mut nodes: 
     b.menu_dirty = false;
     if let Ok(mut node) = nodes.get_mut(overlay) {
         node.display = if b.menu == Menu::None { Display::None } else { Display::Flex };
-        node.top = px(if b.menu == Menu::Formats { 80 } else { 48 });
+        node.top = px(menu_top(b.menu));
     }
     if let Ok(old) = children.get(overlay) {
         for child in old.iter() {
@@ -745,8 +1365,8 @@ fn rebuild_menu(mut commands: Commands, mut b: ResMut<AssetBrowser>, mut nodes: 
     if b.menu == Menu::None {
         return;
     }
-    let query = if b.menu_query.is_empty() { "tapez pour chercher".to_string() } else { format!("{}_", b.menu_query) };
-    let progress = if done < total { format!("analyse des jeux : {done} / {total}") } else { String::new() };
+    let query = if b.menu_query.is_empty() { tr("type to search", "tapez pour chercher").to_string() } else { format!("{}_", b.menu_query) };
+    let progress = if done < total { t!("analyzing the games: {done} / {total}", "analyse des jeux : {done} / {total}") } else { String::new() };
     // Une ligne : (coche et sa couleur, nom, colonnes de droite, action)
     enum Pick {
         Game(usize),
@@ -764,7 +1384,7 @@ fn rebuild_menu(mut commands: Commands, mut b: ResMut<AssetBrowser>, mut nodes: 
                 };
                 rows.push((None, label, cells, Pick::Game(i)));
             }
-            (vec!["extrait", "regardable"], "extrait = octets de donnees lisibles fichier par fichier ; regardable = fichiers que l'app sait montrer")
+            (vec![tr("extracted", "extrait"), tr("viewable", "regardable")], tr("extracted = data bytes readable file by file ; viewable = files the app can show", "extrait = octets de donnees lisibles fichier par fichier ; regardable = fichiers que l'app sait montrer"))
         }
         _ => {
             for (ext, stat) in b.matching_formats() {
@@ -779,17 +1399,19 @@ fn rebuild_menu(mut commands: Commands, mut b: ResMut<AssetBrowser>, mut nodes: 
                 let all_viewable = stat.viewable == stat.count;
                 rows.push((Some((check, color)), name, vec![stat.count.to_string(), stat.viewable.to_string(), stat.games.to_string()], Pick::Format(ext, all_viewable)));
             }
-            (vec!["fichiers", "regardables", "jeux"], "[x] regardable   [~] en partie   [!] l'essai a echoue   [ ] pas dans l'app   ;  clic = filtrer le jeu ouvert")
+            (vec![tr("files", "fichiers"), tr("viewable", "regardables"), tr("games", "jeux")], tr("[x] viewable   [~] partly   [!] the test failed   [ ] not in the app   ;  click = filter the open game", "[x] regardable   [~] en partie   [!] l'essai a echoue   [ ] pas dans l'app   ;  clic = filtrer le jeu ouvert"))
         }
     };
     b.menu_len = rows.len();
     b.menu_scroll = b.menu_scroll.min(rows.len().saturating_sub(MENU_ROWS));
+    b.menu_cursor = b.menu_cursor.min(rows.len().saturating_sub(1));
+    let cursor = b.menu_cursor;
     let (first, count) = (b.menu_scroll + usize::from(!rows.is_empty()), rows.len());
     let last = (b.menu_scroll + MENU_ROWS).min(count);
     let scroll = b.menu_scroll;
     commands.entity(overlay).with_children(|menu| {
         // Barre de recherche
-        menu.spawn((Node { padding: UiRect::axes(px(10), px(6)), border_radius: BorderRadius::all(px(6)), margin: UiRect::bottom(px(4)), ..default() }, BackgroundColor(Color::srgb(0.07, 0.075, 0.09)))).with_child(label(format!("Recherche : {query}"), 15.0, TEXT));
+        menu.spawn((Node { padding: UiRect::axes(px(10), px(6)), border_radius: BorderRadius::all(px(6)), margin: UiRect::bottom(px(4)), ..default() }, BackgroundColor(Color::srgb(0.07, 0.075, 0.09)))).with_child(label(t!("Search: {query}", "Recherche : {query}"), 15.0, TEXT));
         menu.spawn(label(format!("{first}-{last} / {count}   {progress}"), 12.0, DIM));
         menu.spawn(label(legend, 12.0, DIM));
         menu.spawn(Node { flex_direction: FlexDirection::Row, justify_content: JustifyContent::FlexEnd, column_gap: px(8), padding: UiRect::horizontal(px(6)), ..default() }).with_children(|head| {
@@ -797,8 +1419,11 @@ fn rebuild_menu(mut commands: Commands, mut b: ResMut<AssetBrowser>, mut nodes: 
                 head.spawn((label(*column, 12.0, DIM), Node { width: px(MENU_COLUMN), ..default() }));
             }
         });
-        for (check, name, cells, pick) in rows.into_iter().skip(scroll).take(MENU_ROWS) {
+        for (i, (check, name, cells, pick)) in rows.into_iter().enumerate().skip(scroll).take(MENU_ROWS) {
             let mut row = menu.spawn((Button, Hovered::default(), Node { height: px(MENU_ROW_H), flex_shrink: 0.0, padding: UiRect::horizontal(px(6)), align_items: AlignItems::Center, column_gap: px(8), border_radius: BorderRadius::all(px(4)), ..default() }, BackgroundColor(ROW)));
+            if i == cursor {
+                row.insert(MenuCursor);
+            }
             match pick {
                 Pick::Game(i) => {
                     row.insert(GameChoice(i)).observe(|activate: On<Activate>, choices: Query<&GameChoice>, mut b: ResMut<AssetBrowser>| {
@@ -828,7 +1453,7 @@ fn rebuild_menu(mut commands: Commands, mut b: ResMut<AssetBrowser>, mut nodes: 
     });
 }
 
-fn rebuild_list(mut commands: Commands, mut b: ResMut<AssetBrowser>, children: Query<&Children>) {
+fn rebuild_list(mut commands: Commands, mut b: ResMut<AssetBrowser>, children: Query<&Children>, mut nodes: Query<&mut Node>) {
     let Some(list) = b.list else { return };
     if !b.list_dirty {
         return;
@@ -840,15 +1465,64 @@ fn rebuild_list(mut commands: Commands, mut b: ResMut<AssetBrowser>, children: Q
             commands.entity(child).despawn();
         }
     }
-    let rows: Vec<(usize, String, String)> = b.shown.iter().skip(b.scroll).take(ROWS).map(|&i| {
+    if let Ok(mut node) = nodes.get_mut(list) {
+        node.flex_direction = if b.grid { FlexDirection::Row } else { FlexDirection::Column };
+        node.flex_wrap = if b.grid { FlexWrap::Wrap } else { FlexWrap::NoWrap };
+        node.align_content = AlignContent::FlexStart;
+    }
+    if b.grid {
+        b.request_thumbs();
+        let folders = b.page_folders();
+        let tiles: Vec<(usize, String)> = b.page_files().into_iter().map(|i| (i, b.entries[i].short_name().chars().take(19).collect())).collect();
+        commands.entity(list).with_children(|list| {
+            for folder in folders {
+                let name: String = folder.name.chars().take(19).collect();
+                list.spawn((Button, Hovered::default(), Node { width: px(134), height: px(124), margin: UiRect::all(px(2)), flex_direction: FlexDirection::Column, align_items: AlignItems::Center, justify_content: JustifyContent::Center, row_gap: px(3), padding: UiRect::all(px(3)), border_radius: BorderRadius::all(px(4)), overflow: Overflow::clip(), ..default() }, BackgroundColor(ROW), FolderRow(folder.path)))
+                    .observe(click_folder)
+                    .with_children(|tile| {
+                        tile.spawn((label(if folder.files.is_some() { "[+]" } else { ".." }, 34.0, DIM), Pickable::IGNORE));
+                        tile.spawn((label(name, 11.0, TEXT), Pickable::IGNORE));
+                    });
+            }
+            for (i, name) in tiles {
+                list.spawn((Button, Hovered::default(), Node { width: px(134), height: px(124), margin: UiRect::all(px(2)), flex_direction: FlexDirection::Column, align_items: AlignItems::Center, row_gap: px(3), padding: UiRect::all(px(3)), border_radius: BorderRadius::all(px(4)), overflow: Overflow::clip(), ..default() }, BackgroundColor(ROW), ListRow(i)))
+                    .observe(|activate: On<Activate>, rows: Query<&ListRow>, mut b: ResMut<AssetBrowser>| {
+                        if let Ok(row) = rows.get(activate.entity) {
+                            b.select(row.0);
+                        }
+                    })
+                    .with_children(|tile| {
+                        tile.spawn((ImageNode::default(), Node { width: px(96), height: px(96), flex_shrink: 0.0, ..default() }, Visibility::Hidden, GridThumb(i), Pickable::IGNORE));
+                        tile.spawn((label(name, 11.0, DIM), Pickable::IGNORE));
+                    });
+            }
+        });
+        return;
+    }
+    let in_folders = b.folder_view();
+    let folders = b.page_folders();
+    let rows: Vec<(usize, String, String)> = b.page_files().into_iter().map(|i| {
         let e = &b.entries[i];
         let name = match &e.member_name {
+            _ if in_folders => e.short_name().to_string(),
             Some(n) => format!("{}  ({n})", e.path),
             None => e.path.clone(),
         };
-        (i, name, format!("{}  {}", e.kind.label(), size_text(e.size)))
+        (i, name, format!("{}  {}", kind_text(e.kind), size_text(e.size)))
     }).collect();
     commands.entity(list).with_children(|list| {
+        for folder in folders {
+            let (name, detail) = match folder.files {
+                Some(files) => (format!("[+] {}", folder.name), t!("{files} files", "{files} fichiers")),
+                None => (folder.name.clone(), tr("parent folder", "dossier parent").to_string()),
+            };
+            list.spawn((Button, Hovered::default(), Node { height: px(ROW_H), flex_shrink: 0.0, padding: UiRect::horizontal(px(6)), justify_content: JustifyContent::SpaceBetween, align_items: AlignItems::Center, border_radius: BorderRadius::all(px(4)), ..default() }, BackgroundColor(ROW), FolderRow(folder.path)))
+                .observe(click_folder)
+                .with_children(|row| {
+                    row.spawn((label(name, 13.0, TEXT), Pickable::IGNORE));
+                    row.spawn((label(detail, 12.0, DIM), Pickable::IGNORE));
+                });
+        }
         for (i, name, kind) in rows {
             list.spawn((Button, Hovered::default(), Node { height: px(ROW_H), flex_shrink: 0.0, padding: UiRect::horizontal(px(6)), justify_content: JustifyContent::SpaceBetween, align_items: AlignItems::Center, border_radius: BorderRadius::all(px(4)), ..default() }, BackgroundColor(ROW), ListRow(i)))
                 .observe(|activate: On<Activate>, rows: Query<&ListRow>, mut b: ResMut<AssetBrowser>| {
@@ -864,6 +1538,12 @@ fn rebuild_list(mut commands: Commands, mut b: ResMut<AssetBrowser>, children: Q
     });
 }
 
+fn click_folder(activate: On<Activate>, rows: Query<&FolderRow>, mut b: ResMut<AssetBrowser>) {
+    if let Ok(row) = rows.get(activate.entity) {
+        b.open_folder(row.0.clone());
+    }
+}
+
 fn refresh_texts(
     b: Res<AssetBrowser>,
     mut texts: Query<(&mut Text, Option<&GameButton>, Option<&FilterButton>, Option<&ListTitle>, Option<&InfoText>, Option<&PathText>, Option<&FormatButton>), Or<(With<GameButton>, With<FilterButton>, With<ListTitle>, With<InfoText>, With<PathText>, With<FormatButton>)>>,
@@ -873,16 +1553,18 @@ fn refresh_texts(
     }
     for (mut text, game, filter, title, info, path, formats) in &mut texts {
         let wanted = if game.is_some() {
-            format!("{}   {}", b.game.map_or("(choisir)", |g| b.games[g].label.as_str()), if b.menu == Menu::Games { "^" } else { "v" })
+            format!("{}   {}", b.game.map_or(tr("(choose)", "(choisir)"), |g| b.games[g].label.as_str()), if b.menu == Menu::Games { "^" } else { "v" })
         } else if formats.is_some() {
             format!("Formats   {}", if b.menu == Menu::Formats { "^" } else { "v" })
         } else if filter.is_some() {
-            if b.all_files { "Tous les fichiers".into() } else { "Fichiers montrables".into() }
+            if b.all_files { tr("All files", "Tous les fichiers").into() } else { tr("Viewable files", "Fichiers montrables").into() }
         } else if title.is_some() {
-            let range = if b.shown.is_empty() { "0".to_string() } else { format!("{}-{}", b.scroll + 1, (b.scroll + ROWS).min(b.shown.len())) };
-            let filter = if b.filter.is_empty() { "tapez pour filtrer".to_string() } else { format!("filtre : {}_", b.filter) };
-            let format = b.format_filter.as_ref().map_or(String::new(), |f| format!("   format : {f} (Echap = tous)"));
-            format!("{range} / {}   ({filter}){format}", b.shown.len())
+            let total = b.row_count();
+            let range = if total == 0 { "0".to_string() } else { format!("{}-{}", b.scroll + 1, (b.scroll + b.page_size()).min(total)) };
+            let filter = if b.filter.is_empty() { tr("type to filter", "tapez pour filtrer").to_string() } else { t!("filter: {}_", "filtre : {}_", b.filter) };
+            let format = b.format_filter.as_ref().map_or(String::new(), |f| t!("   format: {f} (Esc = all)", "   format : {f} (Echap = tous)"));
+            let folder = if b.folder_view() { format!("/{}   ", b.folder) } else { String::new() };
+            format!("{folder}{range} / {total}   ({filter}){format}")
         } else if info.is_some() {
             if b.info.is_empty() { b.status.clone() } else { format!("{}\n{}", b.info, b.status) }
         } else if path.is_some() {
@@ -901,15 +1583,15 @@ fn refresh_texts(
 
 fn looks(
     b: Res<AssetBrowser>,
-    mut items: Query<(&Hovered, Has<Pressed>, &mut BackgroundColor, Option<&ListRow>, Option<&GameChoice>, Option<&FilterButton>, Has<FormatChoice>), Or<(With<ListRow>, With<GameChoice>, With<FormatChoice>, With<GameButton>, With<FormatButton>, With<FilterButton>, With<CopyButton>, With<PageButton>, With<StepButton>)>>,
+    mut items: Query<(&Hovered, Has<Pressed>, &mut BackgroundColor, Option<&ListRow>, Option<&FolderRow>, Option<&GameChoice>, Option<&FilterButton>, Has<FormatChoice>, Has<MenuCursor>), Or<(With<ListRow>, With<FolderRow>, With<GameChoice>, With<FormatChoice>, With<GameButton>, With<FormatButton>, With<FilterButton>, With<CopyButton>, With<PageButton>, With<StepButton>)>>,
 ) {
     if b.window.is_none() {
         return;
     }
-    for (hovered, pressed, mut color, row, game, filter, format) in &mut items {
-        let selected = row.is_some_and(|r| Some(r.0) == b.selected) || game.is_some_and(|g| Some(g.0) == b.game) || (filter.is_some() && b.all_files);
-        let idle = if row.is_some() || game.is_some() || format { ROW } else { ITEM };
-        let wanted = if selected || pressed { ITEM_ON } else if hovered.get() { ITEM_HOVER } else { idle };
+    for (hovered, pressed, mut color, row, folder, game, filter, format, at_cursor) in &mut items {
+        let selected = row.is_some_and(|r| Some(r.0) == b.selected) || folder.is_some_and(|f| b.folder_cursor.as_ref() == Some(&f.0)) || game.is_some_and(|g| Some(g.0) == b.game) || (filter.is_some() && b.all_files);
+        let idle = if row.is_some() || game.is_some() || format || folder.is_some() { ROW } else { ITEM };
+        let wanted = if selected || pressed { ITEM_ON } else if hovered.get() || at_cursor { ITEM_HOVER } else { idle };
         if color.0 != wanted {
             color.0 = wanted;
         }
@@ -932,31 +1614,53 @@ fn rebuild_controls(mut commands: Commands, mut b: ResMut<AssetBrowser>, childre
         }
     }
     let c = &b.choices;
-    let name = |list: &[usize], i: usize| list.get(i).map_or("aucun".to_string(), |&e| b.entries[e].path.clone());
+    let name = |list: &[usize], i: usize| list.get(i).map_or(tr("none", "aucun").to_string(), |&e| b.entries[e].path.clone());
     let mut steps: Vec<(Ctl, String)> = Vec::new();
     if !c.tiles.is_empty() {
-        steps.push((Ctl::Tiles, format!("Tuiles : {}", name(&c.tiles, c.tile))));
+        steps.push((Ctl::Tiles, t!("Tiles: {}", "Tuiles : {}", name(&c.tiles, c.tile))));
     }
     if !c.palettes.is_empty() {
-        steps.push((Ctl::Palette, format!("Palette : {}", name(&c.palettes, c.palette))));
+        steps.push((Ctl::Palette, t!("Palette: {}", "Palette : {}", name(&c.palettes, c.palette))));
     }
     if c.banks > 1 {
-        steps.push((Ctl::Bank, format!("Couleurs : {} / {}", c.bank + 1, c.banks)));
+        steps.push((Ctl::Bank, t!("Colors: {} / {}", "Couleurs : {} / {}", c.bank + 1, c.banks)));
     }
     if c.width > 0 {
-        steps.push((Ctl::Width, format!("Largeur : {} tuiles", c.width)));
+        steps.push((Ctl::Width, t!("Width: {} tiles", "Largeur : {} tuiles", c.width)));
     }
     if c.cells > 0 {
-        steps.push((Ctl::Cell, format!("Cellule : {} / {}", c.cell + 1, c.cells)));
+        steps.push((Ctl::Cell, t!("Cell: {} / {}", "Cellule : {} / {}", c.cell + 1, c.cells)));
+    }
+    if !c.linked.is_empty() {
+        let kind = b.selected.map(|s| b.entries[s].kind);
+        let what = match kind {
+            Some(Kind::ModelAnim) => tr("Model", "Modele"),
+            Some(Kind::TextureRef) => "Texture",
+            Some(Kind::Tiles) => tr("Screen", "Ecran"),
+            _ => tr("Cells", "Cellules"),
+        };
+        steps.push((Ctl::Link, format!("{what}: {}", name(&c.linked, c.link))));
+    }
+    if c.anims > 1 {
+        let what = match b.selected.map(|s| b.entries[s].kind) {
+            Some(Kind::AudioBank | Kind::SequenceArchive) => tr("Sound", "Son"),
+            Some(Kind::Instruments) => "Instrument",
+            _ => "Animation",
+        };
+        steps.push((Ctl::Anim, format!("{what}: {} / {}", c.anim + 1, c.anims)));
     }
     if c.models > 1 {
-        steps.push((Ctl::Model, format!("Modele : {} / {}", c.model + 1, c.models)));
+        steps.push((Ctl::Model, t!("Model: {} / {}", "Modele : {} / {}", c.model + 1, c.models)));
     }
     if b.selected.is_some_and(|s| b.entries[s].kind == Kind::Model) {
-        let tex = if c.texture == 0 { "celles du modele".to_string() } else { name(&c.textures, c.texture - 1) };
-        steps.push((Ctl::Textures, format!("Textures : {tex}")));
+        let tex = if c.texture == 0 { tr("the model's own", "celles du modele").to_string() } else { name(&c.textures, c.texture - 1) };
+        steps.push((Ctl::Textures, t!("Textures: {tex}", "Textures : {tex}")));
     }
+    let has_sound = b.sound.is_some() || b.video.is_some();
     commands.entity(controls).with_children(|row| {
+        if has_sound {
+            row.spawn((Button, Hovered::default(), item_node(), BackgroundColor(ITEM), PlayButton)).observe(toggle_sound).with_child(label(tr("Play / Stop", "Jouer / Arreter"), 14.0, TEXT));
+        }
         for (ctl, text) in steps {
             row.spawn(Node { flex_direction: FlexDirection::Row, column_gap: px(4), align_items: AlignItems::Center, ..default() }).with_children(|step| {
                 step.spawn((Button, Hovered::default(), item_node(), BackgroundColor(ITEM), StepButton(ctl, -1))).observe(step_choice).with_child(label("<", 14.0, TEXT));
@@ -970,18 +1674,181 @@ fn rebuild_controls(mut commands: Commands, mut b: ResMut<AssetBrowser>, childre
 fn step_choice(activate: On<Activate>, steps: Query<&StepButton>, mut b: ResMut<AssetBrowser>) {
     let Ok(&StepButton(ctl, dir)) = steps.get(activate.entity) else { return };
     let wrap = |v: usize, n: usize| if n == 0 { 0 } else { (v as i64 + dir as i64).rem_euclid(n as i64) as usize };
+    // Une planche : ses écrans, puis la planche elle-même
+    let sheet = usize::from(b.selected.is_some_and(|s| b.entries[s].kind == Kind::Tiles));
+    // Des tuiles brutes peuvent aussi rester en gris
+    let grey = usize::from(b.selected.is_some_and(|s| b.entries[s].kind == Kind::RawTiles));
     let c = &mut b.choices;
     match ctl {
-        Ctl::Palette => c.palette = wrap(c.palette, c.palettes.len()),
+        Ctl::Palette => c.palette = wrap(c.palette, c.palettes.len() + grey),
         Ctl::Tiles => c.tile = wrap(c.tile, c.tiles.len()),
         Ctl::Textures => c.texture = wrap(c.texture, c.textures.len() + 1),
         Ctl::Bank => c.bank = wrap(c.bank, c.banks),
         Ctl::Width => c.width = (c.width as i64 + dir as i64).clamp(1, 256) as u32,
         Ctl::Cell => c.cell = wrap(c.cell, c.cells),
         Ctl::Model => c.model = wrap(c.model, c.models),
+        Ctl::Link => c.link = wrap(c.link, c.linked.len() + sheet),
+        Ctl::Anim => c.anim = wrap(c.anim, c.anims),
     }
     b.preview_dirty = true;
     b.controls_dirty = true;
+}
+
+#[derive(Component)]
+struct PlayButton;
+
+fn toggle_sound(_: On<Activate>, mut commands: Commands, mut b: ResMut<AssetBrowser>, mut sources: ResMut<Assets<VideoAudio>>, playing: Query<Entity, With<PreviewSound>>) {
+    if let Some(video) = &mut b.video {
+        if video.is_playing() {
+            video.stop(&mut commands);
+        } else {
+            video.play(&mut commands, &mut sources);
+        }
+        return;
+    }
+    let mut stopped = false;
+    for sound in &playing {
+        commands.entity(sound).despawn();
+        stopped = true;
+    }
+    if let (false, Some(sound)) = (stopped, &b.sound) {
+        commands.spawn((AudioPlayer::new(sound.clone()), PlaybackSettings::DESPAWN, PreviewSound));
+    }
+}
+
+/// Fait avancer l'aperçu animé (images 2D ou modèle 3D).
+fn play_preview(time: Res<Time>, mut b: ResMut<AssetBrowser>, mut meshes: ResMut<Assets<Mesh>>, mut images: ResMut<Assets<Image>>, mut commands: Commands, sounds: Query<Entity, With<PreviewSound>>) {
+    if b.window.is_none() {
+        for sound in &sounds {
+            commands.entity(sound).despawn();
+        }
+        if let Some(video) = &mut b.video {
+            video.stop(&mut commands);
+        }
+        return;
+    }
+    if let Some(video) = &mut b.video {
+        video.update(time.delta_secs(), &mut images);
+    }
+    b.anim_time += time.delta_secs() * b.anim_speed;
+    let now = b.anim_time;
+    if !b.frames.is_empty() {
+        let total: f32 = b.frames.iter().map(|f| f.1).sum();
+        let mut left = now % total.max(0.001);
+        let mut shown = b.frames.len() - 1;
+        for (i, frame) in b.frames.iter().enumerate() {
+            if left < frame.1 {
+                shown = i;
+                break;
+            }
+            left -= frame.1;
+        }
+        let handle = b.frames[shown].0.clone();
+        if let Some((current, _)) = &mut b.image {
+            if *current != handle {
+                *current = handle;
+            }
+        }
+    }
+    let Some(anim) = &mut b.model_anim else { return };
+    let frame = (now / anim.seconds_per_frame) as usize % anim.frames.len().max(1);
+    if frame == anim.shown {
+        return;
+    }
+    anim.shown = frame;
+    for (handle, (positions, normals)) in anim.meshes.iter().zip(&anim.frames[frame]) {
+        if let Some(mut mesh) = meshes.get_mut(handle) {
+            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions.clone());
+            mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals.clone());
+        }
+    }
+}
+
+/// Prend les vignettes prêtes et fait avancer celles qui sont animées.
+fn update_grid(
+    time: Res<Time>,
+    mut b: ResMut<AssetBrowser>,
+    mut images: ResMut<Assets<Image>>,
+    mut thumbs: Query<(&GridThumb, &mut ImageNode, &mut Visibility)>,
+    mut toggles: Query<(&mut Text, Has<FolderToggle>), Or<(With<GridToggle>, With<FolderToggle>)>>,
+    mut clock: Local<f32>,
+) {
+    for (mut text, is_folder) in &mut toggles {
+        // Le bouton dit ce qu'il fera
+        let wanted = match (is_folder, b.folder_mode, b.grid) {
+            (true, true, _) => tr("Flat", "A plat"),
+            (true, false, _) => tr("Folders", "Dossiers"),
+            (false, _, true) => tr("List", "Liste"),
+            (false, _, false) => tr("Grid", "Grille"),
+        };
+        if text.0 != wanted {
+            text.0 = wanted.to_string();
+        }
+    }
+    if !b.grid || b.window.is_none() {
+        return;
+    }
+    let done = std::mem::take(&mut *b.jobs.done.lock().unwrap());
+    for (index, frames) in done {
+        let frames = frames.unwrap_or_default();
+        let handles = frames.iter().map(|(rgba, duration)| (images.add(to_image(rgba, ImageSampler::nearest())), *duration as f32 / 60.0)).collect();
+        b.thumbs.insert(index, handles);
+    }
+    // Trop de vignettes en mémoire : on ne garde que la page montrée
+    if b.thumbs.len() > GRID_KEPT {
+        let visible = b.page_files();
+        b.thumbs.retain(|i, _| visible.contains(i));
+    }
+    *clock += time.delta_secs() * b.anim_speed;
+    for (thumb, mut node, mut visibility) in &mut thumbs {
+        let Some(frames) = b.thumbs.get(&thumb.0).filter(|f| !f.is_empty()) else {
+            if *visibility != Visibility::Hidden {
+                *visibility = Visibility::Hidden;
+            }
+            continue;
+        };
+        let total: f32 = frames.iter().map(|f| f.1).sum();
+        let mut left = *clock % total.max(0.001);
+        let mut shown = &frames[frames.len() - 1].0;
+        for frame in frames {
+            if left < frame.1 {
+                shown = &frame.0;
+                break;
+            }
+            left -= frame.1;
+        }
+        if node.image != *shown {
+            node.image = shown.clone();
+        }
+        if *visibility != Visibility::Inherited {
+            *visibility = Visibility::Inherited;
+        }
+    }
+}
+
+/// Montre les lignes visibles de l'aperçu en texte.
+fn show_preview_text(mut b: ResMut<AssetBrowser>, mut texts: Query<(&mut Text, &mut Node, &mut TextFont), With<PreviewText>>) {
+    let Ok((mut text, mut node, mut font)) = texts.single_mut() else { return };
+    let wanted = if b.text_lines.is_empty() { Display::None } else { Display::Flex };
+    if node.display != wanted {
+        node.display = wanted;
+    }
+    let key = (b.text_scroll, b.text_lines.len());
+    if b.text_shown == Some(key) {
+        return;
+    }
+    b.text_shown = Some(key);
+    if let Some(handle) = &b.text_font {
+        if font.font != handle.clone().into() {
+            font.font = handle.clone().into();
+        }
+    }
+    text.0 = b.text_lines.iter().skip(b.text_scroll).take(TEXT_ROWS).cloned().collect::<Vec<_>>().join("\n");
+}
+
+/// Police à chasse fixe avec le japonais, pour les textes des jeux (macOS : le japonais d'abord, sans chasse fixe).
+fn preview_font(fonts: &mut Assets<Font>) -> Option<Handle<Font>> {
+    crate::launcher::system_font(fonts, &["msgothic.ttc"], &[crate::launcher::ARIAL_UNICODE, "Menlo.ttc"])
 }
 
 fn to_image(rgba: &Rgba, sampler: ImageSampler) -> Image {
@@ -1003,23 +1870,39 @@ fn render_preview(
     mut images: ResMut<Assets<Image>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    old: Query<Entity, With<Preview3d>>,
+    mut audio: ResMut<Assets<bevy::audio::AudioSource>>,
+    mut fonts: ResMut<Assets<Font>>,
+    old: Query<Entity, Or<(With<Preview3d>, With<PreviewSound>)>>,
     mut cameras: Query<&mut Camera>,
 ) {
     if b.window.is_none() || !b.preview_dirty {
         return;
     }
     b.preview_dirty = false;
+    b.preview_serial += 1;
     for e in &old {
         commands.entity(e).despawn();
     }
     b.is3d = false;
     b.image = None;
     b.info.clear();
+    b.frames.clear();
+    b.model_anim = None;
+    b.anim_time = 0.0;
+    b.sound = None;
+    if let Some(mut video) = b.video.take() {
+        video.stop(&mut commands);
+    }
+    b.text_lines.clear();
+    b.text_scroll = 0;
+    b.text_shown = None;
+    if b.text_font.is_none() {
+        b.text_font = preview_font(&mut fonts);
+    }
     if let Some(sel) = b.selected {
-        let result = preview(&mut b, sel, &mut commands, &mut images, &mut meshes, &mut materials);
+        let result = preview(&mut b, sel, &mut commands, &mut images, &mut meshes, &mut materials, &mut audio);
         if let Err(e) = result {
-            b.info = format!("{}  :  impossible de l'afficher : {e}", b.entries[sel].kind.label());
+            b.info = t!("{}  :  cannot show it: {e}", "{}  :  impossible de l'afficher : {e}", kind_text(b.entries[sel].kind));
         }
     }
     if let Some(mut camera) = b.camera3d.and_then(|c| cameras.get_mut(c).ok()) {
@@ -1027,15 +1910,49 @@ fn render_preview(
     }
 }
 
-fn preview(b: &mut AssetBrowser, sel: usize, commands: &mut Commands, images: &mut Assets<Image>, meshes: &mut Assets<Mesh>, materials: &mut Assets<StandardMaterial>) -> Result<(), String> {
+#[allow(clippy::too_many_arguments)]
+fn preview(b: &mut AssetBrowser, sel: usize, commands: &mut Commands, images: &mut Assets<Image>, meshes: &mut Assets<Mesh>, materials: &mut Assets<StandardMaterial>, audio: &mut Assets<bevy::audio::AudioSource>) -> Result<(), String> {
     let (kind, size) = (b.entries[sel].kind, b.entries[sel].size);
     let mut choices = std::mem::take(&mut b.choices);
     let decoded = decode(&b.entries, sel, &mut choices);
     b.choices = choices;
+    b.controls_dirty = true;
     match decoded? {
+        Decoded::Frames { frames, info } => {
+            let side = frames.first().map_or(UVec2::ONE, |(i, _)| UVec2::new(i.width, i.height));
+            b.frames = frames.iter().map(|(image, duration)| (images.add(to_image(image, ImageSampler::nearest())), *duration as f32 / 60.0)).collect();
+            b.image = b.frames.first().map(|f| (f.0.clone(), side));
+            b.info = format!("{}  ({})  -  {info}", kind_text(kind), size_text(size));
+        }
+        Decoded::Animated { model: m, animation } => {
+            let handles = spawn_model(&m, commands, images, meshes, materials);
+            let center = (Vec3::from(animation.min) + Vec3::from(animation.max)) / 2.0;
+            let radius = ((Vec3::from(animation.max) - Vec3::from(animation.min)).length() / 2.0).max(0.01);
+            b.orbit = Orbit { target: center, radius, distance: radius * 2.6, ..Orbit::default() };
+            b.is3d = true;
+            b.image = Some((b.view3d.clone(), UVec2::new(VIEW_W, VIEW_H)));
+            b.info = t!("3D animation ({})  -  {}: {} frames, on the model {}", "animation 3D ({})  -  {} : {} images, sur le modele {}", size_text(size), animation.name, animation.frames.len(), m.name);
+            b.model_anim = Some(ModelAnim { meshes: handles, frames: animation.frames, seconds_per_frame: animation.step as f32 / 60.0, shown: usize::MAX });
+        }
+        Decoded::Audio { wav, waveform, info } => {
+            b.image = Some((images.add(to_image(&waveform, ImageSampler::linear())), UVec2::new(waveform.width, waveform.height)));
+            b.sound = Some(audio.add(bevy::audio::AudioSource { bytes: wav.into() }));
+            b.info = format!("{}  ({})  -  {info}", kind_text(kind), size_text(size));
+        }
+        Decoded::Video { bytes, info } => {
+            let player = VideoPlayer::new(bytes, images)?;
+            let v = player.info();
+            b.image = Some((player.image(), UVec2::new(v.width, v.height)));
+            b.info = format!("{}  ({})  -  {info}", kind_text(kind), size_text(size));
+            b.video = Some(player);
+        }
+        Decoded::Text { lines, info } => {
+            b.text_lines = lines;
+            b.info = format!("{}  -  {info}", size_text(size));
+        }
         Decoded::Image { rgba, info } => {
             b.image = Some((images.add(to_image(&rgba, ImageSampler::nearest())), UVec2::new(rgba.width, rgba.height)));
-            b.info = format!("{}  ({})  -  {info}", kind.label(), size_text(size));
+            b.info = format!("{}  ({})  -  {info}", kind_text(kind), size_text(size));
         }
         Decoded::Model { model: m, own_textures } => {
             spawn_model(&m, commands, images, meshes, materials);
@@ -1045,7 +1962,7 @@ fn preview(b: &mut AssetBrowser, sel: usize, commands: &mut Commands, images: &m
             b.is3d = true;
             b.image = Some((b.view3d.clone(), UVec2::new(VIEW_W, VIEW_H)));
             let warn = if m.warnings.is_empty() { String::new() } else { format!("\n! {}", m.warnings.join(" ; ")) };
-            b.info = format!("modele 3D ({})  -  {} : {} triangles, {} sommets, {} materiaux, {own_textures} textures dans le fichier{warn}", size_text(size), m.name, m.triangle_count, m.vertex_count, m.materials.len());
+            b.info = t!("3D model ({})  -  {}: {} triangles, {} vertices, {} materials, {own_textures} textures in the file{warn}", "modele 3D ({})  -  {} : {} triangles, {} sommets, {} materiaux, {own_textures} textures dans le fichier{warn}", size_text(size), m.name, m.triangle_count, m.vertex_count, m.materials.len());
         }
     }
     Ok(())
@@ -1055,7 +1972,9 @@ fn srgb_to_linear(c: f32) -> f32 {
     if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
 }
 
-fn spawn_model(m: &model3d::ModelOut, commands: &mut Commands, images: &mut Assets<Image>, meshes: &mut Assets<Mesh>, materials: &mut Assets<StandardMaterial>) {
+/// Les maillages, un par morceau du modèle (dans le même ordre).
+fn spawn_model(m: &model3d::ModelOut, commands: &mut Commands, images: &mut Assets<Image>, meshes: &mut Assets<Mesh>, materials: &mut Assets<StandardMaterial>) -> Vec<Handle<Mesh>> {
+    let mut handles = Vec::new();
     let mut cache: HashMap<(usize, bool), Handle<StandardMaterial>> = HashMap::new();
     let textures: Vec<Option<(Handle<Image>, bool, bool)>> = m
         .materials
@@ -1110,8 +2029,11 @@ fn spawn_model(m: &model3d::ModelOut, commands: &mut Commands, images: &mut Asse
                 })
             })
             .clone();
-        commands.spawn((Mesh3d(meshes.add(mesh)), MeshMaterial3d(material), Transform::default(), RenderLayers::layer(LAYER), Preview3d));
+        let handle = meshes.add(mesh);
+        handles.push(handle.clone());
+        commands.spawn((Mesh3d(handle), MeshMaterial3d(material), Transform::default(), RenderLayers::layer(LAYER), Preview3d));
     }
+    handles
 }
 
 /// L'image (2D, ou la vue 3D) remplit le panneau en gardant ses proportions ; les petites
@@ -1197,5 +2119,77 @@ fn place_camera(b: Res<AssetBrowser>, mut cameras: Query<(&mut Transform, &mut P
     // La lumière vient de derrière l'épaule de la caméra
     if let Ok(mut transform) = lights.get_mut(light) {
         *transform = Transform::from_rotation(rot * Quat::from_euler(EulerRot::YXZ, 0.5, -0.6, 0.0));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn browser(folders: usize, files: usize) -> AssetBrowser {
+        let mut b = AssetBrowser::default();
+        b.folders = (0..folders).map(|i| FolderLine { path: format!("d{i}"), name: format!("d{i}"), files: Some(1) }).collect();
+        b.shown = (0..files).collect();
+        b.entries = Arc::new((0..files).map(|i| Entry { path: format!("f{i}"), member_name: None, rom: Default::default(), span: (0, 0), member: None, kind: Kind::Font, size: 0, dir: String::new(), stem: format!("f{i}"), rom_index: None }).collect());
+        b
+    }
+
+    #[test]
+    fn les_fleches_passent_des_dossiers_aux_fichiers_et_la_page_suit() {
+        let mut b = browser(2, 100);
+        b.move_cursor(1);
+        assert_eq!(b.folder_cursor.as_deref(), Some("d0"));
+        b.move_cursor(1);
+        b.move_cursor(1);
+        assert_eq!((b.folder_cursor.as_deref(), b.selected), (None, Some(0)));
+        for _ in 0..ROWS {
+            b.move_cursor(1);
+        }
+        assert_eq!(b.selected, Some(ROWS));
+        assert_eq!(b.scroll, ROWS + 2 + 1 - ROWS);
+        b.move_to_row(0);
+        assert_eq!((b.scroll, b.folder_cursor.as_deref()), (0, Some("d0")));
+        b.move_to_row(usize::MAX);
+        assert_eq!((b.selected, b.scroll), (Some(99), 102 - ROWS));
+    }
+
+    #[test]
+    fn en_grille_la_page_avance_par_lignes_de_vignettes() {
+        let mut b = browser(0, 100);
+        b.grid = true;
+        b.move_to_row(GRID_COLUMNS * GRID_LINES);
+        assert_eq!(b.scroll, GRID_COLUMNS);
+        b.move_to_row(1);
+        assert_eq!(b.scroll, 0);
+    }
+
+    #[test]
+    fn la_barre_va_de_la_premiere_a_la_derniere_page() {
+        let mut b = browser(0, 1000);
+        b.scroll_bar_to(Bar::List, 0.0);
+        assert_eq!(b.scroll, 0);
+        b.scroll_bar_to(Bar::List, 1.0);
+        assert_eq!(b.scroll, 1000 - ROWS);
+        b.scroll_bar_to(Bar::List, 0.5);
+        assert!((b.scroll as i64 - (1000 - ROWS as i64) / 2).abs() <= 1, "{}", b.scroll);
+    }
+
+    #[test]
+    fn la_vitesse_va_de_la_borne_basse_a_la_borne_haute_en_passant_par_x1() {
+        assert!((speed_at(0.0) - SPEED_MIN).abs() < 1e-5);
+        assert!((speed_at(1.0) - SPEED_MAX).abs() < 1e-3);
+        assert_eq!(speed_at(speed_place(1.0)), 1.0);
+        assert!((speed_place(speed_at(0.3)) - 0.3).abs() < 1e-5);
+    }
+
+    #[test]
+    fn le_curseur_du_menu_reste_dans_la_page() {
+        let mut b = AssetBrowser { menu_len: 100, ..default() };
+        b.move_menu_cursor(MENU_ROWS as i64);
+        assert_eq!((b.menu_cursor, b.menu_scroll), (MENU_ROWS, 1));
+        b.move_menu_cursor(i64::MAX / 2);
+        assert_eq!((b.menu_cursor, b.menu_scroll), (99, 100 - MENU_ROWS));
+        b.move_menu_cursor(i64::MIN / 2);
+        assert_eq!((b.menu_cursor, b.menu_scroll), (0, 0));
     }
 }

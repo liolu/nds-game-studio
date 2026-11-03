@@ -5,21 +5,37 @@ Il fait tourner sur PC des jeux pensés comme des jeux DS : deux écrans, bouton
 2D et 3D. Il n'y a pas d'émulation. Les jeux comptent en pixels DS (256x192), mais le rendu est
 natif en qualité maximale : résolution réelle de la fenêtre, anticrénelage MSAA x4, texte net.
 
+## Langue
+
+L'interface est en anglais par défaut. **Options > Launcher > Langue** la passe en français, tout de
+suite et sans relancer ; le choix est gardé dans `options.toml` (`language = "fr"`). La fenêtre de mise
+à jour suit ce choix ; l'installeur est en anglais, puisqu'aucun choix n'existe encore à ce moment-là.
+Un texte s'écrit là où il sert, les deux langues côte à côte : `tr("Play", "Jouer")` ou
+`t!("{n} games", "{n} jeux")` (voir `crates/engine/src/i18n.rs`).
+
 ## Le launcher
 
 La fenêtre du studio s'ouvre sur le launcher, la bibliothèque des jeux de l'utilisateur.
 
-- **Ajouter un jeu** : glisser une rom DS (`.nds`, `.dsi`) dans la fenêtre. Elle est copiée dans le dossier
+- **Ajouter un jeu** : glisser une rom DS (`.nds`, `.dsi`) dans la fenêtre, ou en choisir une ou plusieurs avec
+  le bouton « Ajouter des jeux » (l'explorateur de fichiers de Windows, macOS ou Linux). Elle est copiée dans le dossier
   `rom`, à côté du launcher (le déposer soi-même dans ce dossier marche aussi). Le nom, l'éditeur et
   l'icône viennent de la rom. Sans rom, aucun jeu n'est montré : seulement un message qui explique ça.
+- **Journal** : `log/launcher.log`, à côté du launcher (le lancement précédent dans `launcher.old.log`) ;
+  à joindre quand quelque chose ne marche pas.
 - **A gauche** : le logo, le bouton à 4 carrés (la vue de tous les jeux) et les jeux favoris.
 - **Vue des jeux** : en grille ou en liste avec les infos (éditeur, code, région, taille).
+  - **Dossiers** : glisser un jeu sur un dossier (ou sur Retour) l'y range.
+  - **Recherche** (Ctrl+F) : dans tous les dossiers, sur le nom, l'éditeur, le développeur, l'année, le genre, les tags,
+    la région et le code, sans tenir compte des accents.
+  - **Tri** : nom, éditeur, développeur, année, genre, tag, région, taille, décompilation ; un second clic inverse.
+    L'année, le genre et le développeur viennent de GameTDB, avec les jaquettes (même option). Les tags sont ceux
+    de l'utilisateur, posés dans les Parametres du jeu.
 - **Page d'un jeu** : son image, son nom, l'étoile des favoris et quatre boutons pour la zone du bas :
   - **Jouer** : lance le module natif du jeu, reconnu par le `game_code` de son `game.toml`. Il n'y a
     pas d'émulation : un jeu devient jouable avec sa décompilation et le runtime (étape 6 de la
     feuille de route de DS Decomp Studio, pas encore écrite). Sans module, le bouton le dit ;
-  - **Moding** : la fenêtre Assets (F6) sur le projet de décompilation de ce jeu, trouvé par son code,
-    et la fenêtre Code (F5) ;
+  - **Moding** : la fenêtre Assets (F6) sur la rom de ce jeu et la fenêtre Code (F5) ;
   - **Description** : ce que dit la rom ;
   - **Parametres** : le fichier de la rom, le dossier des roms, retirer le jeu (deux clics, efface le fichier).
 - **Options**, toujours en bas à droite : la fenêtre Options (F1), avec une page Launcher (vue, dossier
@@ -76,7 +92,7 @@ Ajouter une manette : un fichier `crates/engine/controllers/<id>.toml` (format d
 ## Voir et changer le code en direct
 
 - **F5** ouvre la fenêtre « Code » : un éditeur des fichiers du jeu en cours (un onglet par
-  fichier, molette pour défiler, clic pour placer le curseur, copier-coller). **Ctrl+S** enregistre.
+  fichier, molette pour défiler, clic pour placer le curseur, copier-coller). **Ctrl+S** (Cmd+S sur Mac) enregistre.
   Pendant qu'on tape, les touches du jeu ne réagissent pas. Un fichier changé par un autre éditeur
   est relu s'il n'y a pas de modification en cours.
 - **Enregistrer un fichier** du jeu ou du moteur (dans la fenêtre Code ou un autre éditeur) : le studio
@@ -85,42 +101,75 @@ Ajouter une manette : un fichier `crates/engine/controllers/<id>.toml` (format d
   Code et le jeu continue avec l'ancien code.
 - Marche avec le dépôt sur le PC (compilation locale), pas dans une version installée.
 
-## Assets des jeux décompilés (F6)
+## Assets des jeux (F6)
 
-**F6** (ou Options > Développement) ouvre la fenêtre « Assets » : les fichiers des jeux DS
-décompilés, pour voir leurs modèles 3D et leurs images et nommer les objets du jeu.
+**F6** (ou Options > Développement, ou l'onglet Moding d'un jeu) ouvre la fenêtre « Assets » : les
+fichiers des jeux, pour voir leurs modèles 3D et leurs images et nommer les objets du jeu.
 
-- Les jeux sont les dossiers `<projets>/<jeu>/extract/<version>/files` (NitroFS extrait par dsd).
-  `<projets>` = `--projects=<dossier>`, ou la variable `NDS_DECOMP_PROJECTS`, ou
-  `D:\... logiciel\decomp\decomp ds\projets`.
+- Les jeux sont les roms du launcher (dossier `rom`) : tout est lu **dans la rom**, sans extraction et
+  sans dossier de travail.
 - La liste donne le **chemin de chaque fichier dans NitroFS** (celui que le code du jeu charge ;
   `archive.narc#n` = n-ième fichier d'une archive NARC). Les fichiers sont reconnus par leur
   signature (aussi compressés en LZ77). Taper du texte filtre, Retour arrière / Échap efface, la
   molette fait défiler. « Copier le chemin » le met dans le presse-papiers (pour le relier aux
   fonctions du jeu dans DS Decomp Studio).
+- **Grille** : le bouton « Grille » montre des vignettes à la place de la liste, dessinées en arrière-plan. Les
+  animations `.nanr` et `.nsbca` se jouent dans leur vignette. Clic = aperçu à droite, molette = défiler.
+- **Animations** : `.nsbca` jouées sur un modèle du jeu au même squelette (flèches pour en changer ; sans
+  modèle lisible dans la rom, ses infos), `.nanr` jouées avec leurs cellules, tuiles et palette.
+- **Sons** : `.sad` / `sadl` (IMA et Procyon ADPCM), et dans les archives `.sdat` les musiques `STRM` et les
+  banques de sons `SWAR` (listés `sound_data.sdat#n` avec leur nom) : forme d'onde et bouton pour écouter. Les
+  séquences `SSEQ` ne se jouent pas (il faudrait un synthétiseur).
+- **Vidéos** `.vx` (Actimagine), `.mods` (Mobiclip) et `.bik` (Bink) : image et son, avec le bouton pour jouer, et
+  une vignette animée dans la grille. Un Bink sans image (les musiques de Viva Piñata) se montre comme un son.
+  Le code de lecture est dans `crates/video`, portage de FFmpeg et de mobipeg, sous LGPL 2.1 ou ultérieure.
+- **Polices** `.nftr` (planche des caractères), **messages** `.bmg` (les textes du jeu).
+- **Fichiers bruts** sans en-tête, reconnus par leur extension : tuiles `.nbfc`, palettes `.nbfp` / `.ntfp` / `.pal`,
+  écrans `.nbfs` / `.scr`. Les fichiers source NITRO-CHARACTER `.ncg`, `.ncl`, `.nsc` s'ouvrent comme les autres images.
+- **Moteur maison** de Rayman Raving Rabbids 2, Battle of Giants et des deux Star Wars (fichiers sans extension) :
+  textures `LXET` / `TXET` avec la palette qu'elles nomment, palettes `TTLP`, images ` PMB`, textes `GNAL`, modèles
+  3D `GEOM` (sans texture) et `MESH` (avec).
+- **Compression** : tout fichier compressé par le BIOS de la DS (LZ77, RLE, Huffman) est décompressé, même s'il
+  s'appelle `.bin` ; un fichier Nitro dedans s'ouvre normalement. MySims : `NCG`, `NCL`, `NSC` s'ouvrent aussi.
+- **Animations de matériaux** `.nsbta`, `.nsbtp`, `.nsbma`, `.nsbva` : leur contenu, pas encore jouées.
+- **`.z`** (Tom and Jerry) : images, écrans, textures et maillages du monde (avec leurs textures, listées par le `.xof`) ; le reste (polices, collisions) montre ses octets.
+- **Planches de tuiles** : assemblées par leur écran quand il est connu (`.nscr` du même nom, bloc LINK, ou écran qui suit dans une archive sans noms) ; le contrôle Ecran permet de revenir à la planche. Dans une archive sans noms, la palette d'une planche 8 bits est celle qui colore le plus de ses pixels.
+- **`.bin` bruts** : `*Tiles.bin`, `*Palette.bin` et les `.bin` d'un dossier `bg` sont lus comme tuiles et palettes, en gris si aucune palette n'a un nom proche.
+  **`.anm`** : un résumé, pas jouées.
+- **Autres images** : `.bmp`, `.bstga` (MySims), `.ntft` avec sa palette `.ntfp` (taille devinée), palettes `.plb`.
+- **Vidéos** `.bik`, `.vx`, `.mods` : leurs caractéristiques, pas lues. **Archives** `.zip` : la liste de leurs fichiers.
+- **Autres** : sons CRI `.adx` ; textes `.txt`, `.ini`... ; `.lz` et `.cat` décompressés (ses textes et octets) ; mini-roms
+  `.srl` (icône, titre, et leurs fichiers listés `jeu.srl#n`).
+- **Nintendogs** : `.bncd` (cellules) et `.bncl` (mise en page sur l'écran).
+- **Tables de positions** : un `.dat` ou `.bin` qui commence par une table est découpé en `fichier.dat#n`. Heroes of
+  Mana : ses planches de tuiles (palette au début) s'ouvrent, `.dat` compressés entiers compris ; ses sprites
+  (`faceshap`, `monstershap`), modèles (`model00.bin`) et `skana.dat` montrent leurs octets.
+- **Fichiers maison** (`.dat`, `.bnd`...) : les fichiers Nitro collés dedans sont listés `fichier.dat#n`. Tout
+  fichier qu'on ne sait pas décoder (`.sb`, `.scripb`, `.pu`...) montre ses textes (ASCII et Shift-JIS) et
+  ses octets ; la molette fait défiler.
 - Formats Nintendo standard : modèles `.nsbmd` en 3D (glisser = tourner, clic droit = déplacer,
   molette = zoom) avec leurs textures (celles du fichier, ou le `.nsbtx` qui en donne le plus),
   textures `.nsbtx`, palettes `.nclr`, tuiles `.ncgr` / `.ncbr`, écrans `.nscr`, cellules `.ncer`.
   La palette et les tuiles qui vont avec sont devinées (même dossier, nom le plus proche) et se
-  changent avec les flèches `<` `>`. Les formats maison (Traveller's Tales, EA...) ne sont pas lus.
-- **rom.bin** (Lego Star Wars II, Les Sims 2...) : les fichiers de l'archive numérotée, une fois
-  sortis dans `<jeu>/build/romarc` par `python ../../studio/gametools/romarc.py extract` (lancé dans
-  le dossier du jeu), sont listés `rom.bin#n` (filtre « rom.bin »). « Copier le chemin » copie
-  alors le numéro n seul, la clé de DS Decomp Studio (onglet Data, « Archive (rom.bin) »). Un
-  modèle sans textures prend le `.nsbtx` au numéro le plus proche qui les a (flèches pour en
-  changer, ou « celles du modele » = sans texture).
+  changent avec les flèches `<` `>`. Les formats maison (Traveller's Tales, EA...) ne sont pas décodés.
+- **rom.bin** (Lego Star Wars II, Les Sims 2...) : les fichiers de l'archive numérotée, lus et
+  dépaquetés depuis la rom, sont listés `rom.bin#n` (filtre « rom.bin »). « Copier le chemin » copie
+  alors le numéro n seul, la clé de DS Decomp Studio (onglet Data, « Archive (rom.bin) »). Un modèle
+  sans textures prend le `.nsbtx` au numéro le plus proche qui les a (flèches pour en changer, ou
+  « celles du modele » = sans texture). Le codeur propre à ces jeux (sorte 6) est réécrit en Rust
+  (`crates/nitro/src/romarc.rs`), rien à exécuter.
 - **Menu des jeux** : de haut en bas, avec une recherche (taper du texte, Entree = premier resultat,
   Echap = fermer) et deux pourcentages. *Extrait* = part des octets de donnees lisibles fichier par
-  fichier : ne comptent pas comme extraits un `rom.bin` pas (tout) sorti, un `.narc` illisible, et tout
+  fichier : ne comptent pas comme extraits un `rom.bin` qui n'est pas une table de fichiers, un `.narc` illisible, et tout
   gros fichier (4 Mo et plus) de signature inconnue, comme `Glob.bin` ; le son et les videos ne
   comptent pas. *Regardable* = part des fichiers (ceux des archives compris) que l'app sait montrer.
 - **Menu des formats** : toutes les extensions des jeux, avec une coche : `[x]` regardable, `[~]` en
   partie, `[!]` l'essai a echoue, `[ ]` pas dans l'app. Un fichier de chaque format de chaque jeu est
   vraiment decode pour le dire. Clic = ne lister que ce format dans le jeu ouvert.
-- Ces chiffres sont calcules en arriere-plan (17 min pour 62 jeux, une seule fois) et gardes dans
-  `assets_index.json` ; un jeu est refait quand son dossier change. Essai sans fenetre :
-  `cargo run --release -p nds-engine --example asset_audit -- <projets> <sortie.tsv> [--fresh]`.
-- Lancer directement : `nds-game-studio --assets=<jeu> --asset=<chemin>`.
+- Ces chiffres sont calcules en arriere-plan (une seule fois par rom) et gardes dans
+  `assets_index.json` ; un jeu est refait quand sa rom change. Essai sans fenetre :
+  `cargo run --release -p nds-engine --example asset_audit -- <dossier des roms> <sortie.tsv> [--fresh]`.
+- Lancer directement : `nds-game-studio --assets=<rom ou titre> --asset=<chemin>`.
 - Lecture des formats : crate `crates/nitro` (la 3D reprend le code
   d'[apicula](https://github.com/scurest/apicula), licence 0BSD).
 
@@ -166,6 +215,35 @@ run.cmd
 ```
 
 `run.cmd <id>` lance directement un jeu enregistré. Sous Linux/macOS : `./run.sh`.
+
+## Installer sur macOS
+
+Le studio n'est pas notarisé par Apple : macOS bloque la première ouverture.
+
+1. Télécharger `nds-game-studio-installer-macos.zip` dans la
+   [dernière release](https://github.com/liolu/nds-game-studio/releases/latest), puis l'ouvrir.
+2. macOS refuse d'ouvrir l'installeur. Aller dans Réglages Système > Confidentialité et sécurité, puis
+   « Ouvrir quand même ». Avant macOS 15 : clic droit sur l'application, puis Ouvrir.
+3. L'installeur met le studio dans `~/Games/Nds Game Studio` et crée `Nds Game Studio` dans
+   `~/Applications`. Les roms vont dans le dossier `rom` de ce dossier.
+
+Avec le zip `...-macos.zip` à la place de l'installeur, garder `NdsGameStudio.app` dans son dossier et
+retirer d'abord la quarantaine, sinon macOS isole l'application loin de ses fichiers :
+
+```bash
+xattr -dr com.apple.quarantine "<dossier du zip>"
+```
+
+Sur Mac :
+
+- les jeux natifs se préparent aussi sur Mac (Apple Silicon et Intel), mais **c'est expérimental** : le launcher traduit
+  la rom avec `clang`, qui vient des outils en ligne de commande de Xcode. S'ils manquent, la page du jeu le dit ;
+  les installer avec `xcode-select --install` (pas besoin de Xcode lui-même). Le premier module met de 30 s à
+  1 min 30. Seul Lego Star Wars II (AL7E) a été essayé jusqu'à son écran titre, et sans fenêtre : le chemin complet
+  jusqu'à l'écran du launcher n'est pas encore vérifié. Détail dans [native/README.md](native/README.md) ;
+- F1, F5, F6, F8 et F9 demandent la touche `fn`, sauf si « Utiliser F1, F2... comme touches de fonction
+  standard » est activé dans les réglages du clavier ;
+- en cas de problème, le journal est `log/launcher.log` dans le dossier du studio.
 
 ## Versions et mises à jour
 

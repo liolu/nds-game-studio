@@ -1,7 +1,7 @@
 //! Essai sans fenêtre de la fenêtre Assets : un fichier de chaque format de chaque jeu passe par le
 //! code de l'aperçu, et l'index gardé (`assets_index.json`) est mis à jour.
 //!
-//! `cargo run --release -p nds-engine --example asset_audit -- <projets> <sortie.tsv> [--fresh]`
+//! `cargo run --release -p nds-engine --example asset_audit -- <dossier des roms> <sortie.tsv> [--fresh]`
 
 use std::fmt::Write;
 use std::path::Path;

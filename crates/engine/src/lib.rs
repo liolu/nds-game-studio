@@ -12,14 +12,22 @@
 //! - F5 montre le code du jeu, et enregistrer un fichier recompile et relance le studio (`devtools`) ;
 //! - F6 montre les fichiers (modèles 3D, images) des jeux décompilés (`asset_browser`).
 
+pub mod activity;
 pub mod asset_browser;
 pub mod asset_scan;
 pub mod controllers;
+pub mod covers;
+pub mod game_meta;
 pub mod devtools;
+pub mod i18n;
 pub mod input;
 pub mod launcher;
 pub mod library;
 pub mod link;
+pub mod logfile;
+pub mod mod_packs;
+pub mod mods;
+pub mod native_game;
 pub mod options;
 pub mod save;
 pub mod saves_page;
@@ -28,6 +36,7 @@ pub mod settings;
 pub mod spec;
 pub mod studio;
 pub mod titlebar;
+pub mod video;
 
 use bevy::prelude::*;
 use bevy::window::{ExitCondition, WindowResolution};
@@ -37,6 +46,7 @@ pub mod prelude {
     pub use crate::save::GameSaves;
     pub use crate::screens::{ds_to_world, world_to_ds, Aspect, DsScreens, Engine, EngineCamera3d, RenderStyle, Screen, ScreenLayout, SCREEN_H, SCREEN_W};
     pub use crate::spec::{GameSpec, ScreenMode};
+    pub use crate::launcher::UpdateOffer;
     pub use crate::studio::{in_game, playing, ActiveGame, ActiveRom, AppGameExt, AutoStart, StudioFooter, StudioState};
     pub use crate::NdsEnginePlugin;
 }
@@ -77,10 +87,11 @@ impl Plugin for NdsEnginePlugin {
                     exit_condition: ExitCondition::DontExit,
                     close_when_requested: false,
                     ..default()
-                }),
+                })
+                .set(bevy::log::LogPlugin { custom_layer: logfile::file_layer, ..default() }),
         )
         .add_plugins((screens::ScreensPlugin, link::LinkPlugin, input::InputPlugin, studio::StudioPlugin, titlebar::TitleBarPlugin, devtools::DevToolsPlugin, options::OptionsPlugin))
-            .add_plugins((save::SavePlugin, settings::SettingsPlugin, saves_page::SavesPagePlugin, asset_browser::AssetBrowserPlugin, launcher::LauncherPlugin));
+            .add_plugins((save::SavePlugin, settings::SettingsPlugin, saves_page::SavesPagePlugin, asset_browser::AssetBrowserPlugin, launcher::LauncherPlugin, i18n::I18nPlugin, video::VideoPlugin, native_game::NativeGamesPlugin));
         options.apply_to_app(app);
     }
 }

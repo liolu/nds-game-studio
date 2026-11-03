@@ -25,7 +25,7 @@ pub struct InstallerApp {
     title_label: nwg::Label,
 
     #[nwg_control(
-        text: "Dossier d'installation :",
+        text: "Install folder:",
         size: (460, 20),
         position: (20, 60)
     )]
@@ -47,14 +47,14 @@ pub struct InstallerApp {
     browse_btn: nwg::Button,
 
     #[nwg_control(
-        text: "Creer un raccourci Bureau",
+        text: "Create a Desktop shortcut",
         size: (250, 25),
         position: (20, 125)
     )]
     desktop_shortcut: nwg::CheckBox,
 
     #[nwg_control(
-        text: "Creer un raccourci Menu Demarrer",
+        text: "Create a Start Menu shortcut",
         size: (260, 25),
         position: (20, 155)
     )]
@@ -76,7 +76,7 @@ pub struct InstallerApp {
     progress: nwg::ProgressBar,
 
     #[nwg_control(
-        text: "Pret a installer",
+        text: "Ready to install",
         size: (460, 20),
         position: (20, 280)
     )]
@@ -101,7 +101,7 @@ impl InstallerApp {
     fn on_browse(&self) {
         let mut dialog = Default::default();
         let _ = nwg::FileDialog::builder()
-            .title("Choisir le dossier d'installation")
+            .title("Choose the install folder")
             .action(nwg::FileDialogAction::OpenDirectory)
             .build(&mut dialog);
 
@@ -116,7 +116,7 @@ impl InstallerApp {
     fn on_install(&self) {
         let install_path = self.path_input.text();
         if install_path.is_empty() {
-            nwg::modal_info_message(&self.window, "Erreur", "Veuillez choisir un dossier d'installation.");
+            nwg::modal_info_message(&self.window, "Error", "Please choose an install folder.");
             return;
         }
 
@@ -125,7 +125,7 @@ impl InstallerApp {
 
         self.install_btn.set_enabled(false);
         self.browse_btn.set_enabled(false);
-        self.status_label.set_text("Recuperation des informations...");
+        self.status_label.set_text("Getting information...");
 
         let progress = Arc::new(AtomicU64::new(0));
         let total = Arc::new(AtomicU64::new(0));
@@ -170,19 +170,19 @@ impl InstallerApp {
 
             let err = self.error_msg.borrow().lock().unwrap().clone();
             if let Some(e) = err {
-                self.status_label.set_text("Erreur lors de l'installation");
-                nwg::modal_info_message(&self.window, "Erreur", &format!("L'installation a echoue:\n{}", e));
+                self.status_label.set_text("Installation error");
+                nwg::modal_info_message(&self.window, "Error", &format!("The installation failed:\n{}", e));
                 self.install_btn.set_enabled(true);
                 self.browse_btn.set_enabled(true);
             } else {
-                self.status_label.set_text("Installation terminee !");
+                self.status_label.set_text("Installation complete!");
                 let install_dir = self.install_dir.borrow().clone();
                 let msg = format!(
-                    "Nds Game Studio a ete installe avec succes dans:\n{}\n\nLancer le jeu maintenant ?",
+                    "Nds Game Studio was installed in:\n{}\n\nStart it now?",
                     install_dir.display()
                 );
                 let params = nwg::MessageParams {
-                    title: "Installation terminee",
+                    title: "Installation complete",
                     content: &msg,
                     buttons: nwg::MessageButtons::YesNo,
                     icons: nwg::MessageIcons::Info,
@@ -198,7 +198,7 @@ impl InstallerApp {
                         nwg::modal_info_message(
                             &self.window,
                             "Erreur",
-                            &format!("Impossible de lancer le jeu:\n{}\n\nChemin: {}", e, exe.display()),
+                            &format!("Cannot start it:\n{}\n\nPath: {}", e, exe.display()),
                         );
                     }
                 }

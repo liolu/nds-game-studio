@@ -1,5 +1,6 @@
 id = "xbox-360"
-name = "Manette Xbox 360"
+name = "Xbox 360 Controller"
+name_fr = "Manette Xbox 360"
 names = ["xbox 360", "x360", "xinput", "xbox360"]
 vendor_ids = [0x045E]
 # 0x028E filaire, 0x0719 / 0x0291 / 0x02A1 recepteurs sans fil

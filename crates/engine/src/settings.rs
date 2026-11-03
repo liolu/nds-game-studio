@@ -1,7 +1,8 @@
 //! Options gardées d'un lancement à l'autre (fichier `options.toml` dans le dossier des données).
 //!
+//! - **Langue** : anglais par défaut, français au choix (`i18n`) ;
 //! - **Affichage** : format, écrans fusionnés ou séparés, plein écran, rendu HD ou pixel ;
-//! - **Développement** : recompiler et relancer à l'enregistrement ;
+//! - **Développement** : recompiler et relancer à l'enregistrement, accès développeur ;
 //! - **Manettes** : modèle choisi à la main dans Options > Manettes ;
 //! - **Fenêtre principale** : place (pixels physiques), taille (pixels logiques), agrandie.
 //!
@@ -18,6 +19,7 @@ use bevy::winit::WINIT_WINDOWS;
 use serde::{Deserialize, Serialize};
 
 use crate::devtools::{DevSettings, LaunchOptions};
+use crate::i18n::{self, Lang, Language};
 use crate::options::OptionsView;
 use crate::screens::{Aspect, DsScreens, RenderStyle, ScreenLayout};
 use crate::studio::StudioState;
@@ -47,11 +49,13 @@ impl Default for DisplaySettings {
 #[serde(default)]
 pub struct DevOptions {
     pub auto_reload: bool,
+    pub developer_access: bool,
 }
 
 impl Default for DevOptions {
     fn default() -> Self {
-        Self { auto_reload: DevSettings::default().auto_reload }
+        let dev = DevSettings::default();
+        Self { auto_reload: dev.auto_reload, developer_access: dev.developer_access }
     }
 }
 
@@ -81,6 +85,8 @@ const MIN_LAUNCHER_W: f32 = 960.0;
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    /// en | fr (écrit en premier : le launcher de mise à jour lit cette ligne)
+    pub language: String,
     pub display: DisplaySettings,
     pub dev: DevOptions,
     pub controllers: ControllerOptions,
@@ -161,11 +167,18 @@ pub struct ResetSettings;
 
 /// Les choix du joueur, et ce qui était à l'écran à la dernière image.
 #[derive(Resource, Default)]
-struct PlayerSettings {
+pub(crate) struct PlayerSettings {
     player: Settings,
     seen: Option<Settings>,
     /// Moment du dernier changement pas encore écrit.
     dirty_at: Option<f64>,
+}
+
+impl PlayerSettings {
+    /// Le rendu choisi par le joueur : la spécification d'un jeu peut en imposer un autre.
+    pub(crate) fn chosen_render(&self) -> RenderStyle {
+        self.player.render()
+    }
 }
 
 /// Agrandir la fenêtre principale dès qu'elle existe (winit ne le fait pas à la création).
@@ -201,7 +214,10 @@ impl Plugin for SettingsPlugin {
         }
         world.insert_resource(layout);
         world.insert_resource(player.render());
-        world.insert_resource(DevSettings { auto_reload: player.dev.auto_reload });
+        world.insert_resource(DevSettings { auto_reload: player.dev.auto_reload, developer_access: player.dev.developer_access });
+        let mut language = Language::default();
+        i18n::set_language(&mut language, Lang::from_code(&player.language));
+        world.insert_resource(language);
         if let Some(model) = player.controllers.model.clone() {
             if let Some(mut view) = world.get_resource_mut::<OptionsView>() {
                 view.model = Some(model);
@@ -290,6 +306,7 @@ fn reset(
     mut style: ResMut<RenderStyle>,
     mut dev: ResMut<DevSettings>,
     mut view: ResMut<OptionsView>,
+    mut language: ResMut<Language>,
     screens: Option<Res<DsScreens>>,
     mut windows: Query<&mut Window>,
 ) {
@@ -307,6 +324,7 @@ fn reset(
     layout.merged = defaults.display.merged;
     *style = defaults.render();
     *dev = DevSettings::default();
+    i18n::set_language(&mut language, Lang::default());
     view.model = None;
     view.model_chosen = false;
     if let Some(mut window) = screens.and_then(|s| windows.get_mut(s.main_window()).ok()) {
@@ -318,10 +336,12 @@ fn reset(
 /// Ce qui est à l'écran ; place et taille gardées d'avant tant que la fenêtre est agrandie ou en plein écran.
 fn snapshot(player: &Settings, layout: &ScreenLayout, style: RenderStyle, dev: &DevSettings, view: &OptionsView, main: Entity, window: Option<&Window>) -> Settings {
     let mut now = player.clone();
+    now.language = i18n::lang().code().into();
     now.display.aspect = aspect_name(layout.aspect).into();
     now.display.merged = layout.merged;
     now.display.render = render_name(style).into();
     now.dev.auto_reload = dev.auto_reload;
+    now.dev.developer_access = dev.developer_access;
     now.controllers.model = if view.model_chosen { view.model.clone() } else { None };
     let Some(window) = window else { return now };
     let fullscreen = window.mode != WindowMode::Windowed;
@@ -330,7 +350,7 @@ fn snapshot(player: &Settings, layout: &ScreenLayout, style: RenderStyle, dev: &
         return now;
     }
     let (maximized, minimized, at) = WINIT_WINDOWS
-        .with_borrow(|w| w.get_window(main).map(|w| (w.is_maximized(), w.is_minimized().unwrap_or(false), w.outer_position().ok().map(|p| [p.x, p.y]))))
+        .with_borrow(|w| w.get_window(main).map(|w| (crate::titlebar::is_maximized(main), w.is_minimized().unwrap_or(false), w.outer_position().ok().map(|p| [p.x, p.y]))))
         .unwrap_or((false, false, None));
     // Réduite dans la barre des tâches, Windows la met en (-32000, -32000) en 160x28 : on garde
     // la place d'avant (sinon le studio se rouvrirait réduit)
@@ -375,11 +395,13 @@ fn watch(
                 }
             };
         }
+        take!(language);
         take!(display.aspect);
         take!(display.merged);
         take!(display.fullscreen);
         take!(display.render);
         take!(dev.auto_reload);
+        take!(dev.developer_access);
         take!(controllers.model);
         take!(window.position);
         take!(window.size);
@@ -401,8 +423,9 @@ mod tests {
     #[test]
     fn round_trip() {
         let settings = Settings {
+            language: "fr".into(),
             display: DisplaySettings { aspect: "16:9".into(), merged: false, fullscreen: true, render: "pixel".into() },
-            dev: DevOptions { auto_reload: false },
+            dev: DevOptions { auto_reload: false, developer_access: true },
             controllers: ControllerOptions { model: Some("xbox-series".into()) },
             window: WindowOptions { position: Some([-10, 40]), size: Some([512.0, 800.0]), maximized: true },
         };
@@ -410,6 +433,8 @@ mod tests {
         assert_eq!(parsed, settings);
         assert_eq!(parsed.aspect(), Aspect::Wide16x9);
         assert_eq!(parsed.render(), RenderStyle::Pixel);
+        // Le launcher de mise à jour cherche cette ligne
+        assert!(settings.to_toml().lines().any(|l| l == "language = \"fr\""));
     }
 
     #[test]
@@ -428,5 +453,7 @@ mod tests {
         assert_eq!(defaults.aspect(), ScreenLayout::default().aspect);
         assert_eq!(defaults.render(), RenderStyle::default());
         assert!(defaults.dev.auto_reload);
+        assert!(!defaults.dev.developer_access);
+        assert_eq!(Lang::from_code(&defaults.language), Lang::En);
     }
 }

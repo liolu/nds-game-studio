@@ -1,31 +1,38 @@
-//! Fichiers des jeux décompilés pour la fenêtre Assets : liste, décodage d'un aperçu, et index de
-//! tous les jeux (pourcentages, formats, essai d'un fichier de chaque format).
+//! Fichiers des roms pour la fenêtre Assets, lus dans la rom elle-même : liste, décodage d'un aperçu,
+//! et index de toutes les roms (pourcentages, formats, essai d'un fichier de chaque format).
 //!
 //! L'index est calculé en arrière-plan et gardé dans `assets_index.json` (dossier des données).
-//! Il est refait pour un jeu quand son dossier `files` ou `build/romarc` change.
+//! Il est refait pour une rom quand son fichier change.
 //!
 //! - **extrait** = part des octets de données lisibles fichier par fichier. Ne comptent pas comme
-//!   extraits : un `rom.bin` pas (ou pas tout) sorti dans `build/romarc`, un `.narc` illisible, et
+//!   extraits : un `rom.bin` qui n'est pas une table de fichiers, un `.narc` illisible, et
 //!   tout gros fichier (4 Mo et plus) de signature inconnue, comme `Glob.bin`. Les banques de son
 //!   et les vidéos ne comptent pas dans le total.
 //! - **regardable** = part des fichiers (ceux des archives compris) que la fenêtre sait montrer.
 
 use std::collections::{BTreeMap, HashMap};
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use nds_nitro::{g2d, model3d, narc, sniff, unpack, Kind, Rgba};
+use nds_video::Video;
+use nds_nitro::{adx, ahx, amaze, decompress_any, g2d, gx_mesh, hom, looks_compressed, model3d, narc, nitrofs, packs, romarc, romsound, sadl, sdat, sniff, sseq, unpack, Kind, Rgba};
 use serde::{Deserialize, Serialize};
 
+use crate::i18n::{t, tr};
+
+#[path = "game_params.rs"]
+pub mod game_params;
+
 /// À changer quand le calcul change : l'index gardé est alors refait.
-const INDEX_VERSION: u32 = 1;
+const INDEX_VERSION: u32 = 16;
 const BIG_FILE: usize = 4 << 20;
 
+/// Une rom du dossier `rom` du launcher.
 pub struct GameDir {
     pub label: String,
-    pub files: PathBuf,
+    pub rom: PathBuf,
 }
 
 pub struct Entry {
@@ -33,14 +40,16 @@ pub struct Entry {
     pub path: String,
     /// Nom dans l'archive, s'il y en a un.
     pub member_name: Option<String>,
-    pub disk: PathBuf,
+    /// La rom, et la position du fichier dedans.
+    pub rom: PathBuf,
+    pub span: (usize, usize),
     pub member: Option<(usize, usize)>,
     pub kind: Kind,
     pub size: usize,
     /// Dossier (ou archive) : les fichiers qui vont ensemble y sont cherchés d'abord.
     pub dir: String,
     pub stem: String,
-    /// N° dans l'archive rom.bin (fichiers sortis par `romarc.py extract` dans build/romarc).
+    /// N° dans l'archive rom.bin.
     pub rom_index: Option<u32>,
 }
 
@@ -57,40 +66,48 @@ impl Entry {
             _ => "(sans extension)".into(),
         }
     }
-}
 
-/// Les jeux qui ont un NitroFS extrait.
-pub fn find_games(root: &Path) -> Vec<GameDir> {
-    let mut games = Vec::new();
-    let Ok(dirs) = std::fs::read_dir(root) else { return games };
-    let mut dirs: Vec<PathBuf> = dirs.flatten().map(|d| d.path()).filter(|p| p.is_dir()).collect();
-    dirs.sort();
-    for dir in dirs {
-        let Ok(versions) = std::fs::read_dir(dir.join("extract")) else { continue };
-        let mut versions: Vec<PathBuf> = versions.flatten().map(|d| d.path()).filter(|p| p.join("files").is_dir()).collect();
-        versions.sort();
-        let name = dir.file_name().unwrap_or_default().to_string_lossy().to_string();
-        let several = versions.len() > 1;
-        for v in versions {
-            let version = v.file_name().unwrap_or_default().to_string_lossy().to_string();
-            let label = if several { format!("{name} ({version})") } else { name.clone() };
-            games.push(GameDir { label, files: v.join("files") });
+    /// Le dossier du fichier dans la liste : une archive en est un, avec les sous-dossiers que donnent les noms de ses fichiers.
+    pub fn folder(&self) -> String {
+        match self.member_name.as_deref().and_then(|name| name.rsplit_once('/')) {
+            Some((parent, _)) if self.member.is_some() && !parent.trim_matches('/').is_empty() => format!("{}/{}", self.dir, parent.trim_matches('/')),
+            _ => self.dir.clone(),
         }
     }
-    games
+
+    /// Le nom du fichier, sans ses dossiers.
+    pub fn short_name(&self) -> &str {
+        let name = self.member_name.as_deref().unwrap_or(&self.path);
+        name.rsplit('/').next().unwrap_or(name)
+    }
 }
 
-fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(read) = std::fs::read_dir(dir) else { return };
-    let mut items: Vec<PathBuf> = read.flatten().map(|d| d.path()).collect();
-    items.sort_by_key(|p| p.to_string_lossy().to_lowercase());
-    for p in items {
-        if p.is_dir() {
-            walk(&p, out);
-        } else {
-            out.push(p);
+/// Les roms du dossier : « Titre (CODE) ».
+pub fn find_games(dir: &Path) -> Vec<GameDir> {
+    crate::library::scan_roms(dir).into_iter().map(|rom| GameDir { label: format!("{} ({})", plain_title(&rom.title, &rom.internal_name), rom.code), rom: rom.path }).collect()
+}
+
+/// Le titre avec les seuls caractères de la police de cette fenêtre : sans accents ni « ™ » ; le nom
+/// interne de la rom si le titre est dans une autre écriture (japonais...).
+fn plain_title(title: &str, internal_name: &str) -> String {
+    let mut plain = String::new();
+    for c in title.chars() {
+        match c {
+            'à' | 'â' | 'ä' | 'á' | 'ã' => plain.push('a'),
+            'é' | 'è' | 'ê' | 'ë' => plain.push('e'),
+            'î' | 'ï' | 'í' | 'ì' => plain.push('i'),
+            'ô' | 'ö' | 'ó' | 'ò' | 'õ' => plain.push('o'),
+            'û' | 'ü' | 'ú' | 'ù' => plain.push('u'),
+            'ç' => plain.push('c'),
+            'ñ' => plain.push('n'),
+            'À' | 'Â' | 'Ä' | 'Á' => plain.push('A'),
+            'É' | 'È' | 'Ê' | 'Ë' => plain.push('E'),
+            '™' | '®' | '©' => {}
+            c if c.is_ascii() => plain.push(c),
+            _ => return internal_name.to_string(),
         }
     }
+    plain
 }
 
 fn stem_of(path: &str) -> String {
@@ -101,7 +118,7 @@ fn stem_of(path: &str) -> String {
 /// Sorte d'un fichier : signature, sinon signature une fois décompressé (LZ77).
 fn kind_of(head: &[u8], whole: impl FnOnce() -> Option<Vec<u8>>) -> Kind {
     let kind = sniff(head);
-    if kind == Kind::Other && matches!(head.first(), Some(0x10 | 0x11)) {
+    if kind == Kind::Other && looks_compressed(head.first()) {
         if let Some(bytes) = whole() {
             return sniff(&unpack(bytes));
         }
@@ -109,70 +126,930 @@ fn kind_of(head: &[u8], whole: impl FnOnce() -> Option<Vec<u8>>) -> Kind {
     kind
 }
 
-/// Tous les fichiers du jeu, et ceux des archives NARC.
-pub fn scan(files: &Path) -> Vec<Entry> {
-    let mut paths = Vec::new();
-    walk(files, &mut paths);
+/// Tous les fichiers de la rom, ceux des archives NARC et ceux de rom.bin.
+pub fn scan(rom_path: &Path) -> Vec<Entry> {
+    let Ok(rom) = std::fs::read(rom_path) else { return Vec::new() };
+    let Ok(files) = nitrofs::read(&rom) else { return Vec::new() };
+    let is_hom = is_heroes_of_mana(&rom);
+    let spans: HashMap<String, (usize, usize)> = files.iter().map(|f| (f.path.clone(), (f.start, f.end))).collect();
     let mut entries = Vec::new();
-    for disk in paths {
-        let path = disk.strip_prefix(files).unwrap_or(&disk).to_string_lossy().replace('\\', "/");
-        let size = disk.metadata().map(|m| m.len() as usize).unwrap_or(0);
-        let mut head = [0u8; 4];
-        let n = std::fs::File::open(&disk).and_then(|mut f| f.read(&mut head)).unwrap_or(0);
+    let mut rom_bin = Vec::new();
+    for file in files {
+        let span = (file.start, file.end);
+        let data = &rom[file.start..file.end];
+        let path = file.path;
+        let size = data.len();
         let small = size < BIG_FILE;
-        let kind = kind_of(&head[..n], || small.then(|| std::fs::read(&disk).ok()).flatten());
+        let kind = guess_file_format(guess_house_format(by_extension(kind_of(&data[..size.min(16)], || small.then(|| data.to_vec())), &path), &path, data, false), &path, data);
+        let kind = guess_hom_format(kind, &path, data, is_hom);
+        let kind = if kind == Kind::Other && looks_like_rom(data) { Kind::NestedRom } else { kind };
         let dir = path.rsplit_once('/').map_or(String::new(), |(d, _)| d.to_string());
         let stem = stem_of(&path);
-        entries.push(Entry { path: path.clone(), member_name: None, disk: disk.clone(), member: None, kind, size, dir, stem, rom_index: None });
+        // Une table de positions au début d'un `.rom` (`SoundData.rom` des Sims 2) : des données en morceaux
+        let kind = if kind == Kind::Other && path.to_lowercase().ends_with(".rom") && !table_members(data).is_empty() { Kind::GameData } else { kind };
+        entries.push(Entry { path: path.clone(), member_name: None, rom: rom_path.to_path_buf(), span, member: None, kind, size, dir, stem, rom_index: None });
+        if path.rsplit('/').next().is_some_and(|n| n.eq_ignore_ascii_case("rom.bin")) {
+            rom_bin = scan_rom_bin(rom_path, data, file.start);
+            // L'archive elle-même : sa table
+            if !rom_bin.is_empty() {
+                entries.last_mut().unwrap().kind = Kind::GameData;
+            }
+        }
+        if kind == Kind::NestedRom {
+            // Une mini-rom a son propre NitroFS ; ses positions comptent depuis son début
+            let files = nitrofs::read(data).unwrap_or_default();
+            for (n, f) in files.iter().enumerate() {
+                let inner = &data[f.start..f.end];
+                let name = f.path.rsplit('/').next().unwrap_or(&f.path).to_string();
+                entries.push(Entry { path: format!("{path}#{n}"), member_name: Some(f.path.clone()), rom: rom_path.to_path_buf(), span, member: Some((f.start, f.end)), kind: by_extension(sniff(inner), &name), size: f.end - f.start, dir: path.clone(), stem: stem_of(&name), rom_index: None });
+            }
+            // Sans NitroFS (`DLrom_aqie.bin` de MySims), les fichiers Nitro collés dans son code
+            if files.is_empty() {
+                for (n, (start, end, ext)) in embedded_files(data).into_iter().enumerate() {
+                    entries.push(Entry { path: format!("{path}#{n}"), member_name: Some(format!("{n:03}.{ext}")), rom: rom_path.to_path_buf(), span, member: Some((start, end)), kind: sniff(&data[start..end]), size: end - start, dir: path.clone(), stem: String::new(), rom_index: None });
+                }
+            }
+            continue;
+        }
+        if kind == Kind::SoundArchive {
+            for (n, f) in sdat::files(data).unwrap_or_default().into_iter().enumerate() {
+                let inner = &data[f.start..f.end];
+                let name = format!("{}.{}", f.name.unwrap_or_else(|| format!("{n:04}")), f.ext);
+                entries.push(Entry { path: format!("{path}#{n}"), member_name: Some(name), rom: rom_path.to_path_buf(), span, member: Some((f.start, f.end)), kind: sniff(inner), size: f.end - f.start, dir: path.clone(), stem: String::new(), rom_index: None });
+            }
+            continue;
+        }
+        // Les sons d'un `SoundData.rom` d'Amaze : la liste, et chaque son à écouter
+        let sounds = if kind == Kind::GameData && path.to_lowercase().ends_with(".rom") { romsound::samples(data) } else { Vec::new() };
+        if !sounds.is_empty() {
+            entries.last_mut().unwrap().kind = Kind::TableArchive;
+            for (n, s) in sounds.iter().enumerate() {
+                let ext = if s.adpcm { "adpcm" } else { "pcm" };
+                entries.push(Entry { path: format!("{path}#{n}"), member_name: Some(format!("{n:04}.{ext}")), rom: rom_path.to_path_buf(), span, member: Some((s.start, s.end)), kind: Kind::RomSound, size: s.end - s.start, dir: path.clone(), stem: String::new(), rom_index: None });
+            }
+            continue;
+        }
+        // Un fichier avec son propre NitroFS (`dwc/utility.bin`) ou une archive `sar ` : chacun de leurs fichiers.
+        // Ceux de NitroFS finissent souvent par `.l` (compressés en LZ77) : le nom montré est celui d'après.
+        if matches!(kind, Kind::EmbeddedFs | Kind::SarArchive) && decompress_any(data).is_none() {
+            let members: Vec<(usize, usize, String, Kind)> = if kind == Kind::EmbeddedFs {
+                nitrofs::read_embedded(data)
+                    .into_iter()
+                    .map(|f| {
+                        let name = f.path.strip_suffix(".l").unwrap_or(&f.path).to_string();
+                        let member = &data[f.start..f.end];
+                        let kind = match by_extension(sniff_inner(member), &name) {
+                            Kind::Other => Kind::GameData,
+                            kind => kind,
+                        };
+                        (f.start, f.end, name, kind)
+                    })
+                    .collect()
+            } else {
+                hom::sar_members(data)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(n, (start, end))| {
+                        // Emplacement vide : quelques zéros compressés (en-tête LZ77, drapeaux à 0, puis les zéros)
+                        let empty = matches!(&data[start..end], [0x10, size, 0, 0, 0, rest @ ..] if *size <= 8 && rest.len() >= *size as usize && rest[..*size as usize].iter().all(|b| *b == 0));
+                        (start, end, format!("{n:03}.evt"), if empty { Kind::EmptySlot } else { Kind::EventScript })
+                    })
+                    .collect()
+            };
+            if !members.is_empty() {
+                entries.last_mut().unwrap().kind = Kind::TableArchive;
+            }
+            for (n, (start, end, name, kind)) in members.into_iter().enumerate() {
+                let stem = stem_of(&name);
+                entries.push(Entry { path: format!("{path}#{n}"), member_name: Some(name), rom: rom_path.to_path_buf(), span, member: Some((start, end)), kind, size: end - start, dir: path.clone(), stem, rom_index: None });
+            }
+            continue;
+        }
+        // Les vidéos rangées dans les archives des jeux ; le reste de ces archives n'est pas décrit
+        let table = packs::companion(&path).and_then(|p| spans.get(&p)).map(|s| &rom[s.0..s.1]);
+        let videos = packs::videos(data, table);
+        if !videos.is_empty() {
+            if let Some(container) = entries.last_mut() {
+                container.kind = Kind::TableArchive;
+            }
+            for (n, (start, end)) in videos.into_iter().enumerate() {
+                let inner = &data[start..end];
+                let ext = match inner.get(..3) {
+                    Some(b"MOD") => "mods",
+                    Some(b"VXD") => "vx",
+                    _ => "bik",
+                };
+                entries.push(Entry { path: format!("{path}#{n}"), member_name: Some(format!("{n:03}.{ext}")), rom: rom_path.to_path_buf(), span, member: Some((start, end)), kind: sniff(inner), size: end - start, dir: path.clone(), stem: String::new(), rom_index: None });
+            }
+            continue;
+        }
+        if kind == Kind::Other && !path.to_lowercase().ends_with("rom.bin") {
+            let bytes = unpack(data.to_vec());
+            let embedded = embedded_files(&bytes);
+            for (n, (start, end, ext)) in embedded.iter().copied().enumerate() {
+                let inner = &bytes[start..end];
+                entries.push(Entry { path: format!("{path}#{n}"), member_name: Some(format!("{n:03}.{ext}")), rom: rom_path.to_path_buf(), span, member: Some((start, end)), kind: sniff(inner), size: end - start, dir: path.clone(), stem: String::new(), rom_index: None });
+            }
+            if !embedded.is_empty() {
+                let container = entries.len() - embedded.len() - 1;
+                entries[container].kind = Kind::TableArchive;
+            }
+            if embedded.is_empty() && has_house_extension(&path) {
+                // Une table de positions au début : chaque morceau est un fichier, souvent compressé
+                let members = table_members(&bytes);
+                let mut kinds: Vec<Kind> = members
+                    .iter()
+                    .enumerate()
+                    .map(|(n, &(start, end))| {
+                        let member = &bytes[start..end];
+                        guess_hom_format(guess_house_format(sniff_inner(member), &path, member, true), &format!("{path}#{n}"), member, is_hom)
+                    })
+                    .collect();
+                if is_hom {
+                    share_first_palette(&bytes, &members, &mut kinds);
+                }
+                for (n, ((start, end), kind)) in members.iter().copied().zip(kinds).enumerate() {
+                    let ext = if kind == Kind::Other { "bin" } else { "dat" };
+                    entries.push(Entry { path: format!("{path}#{n}"), member_name: Some(format!("{n:03}.{ext}")), rom: rom_path.to_path_buf(), span, member: Some((start, end)), kind, size: end - start, dir: path.clone(), stem: String::new(), rom_index: None });
+                }
+                // Le fichier qui les contient se montre par leur liste
+                if !members.is_empty() {
+                    let container = entries.len() - members.len() - 1;
+                    entries[container].kind = Kind::TableArchive;
+                }
+            }
+            continue;
+        }
         if kind != Kind::Archive {
             continue;
         }
-        let Ok(bytes) = std::fs::read(&disk).map(unpack) else { continue };
+        let bytes = unpack(data.to_vec());
         let Ok(members) = narc::read(&bytes) else { continue };
         for m in members {
             let data = &bytes[m.start..m.end];
-            let kind = kind_of(data, || Some(data.to_vec()));
+            let kind = by_extension(kind_of(data, || Some(data.to_vec())), &m.name);
             let member_path = format!("{path}#{}", m.index);
             let named = !m.name.chars().all(|c| c.is_ascii_digit());
             let stem = if named { stem_of(&m.name) } else { String::new() };
-            entries.push(Entry { path: member_path, member_name: named.then(|| m.name.clone()), disk: disk.clone(), member: Some((m.start, m.end)), kind, size: m.end - m.start, dir: path.clone(), stem, rom_index: None });
+            entries.push(Entry { path: member_path, member_name: named.then(|| m.name.clone()), rom: rom_path.to_path_buf(), span, member: Some((m.start, m.end)), kind, size: m.end - m.start, dir: path.clone(), stem, rom_index: None });
         }
     }
-    entries.extend(scan_romarc(files));
+    entries.extend(rom_bin);
+    let code = rom.get(0x0C..0x10).map(String::from_utf8_lossy).unwrap_or_default();
+    let params = game_params::for_game(&code);
+    if !params.is_empty() {
+        for e in &mut entries {
+            e.kind = params.kind_for(&e.dir, &e.format(), e.kind);
+        }
+    }
     entries
 }
 
-/// Dossier des fichiers sortis de rom.bin : `<jeu>/build/romarc` (files = `<jeu>/extract/<v>/files`).
-fn romarc_dir(files: &Path) -> Option<PathBuf> {
-    Some(files.parent()?.parent()?.parent()?.join("build").join("romarc"))
+fn has_house_extension(path: &str) -> bool {
+    matches!(path.rsplit_once('.').map(|(_, ext)| ext.to_lowercase()).as_deref(), Some("dat" | "bin"))
 }
 
-/// Les fichiers de l'archive numérotée rom.bin (jeux Traveller's Tales, EA...) une fois sortis
-/// par `studio/gametools/romarc.py extract` : `<n sur 5 chiffres>.<ext>`.
-fn scan_romarc(files: &Path) -> Vec<Entry> {
-    let Some(dir) = romarc_dir(files) else { return Vec::new() };
-    let mut paths = Vec::new();
-    walk(&dir, &mut paths);
-    let mut entries: Vec<Entry> = paths
-        .into_iter()
-        .filter_map(|disk| {
-            let name = disk.file_name()?.to_string_lossy().to_string();
-            let n: u32 = name.split('.').next()?.parse().ok()?;
-            let size = disk.metadata().map(|m| m.len() as usize).unwrap_or(0);
-            let mut head = [0u8; 4];
-            let read = std::fs::File::open(&disk).and_then(|mut f| f.read(&mut head)).unwrap_or(0);
-            let kind = kind_of(&head[..read], || (size < BIG_FILE).then(|| std::fs::read(&disk).ok()).flatten());
-            Some(Entry { path: format!("rom.bin#{n}"), member_name: Some(name), disk, member: None, kind, size, dir: "rom.bin".into(), stem: n.to_string(), rom_index: Some(n) })
+/// La sorte d'un morceau, une fois décompressé s'il l'est.
+fn sniff_inner(member: &[u8]) -> Kind {
+    match decompress_any(member) {
+        Some(inner) => sniff(&inner),
+        None => sniff(member),
+    }
+}
+
+/// Un morceau de `.dat` ou de `.bin`, ou un `.dat` entier, sans signature : une planche de tuiles se reconnaît à sa taille
+/// et à sa palette. Un `.bin` entier n'en est presque jamais une : sa taille tombe juste une fois sur 32.
+fn guess_house_format(kind: Kind, path: &str, data: &[u8], member: bool) -> Kind {
+    if kind != Kind::Other || !has_house_extension(path) || (!member && path.to_lowercase().ends_with(".bin")) {
+        return kind;
+    }
+    let inner = decompress_any(data);
+    // Un `.dat` entier et non compressé est plutôt du texte ou une table (`spanish.dat` de SimCity)
+    if !member && inner.is_none() {
+        return kind;
+    }
+    if g2d::read_palette_tiles(inner.as_deref().unwrap_or(data)).is_some() { Kind::PaletteTiles } else { kind }
+}
+
+/// Heroes of Mana, toutes régions : code de jeu `AHE?` dans l'en-tête de la rom.
+fn is_heroes_of_mana(rom: &[u8]) -> bool {
+    rom.get(0x0C..0x0F) == Some(b"AHE")
+}
+
+/// Les formats maison de Heroes of Mana. Ceux qui se reconnaissent à leur forme (textures des modèles, archive `sar `,
+/// table `.mat`, NitroFS dans un fichier, emplacement vide) valent pour tous les jeux ; les sprites, planches, scripts
+/// et animations seulement pour Heroes of Mana (`is_hom`). Blue Dragon Plus range ses visages en six blocs aussi,
+/// mais pas de la même façon : lus comme ceux de Heroes of Mana, ils ne donnent que du bruit.
+fn guess_hom_format(kind: Kind, path: &str, data: &[u8], is_hom: bool) -> Kind {
+    const MAX_SIZE: usize = 4 << 20;
+    // Une planche palette + tuiles se trouve aussi dans le premier bloc d'un sprite : le sprite d'abord
+    if !matches!(kind, Kind::Other | Kind::PaletteTiles) || data.len() > MAX_SIZE {
+        return kind;
+    }
+    let inner = decompress_any(data);
+    let bytes = inner.as_deref().unwrap_or(data);
+    let lower = path.to_lowercase();
+    if is_hom && hom::read_shape(bytes).is_some() {
+        Kind::HomSprite
+    } else if kind != Kind::Other {
+        kind
+    } else if hom::is_empty_slot(data) && path.contains('#') {
+        Kind::EmptySlot
+    } else if hom::model_textures(bytes).is_some() {
+        Kind::HomModelTextures
+    } else if hom::sar_summary(bytes).is_some() {
+        Kind::SarArchive
+    } else if lower.ends_with(".mat") && hom::mat_entries(bytes).is_some() {
+        Kind::OffsetTable
+    } else if !nitrofs::read_embedded(bytes).is_empty() {
+        Kind::EmbeddedFs
+    } else if !is_hom {
+        kind
+    } else if lower.starts_with("event/") && path.contains('#') {
+        Kind::EventScript
+    } else if hom::is_model_anim(bytes) {
+        Kind::HouseModelAnim
+    } else if has_house_extension(path.split('#').next().unwrap_or(path)) && table_members(bytes).is_empty() && hom::read_sheet(bytes).is_some() {
+        Kind::HomSheet
+    } else {
+        kind
+    }
+}
+
+/// Une table dont le premier morceau est une palette de 256 couleurs et les autres des tuiles (`ending.dat` de
+/// Heroes of Mana) : chaque planche prend cette palette.
+fn share_first_palette(bytes: &[u8], members: &[(usize, usize)], kinds: &mut [Kind]) {
+    const PALETTE: usize = 512;
+    let unpacked = |&(start, end): &(usize, usize)| decompress_any(&bytes[start..end]).map_or(end - start, |inner| inner.len());
+    let Some(first) = members.first() else { return };
+    let tiles = |i: usize| matches!(kinds[i], Kind::Other | Kind::PaletteTiles | Kind::HomSheet) && unpacked(&members[i]) % 32 == 0;
+    if unpacked(first) != PALETTE || members.len() < 2 || !(1..members.len()).all(tiles) {
+        return;
+    }
+    kinds[0] = Kind::RawPalette;
+    for kind in &mut kinds[1..] {
+        *kind = Kind::SiblingPaletteTiles;
+    }
+}
+
+/// Un `.bin` qui dit ce qu'il est par son nom (`JungleTiles.bin`, `LevelPalette.bin`) ou par son dossier (`file/bg/` d'Eyeshield 21).
+fn guess_file_format(kind: Kind, path: &str, data: &[u8]) -> Kind {
+    if kind != Kind::Other || !path.to_lowercase().ends_with(".bin") {
+        return kind;
+    }
+    let (lower, stem) = (path.to_lowercase(), stem_of(path));
+    let size = decompress_any(data).map_or(data.len(), |inner| inner.len());
+    if size == 0 {
+        kind
+    } else if stem.ends_with("palette") && size % 2 == 0 {
+        Kind::RawPalette
+    } else if (stem.ends_with("tiles") || lower.contains("/bg/")) && size % 32 == 0 {
+        Kind::RawTiles
+    } else {
+        kind
+    }
+}
+
+/// Les morceaux d'un fichier qui commence par une table de positions : la première donne la taille de la table, elles
+/// vont en croissant, la fin du dernier morceau est celle du fichier. Vide si ce n'est pas une telle table.
+fn table_members(bytes: &[u8]) -> Vec<(usize, usize)> {
+    const MAX_TABLE: usize = 256 * 1024;
+    let u32_at = |at: usize| bytes.get(at..at + 4).map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]) as usize);
+    let Some(first) = u32_at(0) else { return Vec::new() };
+    if first % 4 != 0 || first < 8 || first > bytes.len() || first > MAX_TABLE {
+        return Vec::new();
+    }
+    let offsets: Vec<usize> = (0..first / 4).filter_map(|i| u32_at(i * 4)).collect();
+    if offsets.windows(2).any(|w| w[1] < w[0]) || offsets.last().is_none_or(|last| *last > bytes.len()) {
+        return Vec::new();
+    }
+    offsets.iter().enumerate().map(|(i, start)| (*start, offsets.get(i + 1).copied().unwrap_or(bytes.len()))).collect()
+}
+
+/// Les fichiers bruts n'ont pas de signature : on se fie à leur extension.
+fn by_extension(kind: Kind, name: &str) -> Kind {
+    if kind != Kind::Other {
+        return kind;
+    }
+    match name.rsplit_once('.').map(|(_, ext)| ext.to_lowercase()).as_deref() {
+        Some("nbfc" | "char" | "ncg" | "chr") => Kind::RawTiles,
+        Some("nbfp" | "ntfp" | "plt" | "ncl" | "pal" | "plb") => Kind::RawPalette,
+        Some("ntft") => Kind::RawTexture,
+        Some("bstga") => Kind::BsTexture,
+        Some("bmp") => Kind::Bitmap,
+        Some("zip") => Kind::ZipFile,
+        Some("z") => Kind::ZImage,
+        Some("anm") => Kind::AnmFile,
+        Some("nbfs" | "nsc" | "scr") => Kind::RawScreen,
+        Some("adx") => Kind::Audio,
+        Some("txt" | "ini" | "itx" | "csv" | "xml" | "cfg") => Kind::PlainText,
+        Some("lz" | "cat") => Kind::Compressed,
+        Some("srl") => Kind::NestedRom,
+        _ => kind,
+    }
+}
+
+/// Le chemin de la texture et celui de sa palette, dans un `TXET` (deux chaînes précédées de leur taille).
+fn texture_ref(bytes: &[u8]) -> Option<(String, String)> {
+    two_paths(bytes, 4)
+}
+
+/// Deux chaînes précédées de leur taille, à partir de `at`.
+fn two_paths(bytes: &[u8], at: usize) -> Option<(String, String)> {
+    let read = |at: usize| -> Option<(String, usize)> {
+        let size = u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?) as usize;
+        let text = bytes.get(at + 4..at + 4 + size)?;
+        Some((String::from_utf8_lossy(text).trim_end_matches('\0').to_string(), at + 4 + size))
+    };
+    let (first, next) = read(at)?;
+    let (second, _) = read(next)?;
+    Some((first, second))
+}
+
+/// Les morceaux d'un `MESH` : géométrie, texture, et palette chez ceux qui la nomment ici. Le nombre de morceaux et ce qui
+/// suit chaque morceau changent selon le jeu : on repère donc chaque chemin de géométrie (précédé de sa taille).
+fn mesh_parts(bytes: &[u8]) -> Vec<(String, String, Option<String>)> {
+    const GEOMETRY: &[u8] = b"3d/geometry/";
+    let string_at = |at: usize| -> Option<String> {
+        let size = u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?) as usize;
+        Some(String::from_utf8_lossy(bytes.get(at + 4..at + 4 + size)?).trim_end_matches('\0').to_string())
+    };
+    let mut parts = Vec::new();
+    let mut search = 4;
+    while let Some(found) = bytes.get(search..).and_then(|rest| rest.windows(GEOMETRY.len()).position(|w| w == GEOMETRY)) {
+        let path_at = search + found;
+        search = path_at + GEOMETRY.len();
+        let Some(geometry) = path_at.checked_sub(4).and_then(string_at) else { continue };
+        if !geometry.starts_with("3d/geometry/") {
+            continue;
+        }
+        // La taille écrite compte aussi les zéros de fin, que `geometry` n'a plus
+        let Some(texture_at) = bytes.get(path_at - 4..path_at).map(|s| path_at + u32::from_le_bytes([s[0], s[1], s[2], s[3]]) as usize) else { continue };
+        let Some(texture) = string_at(texture_at) else { continue };
+        let palette = string_at(texture_at + 4 + texture.len()).filter(|p| p.starts_with("3d/palette/"));
+        parts.push((geometry, texture, palette));
+    }
+    parts
+}
+
+/// Le fichier de géométrie de chaque morceau du modèle d'un `MESH`, dans l'ordre où `decode` les réunit.
+pub fn mesh_geometries(entries: &[Entry], sel: usize) -> Vec<usize> {
+    let Ok(bytes) = read_entry(&entries[sel]) else { return Vec::new() };
+    let found = mesh_parts(&bytes).into_iter().filter_map(|(geometry, _, _)| entry_at(entries, &geometry));
+    found.filter(|&at| read_entry(&entries[at]).is_ok_and(|file| gx_mesh::read_geometry(&file, None, "").is_ok())).collect()
+}
+
+/// La texture d'un `MESH` : le fichier nommé est un `TXET` qui relie pixels et palette, ou les pixels eux-mêmes.
+fn engine_texture(entries: &[Entry], index: usize, named_palette: Option<&str>) -> Option<Rgba> {
+    let bytes = read_entry(&entries[index]).ok()?;
+    let (texel_bytes, mut palettes) = match entries[index].kind {
+        Kind::TextureRef => {
+            let (texel, _) = texture_ref(&bytes)?;
+            (read_entry(&entries[entry_at(entries, &texel)?]).ok()?, texture_palettes(entries, Some(index), index))
+        }
+        _ => (bytes, texture_palettes(entries, None, index)),
+    };
+    if let Some(named) = named_palette.and_then(|p| entry_at(entries, p)) {
+        palettes.insert(0, named);
+    }
+    let texel = g2d::read_texel(&texel_bytes).ok()?;
+    let palette = g2d::read_palette(&read_entry(&entries[*palettes.first()?]).ok()?).ok()?;
+    let mut image = g2d::render_texel(&texel, &palette).ok()?;
+    // Une texture entièrement transparente est une couleur unie : sa couleur 0 compte vraiment
+    if image.data.chunks_exact(4).all(|p| p[3] == 0) {
+        let first = palette.colors.first().copied().unwrap_or([255; 4]);
+        for pixel in image.data.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&first);
+        }
+    }
+    Some(image)
+}
+
+/// Ce qu'on sait d'une animation `.anm` : la table des animations de SimAnimals (nombre, 0, positions), sinon l'en-tête.
+fn anm_lines(bytes: &[u8]) -> Vec<String> {
+    let u32_at = |at: usize| bytes.get(at..at + 4).map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]) as usize);
+    // La première position dit où finit la table
+    let first = u32_at(8).unwrap_or(0);
+    let count = if first > 8 && (first - 8) % 4 == 0 { (first - 8) / 4 } else { 0 };
+    let offsets: Vec<usize> = (0..count.min(4096)).filter_map(|i| u32_at(8 + i * 4)).collect();
+    let is_table = u32_at(4) == Some(0) && count > 0 && offsets.len() == count && offsets.windows(2).all(|w| w[0] < w[1]) && offsets.last().is_some_and(|last| *last <= bytes.len());
+    let mut lines = if is_table {
+        let mut list = vec![t!("{count} animations", "{count} animations")];
+        for (i, at) in offsets.iter().enumerate() {
+            let end = offsets.get(i + 1).copied().unwrap_or(bytes.len());
+            let first_frame = u32_at(*at).unwrap_or(end);
+            list.push(t!("{i:4}  {} frames", "{i:4}  {} images", first_frame.saturating_sub(*at).min(end - at) / 4));
+        }
+        list
+    } else {
+        vec![t!("Header: size {}, then {} and {}", "En-tete : taille {}, puis {} et {}", u32_at(0).unwrap_or(0), u32_at(4).unwrap_or(0), u32_at(8).unwrap_or(0))]
+    };
+    lines.push(String::new());
+    lines.extend(text_lines(bytes));
+    lines
+}
+
+/// L'archive de son d'où vient un fichier, et sa position dedans.
+fn owner_sound_archive(entry: &Entry) -> Option<(Vec<u8>, usize)> {
+    let (start, _) = entry.member?;
+    let bytes = unpack(read_span(&entry.rom, entry.span).ok()?);
+    bytes.starts_with(b"SDAT").then_some((bytes, start))
+}
+
+/// Une musique sans les banques de son de son archive : ses commandes en octets.
+fn no_bank_text(bytes: &[u8]) -> Decoded {
+    Decoded::Text { lines: text_lines(bytes), info: t!("Not played: its sound bank was not found", "Pas jouee : sa banque de sons est introuvable") }
+}
+
+/// Une musique `SSEQ`, jouée avec la banque que lui donne son archive de son.
+fn sequence_preview(entries: &[Entry], sel: usize, bytes: &[u8]) -> Result<Decoded, String> {
+    let Some((archive, start)) = owner_sound_archive(&entries[sel]) else { return Ok(no_bank_text(bytes)) };
+    let Some((bank, volume)) = sdat::sequence_settings(&archive, start) else { return Ok(no_bank_text(bytes)) };
+    let Some((bank_file, waves)) = sdat::bank_files(&archive, bank) else { return Ok(no_bank_text(bytes)) };
+    let instruments = sseq::read_bank(bank_file).map_err(|e| e.to_string())?;
+    let data = sseq::sequence_data(bytes).map_err(|e| e.to_string())?;
+    Ok(audio(sseq::render(data, 0, &instruments, &waves, volume), String::new()))
+}
+
+/// Un bruitage d'une archive `SSAR`, choisi avec `c.anim`.
+fn sequence_archive_preview(entries: &[Entry], sel: usize, bytes: &[u8], c: &mut Choices) -> Result<Decoded, String> {
+    let (data, items) = sseq::read_archive(bytes).map_err(|e| e.to_string())?;
+    c.anims = items.len();
+    c.anim = c.anim.min(c.anims.saturating_sub(1));
+    let Some(item) = items.get(c.anim) else { return Ok(Decoded::Text { lines: text_lines(bytes), info: tr("Empty archive", "Archive vide").to_string() }) };
+    let Some((archive, _)) = owner_sound_archive(&entries[sel]) else { return Ok(no_bank_text(bytes)) };
+    let Some((bank_file, waves)) = sdat::bank_files(&archive, item.bank as usize) else { return Ok(no_bank_text(bytes)) };
+    let instruments = sseq::read_bank(bank_file).map_err(|e| e.to_string())?;
+    let extra = t!("sound {} of {}, ", "son {} sur {}, ", c.anim + 1, c.anims);
+    Ok(audio(sseq::render(data, item.start, &instruments, &waves, item.volume), extra))
+}
+
+/// Une banque d'instruments : une note de l'instrument choisi, ou leur liste si ses sons ne sont pas dans la rom.
+fn instruments_preview(entries: &[Entry], sel: usize, bytes: &[u8], c: &mut Choices) -> Result<Decoded, String> {
+    let instruments = sseq::read_bank(bytes).map_err(|e| e.to_string())?;
+    let list = || instruments.iter().enumerate().map(|(i, instrument)| format!("{i:4}  {}", instrument.describe())).collect::<Vec<_>>();
+    let waves = owner_sound_archive(&entries[sel]).and_then(|(archive, start)| {
+        let bank = sdat::bank_at(&archive, start)?;
+        let (_, waves) = sdat::bank_files(&archive, bank)?;
+        Some(waves.map(|wave| wave.map(<[u8]>::to_vec)))
+    });
+    let Some(waves) = waves else { return Ok(Decoded::Text { lines: list(), info: t!("{} instruments, their sounds are not in this file", "{} instruments, leurs sons ne sont pas dans ce fichier", instruments.len()) }) };
+    let waves: [Option<&[u8]>; 4] = std::array::from_fn(|i| waves[i].as_deref());
+    c.anims = instruments.len();
+    c.anim = c.anim.min(c.anims.saturating_sub(1));
+    match sseq::render_instrument(&instruments, c.anim, &waves).filter(|sound| !sound.samples.is_empty()) {
+        Some(sound) => Ok(audio(sound, t!("instrument {} of {}, ", "instrument {} sur {}, ", c.anim + 1, c.anims))),
+        None => Ok(Decoded::Text { lines: list(), info: t!("Instrument {} is empty", "L'instrument {} est vide", c.anim + 1) }),
+    }
+}
+
+/// Une vidéo se joue ; sans image (Viva Pinata range sa musique en Bink 4x4), c'est un son.
+fn video_preview(bytes: Vec<u8>) -> Decoded {
+    let bytes: Arc<[u8]> = bytes.into();
+    let mut video = match Video::open(bytes.clone()) {
+        Ok(video) => video,
+        Err(e) => return Decoded::Text { lines: video_lines(&bytes), info: t!("Video not readable: {e}", "Video illisible : {e}") },
+    };
+    let v = video.info().clone();
+    let sound = if v.channels > 0 { t!("{} Hz, {} channels", "{} Hz, {} voies", v.sample_rate, v.channels) } else { tr("no sound", "sans son").to_string() };
+    if v.width >= 16 || v.channels == 0 {
+        let info = t!("{} {}x{}, {} frames, {:.1} per second, {:.1} s, {sound}", "{} {}x{}, {} images, {:.1} par seconde, {:.1} s, {sound}", v.format, v.width, v.height, v.frames, v.fps, v.seconds());
+        return Decoded::Video { bytes, info };
+    }
+    let mut pcm = Vec::new();
+    while video.advance(&mut pcm) {}
+    let samples = pcm.iter().map(|s| (s.clamp(-1.0, 1.0) * 32767.0) as i16).collect();
+    audio(sadl::Sound { rate: v.sample_rate, channels: v.channels, samples }, format!("{}, ", v.format))
+}
+
+/// Quelques images du début : une vidéo entière serait trop longue à parcourir pour une vignette.
+fn video_thumbnail(bytes: Arc<[u8]>) -> Option<Vec<(Rgba, u16)>> {
+    let mut video = Video::open(bytes).ok()?;
+    let v = video.info().clone();
+    let step = (v.fps / 2.0).round().max(1.0) as usize;
+    let duration = (step as f32 / v.fps.max(0.01) * 60.0) as u16;
+    let (mut pcm, mut rgba, mut frames) = (Vec::new(), Vec::new(), Vec::new());
+    for frame in 0..step * THUMB_FRAMES {
+        if !video.advance(&mut pcm) {
+            break;
+        }
+        pcm.clear();
+        if frame % step == 0 {
+            video.rgba(&mut rgba);
+            frames.push((fit_thumb(&Rgba { width: v.width, height: v.height, data: rgba.clone() }), duration.max(1)));
+        }
+    }
+    Some(frames)
+}
+
+/// Les caractéristiques d'une vidéo, d'après son en-tête.
+fn video_lines(bytes: &[u8]) -> Vec<String> {
+    let u32_at = |at: usize| bytes.get(at..at + 4).map_or(0, |s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]));
+    let (format, frames, width, height, fps) = match bytes.get(0..3) {
+        Some(b"BIK") => ("Bink", u32_at(8), u32_at(0x14), u32_at(0x18), u32_at(0x1C) as f32 / u32_at(0x20).max(1) as f32),
+        Some(b"VXD") => ("VX", u32_at(4), u32_at(8), u32_at(0xC), u32_at(0x10) as f32 / 65536.0),
+        _ => ("Mobiclip", u32_at(8), u32_at(0xC), u32_at(0x10), u32_at(0x14) as f32 / 16777216.0),
+    };
+    vec![
+        t!("Video {format}: {width}x{height}, {frames} frames, {fps:.1} per second", "Video {format} : {width}x{height}, {frames} images, {fps:.1} par seconde"),
+        t!("{:.1} seconds.", "{:.1} secondes.", frames as f32 / fps.max(0.01)),
+    ]
+}
+
+/// Les fichiers d'une archive zip, d'après son répertoire de fin de fichier.
+fn zip_lines(bytes: &[u8]) -> Vec<String> {
+    let u16_at = |at: usize| bytes.get(at..at + 2).map(|s| u16::from_le_bytes([s[0], s[1]]) as usize);
+    let u32_at = |at: usize| bytes.get(at..at + 4).map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]) as usize);
+    let Some(end) = bytes.windows(4).rposition(|w| w == b"PK\x05\x06") else { return vec![tr("Not a readable zip.", "Zip illisible.").to_string()] };
+    let count = u16_at(end + 10).unwrap_or(0);
+    let mut at = u32_at(end + 16).unwrap_or(0);
+    let mut lines = vec![t!("{count} files", "{count} fichiers")];
+    for _ in 0..count {
+        let (Some(size), Some(names), Some(extra), Some(comment)) = (u32_at(at + 24), u16_at(at + 28), u16_at(at + 30), u16_at(at + 32)) else { break };
+        let Some(name) = bytes.get(at + 46..at + 46 + names) else { break };
+        lines.push(format!("{}  {}", String::from_utf8_lossy(name), size_text(size)));
+        at += 46 + names + extra + comment;
+    }
+    lines
+}
+
+/// Les fichiers d'une `NITRO Archive 1` : leur nombre à 0x10, puis à 0x20 pour chacun la position de son nom, son
+/// début et sa taille.
+fn nitro_archive_members(bytes: &[u8]) -> Vec<(String, usize, usize)> {
+    let u32_at = |at: usize| bytes.get(at..at + 4).map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]) as usize);
+    let count = u32_at(0x10).unwrap_or(0).min(65536);
+    (0..count)
+        .map_while(|i| {
+            let (name_at, start, size) = (u32_at(0x20 + i * 12)?, u32_at(0x24 + i * 12)?, u32_at(0x28 + i * 12)?);
+            let name = bytes.get(name_at..)?.split(|b| *b == 0).next()?;
+            (start + size <= bytes.len()).then(|| (String::from_utf8_lossy(name).into_owned(), start, start + size))
+        })
+        .collect()
+}
+
+/// Un `NITRO RelocMod 1` : à 0x10 la position et la taille des données, à 0x20 la position et le nombre des pointeurs
+/// à reloger (positions dans les données), à 0x30 `lz77` si les données sont compressées. Montré en mots de 32 bits,
+/// les pointeurs marqués d'une `*`.
+fn reloc_module_lines(bytes: &[u8]) -> Result<(Vec<String>, String), String> {
+    const WORDS_PER_LINE: usize = 4;
+    let u32_at = |b: &[u8], at: usize| b.get(at..at + 4).map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]) as usize);
+    let unreadable = || tr("unreadable module", "module illisible").to_string();
+    let (data_at, size, relocs_at, relocs) = (u32_at(bytes, 0x10).ok_or_else(unreadable)?, u32_at(bytes, 0x14).ok_or_else(unreadable)?, u32_at(bytes, 0x20).ok_or_else(unreadable)?, u32_at(bytes, 0x24).ok_or_else(unreadable)?);
+    let body = bytes.get(data_at..).ok_or_else(unreadable)?;
+    let packed = bytes.get(0x30..0x34) == Some(b"lz77");
+    let data = if packed { decompress_any(body).ok_or_else(unreadable)? } else { body[..size.min(body.len())].to_vec() };
+    let pointers: std::collections::HashSet<usize> = (0..relocs.min(65536)).filter_map(|i| u32_at(bytes, relocs_at + i * 4)).collect();
+    let lines = data
+        .chunks(WORDS_PER_LINE * 4)
+        .enumerate()
+        .map(|(row, chunk)| {
+            let words: Vec<String> = chunk.chunks(4).enumerate().map(|(i, w)| {
+                let at = row * WORDS_PER_LINE * 4 + i * 4;
+                let value = w.iter().rev().fold(0u32, |v, b| v << 8 | *b as u32);
+                format!("{value:08x}{}", if pointers.contains(&at) { "*" } else { " " })
+            }).collect();
+            format!("{:05x}  {}", row * WORDS_PER_LINE * 4, words.join(" "))
         })
         .collect();
-    entries.sort_by_key(|e| e.rom_index);
-    entries
+    let info = t!("Module: {} data bytes{}, {} pointers to relocate (*)", "Module : {} octets de donnees{}, {} pointeurs a reloger (*)", data.len(), if packed { " (lz77)" } else { "" }, pointers.len());
+    Ok((lines, info))
+}
+
+/// Le fichier du même dossier et du même nom, d'une autre extension (`rodEB12a.bin` et `rodEB12a.fwa`).
+fn sibling(entries: &[Entry], sel: usize, ext: &str) -> Option<usize> {
+    let me = &entries[sel];
+    entries.iter().position(|e| e.dir == me.dir && e.stem == me.stem && e.format() == ext)
+}
+
+/// Police en tuiles de 4 bits de Pokémon Dash. Avec un `.fwa` du même nom : des caractères de 16x16 (4 tuiles, celles du
+/// haut puis celles du bas) depuis l'espace, et pour chacun un octet de marge et un de largeur, soulignées en bleu. Sans :
+/// des caractères de 8x16 sur une planche de 16 tuiles de large.
+fn tile_font(entries: &[Entry], sel: usize) -> Result<Decoded, String> {
+    const PER_ROW: usize = 16;
+    const GLYPH_BYTES: usize = 128;
+    const TILE_BYTES: usize = 32;
+    let glyphs = read_entry(&entries[sibling(entries, sel, "bin").ok_or(tr("no .bin font found", "aucune police .bin trouvee"))?])?;
+    let grey = g2d::Palette { colors: (0..16).map(|i| [(i * 17) as u8, (i * 17) as u8, (i * 17) as u8, 255]).collect() };
+    let Some(widths) = sibling(entries, sel, "fwa").map(|i| read_entry(&entries[i])).transpose()? else {
+        let tiles = g2d::raw_tiles_bpp(&glyphs, false);
+        let info = t!("{} characters 8x16", "{} caracteres 8x16", tiles.count() / 2);
+        return Ok(Decoded::Image { rgba: g2d::render_tiles(&tiles, &grey, 0, PER_ROW as u32), info });
+    };
+    let count = (widths.len() / 2).min(glyphs.len() / GLYPH_BYTES);
+    let mut sheet = vec![0u8; count.div_ceil(PER_ROW) * 2 * PER_ROW * 2 * TILE_BYTES];
+    for g in 0..count {
+        for k in 0..4 {
+            let (tx, ty) = ((g % PER_ROW) * 2 + k % 2, (g / PER_ROW) * 2 + k / 2);
+            let at = (ty * PER_ROW * 2 + tx) * TILE_BYTES;
+            sheet[at..at + TILE_BYTES].copy_from_slice(&glyphs[g * GLYPH_BYTES + k * TILE_BYTES..][..TILE_BYTES]);
+        }
+    }
+    let mut rgba = g2d::render_tiles(&g2d::raw_tiles_bpp(&sheet, false), &grey, 0, (PER_ROW * 2) as u32);
+    for g in 0..count {
+        let (left, width) = (widths[g * 2] as usize, widths[g * 2 + 1] as usize);
+        let (x0, y) = ((g % PER_ROW) * 16, (g / PER_ROW) * 16 + 15);
+        for x in (x0 + left).min(x0 + 16)..(x0 + left + width).min(x0 + 16) {
+            let at = (y * rgba.width as usize + x) * 4;
+            rgba.data[at..at + 4].copy_from_slice(&[60, 110, 220, 255]);
+        }
+    }
+    Ok(Decoded::Image { rgba, info: t!("{count} characters 16x16 from the space, widths from the .fwa (blue)", "{count} caracteres 16x16 depuis l'espace, largeurs du .fwa (en bleu)") })
+}
+
+/// `agbpoke.img` de Pokémon Dash : des images compressées l'une après l'autre, leurs tailles en u16 dans le `.siz`, des
+/// tuiles de 4 bits rangées ligne par ligne, chacune avec ses 16 couleurs dans le `.pal`.
+fn lz_sprites(entries: &[Entry], sel: usize) -> Result<Decoded, String> {
+    const PER_ROW: u32 = 20;
+    const COLORS_BYTES: usize = 32;
+    let missing = || tr("no .img and .siz pair found", "pas de paire .img et .siz").to_string();
+    let images = read_entry(&entries[sibling(entries, sel, "img").ok_or_else(missing)?])?;
+    let sizes = read_entry(&entries[sibling(entries, sel, "siz").ok_or_else(missing)?])?;
+    let colors = sibling(entries, sel, "pal").map(|i| read_entry(&entries[i])).transpose()?.unwrap_or_default();
+    let mut sprites = Vec::new();
+    let mut at = 0;
+    for (n, size) in sizes.chunks_exact(2).map(|s| u16::from_le_bytes([s[0], s[1]]) as usize).enumerate() {
+        let Some(pixels) = images.get(at..at + size).and_then(decompress_any) else { break };
+        at += size;
+        let tiles = g2d::raw_tiles_bpp(&pixels, false);
+        let palette = colors.get(n * COLORS_BYTES..(n + 1) * COLORS_BYTES).map_or_else(|| grey_palette(&tiles), g2d::raw_palette);
+        sprites.push(g2d::render_tiles(&tiles, &palette, 0, (tiles.count() as f64).sqrt().max(1.0) as u32));
+    }
+    let side = sprites.first().map_or(0, |s| s.width);
+    let info = t!("{} images {side}x{side}", "{} images {side}x{side}", sprites.len());
+    Ok(Decoded::Image { rgba: sheet_wide(&sprites, PER_ROW * (side + 4)), info })
+}
+
+/// Le n° du fichier à ce chemin (le moteur écrit parfois le dossier avec des `\\`).
+fn entry_at(entries: &[Entry], path: &str) -> Option<usize> {
+    let wanted = path.replace('\\', "/").to_lowercase();
+    entries.iter().position(|e| e.path.to_lowercase() == wanted)
+}
+
+/// Les palettes d'une texture : celle que nomme son `TXET` d'abord, puis les plus proches par le nom.
+fn texture_palettes(entries: &[Entry], reference: Option<usize>, near: usize) -> Vec<usize> {
+    let named = reference.and_then(|r| read_entry(&entries[r]).ok()).and_then(|b| texture_ref(&b)).and_then(|(_, palette)| entry_at(entries, &palette));
+    let mut list: Vec<usize> = named.into_iter().collect();
+    list.extend(companions(entries, near, &[Kind::Palette]).into_iter().filter(|i| Some(*i) != named));
+    list
+}
+
+/// Les textes d'un fichier `GNAL` : nombre de textes, puis pour chacun deux nombres, sa taille, ses octets.
+fn lang_lines(bytes: &[u8]) -> Vec<String> {
+    let u32_at = |at: usize| bytes.get(at..at + 4).map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]) as usize);
+    let count = u32_at(4).unwrap_or(0);
+    let mut lines = Vec::new();
+    let mut at = 8;
+    for i in 0..count {
+        let Some(size) = u32_at(at + 8) else { break };
+        let Some(text) = bytes.get(at + 12..at + 12 + size) else { break };
+        lines.push(format!("{i:4}  {}", encoding_rs::WINDOWS_1252.decode(text).0));
+        at += 12 + size;
+    }
+    lines
+}
+
+/// Les textes d'un fichier de messages BMG : INF1 donne où commence chaque texte dans DAT1.
+fn bmg_lines(bytes: &[u8]) -> Vec<String> {
+    let u32_at = |at: usize| bytes.get(at..at + 4).map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]) as usize);
+    let u16_at = |at: usize| bytes.get(at..at + 2).map(|s| u16::from_le_bytes([s[0], s[1]]) as usize);
+    let encoding = bytes.get(0x10).copied().unwrap_or(2);
+    let (mut inf, mut dat) = (None, None);
+    let mut at = 0x20;
+    while let (Some(magic), Some(size)) = (bytes.get(at..at + 4), u32_at(at + 4)) {
+        match magic {
+            b"INF1" => inf = Some(at),
+            b"DAT1" => dat = Some(at + 8),
+            _ => {}
+        }
+        if size < 8 {
+            break;
+        }
+        at += size;
+    }
+    let (Some(inf), Some(dat)) = (inf, dat) else { return Vec::new() };
+    let (count, entry) = (u16_at(inf + 8).unwrap_or(0), u16_at(inf + 10).unwrap_or(4).max(4));
+    let mut lines = Vec::with_capacity(count);
+    for i in 0..count {
+        let Some(offset) = u32_at(inf + 16 + i * entry) else { break };
+        let Some(rest) = bytes.get(dat + offset..) else { continue };
+        let text = if encoding == 2 {
+            // UTF-16 ; 0x1A = une commande du jeu, l'octet suivant donne sa taille
+            let (mut units, mut p) = (Vec::new(), 0);
+            while let Some(c) = rest.get(p..p + 2).map(|s| u16::from_le_bytes([s[0], s[1]])) {
+                if c == 0 {
+                    break;
+                }
+                if c == 0x1A {
+                    units.extend("[*]".encode_utf16());
+                    p += (rest.get(p + 2).copied().unwrap_or(4) as usize).max(4);
+                    continue;
+                }
+                units.push(c);
+                p += 2;
+            }
+            String::from_utf16_lossy(&units)
+        } else {
+            let end = rest.iter().position(|b| *b == 0).unwrap_or(rest.len());
+            let codec = if encoding == 3 { encoding_rs::SHIFT_JIS } else if encoding == 4 { encoding_rs::UTF_8 } else { encoding_rs::WINDOWS_1252 };
+            codec.decode(&rest[..end]).0.into_owned()
+        };
+        lines.push(format!("{i:4}  {}", text.replace('\n', " / ")));
+    }
+    lines
+}
+
+/// Ce que montre un fichier de données : sa table de morceaux, ses blocs nommés (`GMD1`, `XFRM`...) ou ses valeurs
+/// (u32 en hexadécimal et en virgule fixe 20.12 de la DS), puis ses textes et ses octets. Et le nom de cette forme.
+fn game_data_lines(bytes: &[u8]) -> (Vec<String>, String) {
+    const MOST_LINES: usize = 256;
+    let u32_at = |at: usize| bytes.get(at..at + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    let mut lines = Vec::new();
+    let what;
+    let members = table_members(bytes);
+    let tag = |at: usize| bytes.get(at..at + 4).filter(|t| t.iter().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == 0) && t[0].is_ascii_uppercase()).map(|t| String::from_utf8_lossy(t).trim_end_matches('\0').to_string());
+    if members.len() >= 2 {
+        what = t!("table of {} parts", "table de {} morceaux", members.len());
+        lines.extend(members.iter().take(MOST_LINES).enumerate().map(|(n, (start, end))| t!("{n:5}  at {start:#x}  {}", "{n:5}  a {start:#x}  {}", size_text(end - start))));
+    } else if let Some(name) = tag(0) {
+        what = name.clone();
+        lines.push(t!("{name} file", "fichier {name}"));
+        // Blocs : 4 lettres puis la taille
+        let mut at = 8;
+        while let (Some(block), Some(size)) = (tag(at), u32_at(at + 4)) {
+            lines.push(t!("block {block} at {at:#x}, {}", "bloc {block} a {at:#x}, {}", size_text(size as usize)));
+            at += 8 + size as usize;
+            if size == 0 || lines.len() > MOST_LINES {
+                break;
+            }
+        }
+    } else {
+        what = format!("{:02x}{:02x}", bytes.first().copied().unwrap_or(0), bytes.get(1).copied().unwrap_or(0));
+    }
+    lines.push(String::new());
+    lines.push(tr("offset   u32 (hex)  fixed 20.12", "position u32 (hexa)  virgule fixe 20.12").into());
+    for at in (0..bytes.len().min(MOST_LINES * 4)).step_by(4) {
+        let Some(v) = u32_at(at) else { break };
+        lines.push(format!("{at:#07x}  {v:08x}  {:>12.4}", v as i32 as f64 / 4096.0));
+    }
+    lines.push(String::new());
+    lines.extend(text_lines(bytes));
+    (lines, what)
+}
+
+/// Les fichiers Nitro collés dans un fichier maison (`.dat`, souvent) : leur en-tête donne leur taille.
+fn embedded_files(bytes: &[u8]) -> Vec<(usize, usize, &'static str)> {
+    const SIGNATURES: [(&[u8; 4], &str); 12] = [
+        (b"RLCN", "nclr"),
+        (b"RPCN", "nclr"),
+        (b"RGCN", "ncgr"),
+        (b"RCBN", "ncbr"),
+        (b"RCSN", "nscr"),
+        (b"RECN", "ncer"),
+        (b"RNAN", "nanr"),
+        (b"BMD0", "nsbmd"),
+        (b"BTX0", "nsbtx"),
+        (b"BCA0", "nsbca"),
+        (b"JNCD", "bncd"),
+        (b"JNCL", "bncl"),
+    ];
+    let mut found = Vec::new();
+    let mut at = 0;
+    while at + 16 <= bytes.len() {
+        let size = u32::from_le_bytes([bytes[at + 8], bytes[at + 9], bytes[at + 10], bytes[at + 11]]) as usize;
+        let known = SIGNATURES.iter().find(|(magic, _)| &bytes[at..at + 4] == magic.as_slice());
+        match known {
+            // En-tête complet : 0xFEFF, taille, taille de l'en-tête (16), nombre de blocs. Sans ça, ce sont
+            // les premiers octets d'un fichier compressé (Livly Garden).
+            Some((_, ext)) if bytes[at + 4..at + 6] == [0xFF, 0xFE] && bytes[at + 12..at + 14] == [16, 0] && matches!(bytes[at + 14..at + 16], [1..=8, 0]) && size >= 16 && at + size <= bytes.len() => {
+                found.push((at, at + size, *ext));
+                at += size.next_multiple_of(4);
+            }
+            _ => at += 4,
+        }
+    }
+    found
+}
+
+/// Les fichiers de l'archive numérotée rom.bin : `rom.bin#n`, nommés `<n sur 5 chiffres>.<ext>`.
+fn scan_rom_bin(rom_path: &Path, data: &[u8], base: usize) -> Vec<Entry> {
+    let files: Vec<(usize, usize, Vec<u8>)> = romarc::entries(data).into_iter().map(|(at, size)| (at, size, unpack(romarc::unpack(&data[at..at + size])))).collect();
+    let mut kinds: Vec<(Kind, &str)> = files
+        .iter()
+        .map(|(_, _, bytes)| {
+            let kind = sniff(bytes);
+            if kind == Kind::Other && g2d::read_rom_image(bytes).is_some() { (Kind::RomImage, "img") } else { (kind, romarc::extension(bytes)) }
+        })
+        .collect();
+    rom_bin_house_formats(&files.iter().map(|f| f.2.as_slice()).collect::<Vec<_>>(), &mut kinds);
+    files
+        .iter()
+        .zip(kinds)
+        .enumerate()
+        .map(|(n, ((at, size, bytes), (kind, ext)))| {
+            let name = format!("{n:05}.{ext}");
+            Entry { path: format!("rom.bin#{n}"), member_name: Some(name), rom: rom_path.to_path_buf(), span: (base + at, base + at + size), member: None, kind, size: bytes.len(), dir: "rom.bin".into(), stem: n.to_string(), rom_index: Some(n as u32) }
+        })
+        .collect()
+}
+
+/// Les fichiers sans signature de rom.bin, reconnus avec leurs voisins. Les Sims 2 : un sprite a ses tuiles juste avant
+/// et sa palette juste après ; une image 8 bpp sans palette a la sienne juste avant. Puis les formats de The Simpsons
+/// Game (voix, planches de niveau, sprites) ; le reste des palettes se reconnaît à ses couleurs (bit 15 à 0).
+fn rom_bin_house_formats(files: &[&[u8]], kinds: &mut [(Kind, &str)]) {
+    let other = |kinds: &[(Kind, &str)], n: usize| kinds.get(n).is_some_and(|k| k.0 == Kind::Other);
+    let palette_like = |b: &[u8]| !b.is_empty() && b.len() <= 512 && b.len() % 32 == 0;
+    for n in 1..files.len().saturating_sub(1) {
+        if !other(kinds, n) || !other(kinds, n - 1) || !other(kinds, n + 1) || !palette_like(files[n + 1]) {
+            continue;
+        }
+        let Some(sprite) = g2d::read_rom_sprite(files[n]) else { continue };
+        if g2d::rom_sprite_tiles(&sprite, 0, files[n - 1]).is_some() {
+            kinds[n - 1] = (Kind::RawTiles, "chr");
+            kinds[n] = (Kind::RomSprite, "spr");
+            kinds[n + 1] = (Kind::RawPalette, "pal");
+        }
+    }
+    for n in 0..files.len() {
+        if !other(kinds, n) {
+            continue;
+        }
+        match g2d::rom_bitmap_shape(files[n]) {
+            Some((_, _, true)) => kinds[n] = (Kind::RomBitmap, "bm8"),
+            Some((_, _, false)) if n > 0 && files[n - 1].len() == 512 && matches!(kinds[n - 1].0, Kind::Other | Kind::RawPalette) => {
+                kinds[n] = (Kind::RomBitmap, "bm8");
+                kinds[n - 1] = (Kind::RawPalette, "pal");
+            }
+            _ => {}
+        }
+    }
+    for (n, bytes) in files.iter().enumerate() {
+        if let Some(kind) = rom_bin_single(bytes).filter(|_| other(kinds, n)) {
+            kinds[n] = kind;
+        }
+    }
+    for (n, bytes) in files.iter().enumerate() {
+        if other(kinds, n) && palette_like(bytes) && bytes.chunks_exact(2).all(|c| c[1] & 0x80 == 0) {
+            kinds[n] = (Kind::RawPalette, "pal");
+        }
+    }
+    // Les sprites de The Simpsons Game : le descripteur n'en est un que si ses tuiles sont à côté
+    for n in 0..files.len() {
+        if !other(kinds, n) {
+            continue;
+        }
+        let Some(sprite) = amaze::read_sprite(files[n]) else { continue };
+        if let Some(tiles) = SPRITE_TILES_AT.iter().filter_map(|d| n.checked_add_signed(*d)).find(|&t| other(kinds, t) && amaze::tiles_match(&sprite, files[t])) {
+            kinds[n] = (Kind::ChainSprite, "spr");
+            kinds[tiles] = (Kind::ChainSpriteTiles, "spt");
+        }
+    }
+    // Le reste : objets, niveaux (BSP), modèles maison (GMD1), tables
+    for kind in kinds.iter_mut().filter(|k| k.0 == Kind::Other) {
+        kind.0 = Kind::GameData;
+    }
+}
+
+/// Où chercher les tuiles d'un sprite, par rapport à son descripteur.
+const SPRITE_TILES_AT: [isize; 6] = [-1, -2, 1, 2, -3, 3];
+
+/// Les formats de The Simpsons Game qui se reconnaissent seuls : voix AHX, planche de tuiles d'un niveau.
+fn rom_bin_single(bytes: &[u8]) -> Option<(Kind, &'static str)> {
+    if ahx::is_ahx(bytes) {
+        Some((Kind::Audio, "ahx"))
+    } else if amaze::read_level_tiles(bytes).is_some() {
+        Some((Kind::RomLevelTiles, "chr"))
+    } else {
+        None
+    }
+}
+
+/// Une mini-rom sous un autre nom que `.srl` (`child.bin` des Simpsons) : un code de jeu lisible, le code ARM9 et le NitroFS
+/// dans le fichier.
+fn looks_like_rom(data: &[u8]) -> bool {
+    let field = |at: usize| data.get(at..at + 4).map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]) as usize);
+    let (Some(arm9), Some(names), Some(fat)) = (field(0x20), field(0x40), field(0x48)) else { return false };
+    // Le titre : des caractères lisibles, complétés par des zéros (pas `DSE\0` suivi d'octets, Dragon Ball Origins)
+    let title = data.get(..12).unwrap_or_default();
+    let readable = title.iter().all(|&b| b == 0 || (0x20..0x7F).contains(&b)) && title.first().is_some_and(|b| b.is_ascii_graphic());
+    data.len() > 0x4000 && readable && data[0x0C..0x10].iter().all(u8::is_ascii_alphanumeric) && (0x200..data.len()).contains(&arm9) && (0x200..data.len()).contains(&names) && (0x200..data.len()).contains(&fat) && nitrofs::read(data).is_ok()
+}
+
+fn read_span(rom: &Path, (start, end): (usize, usize)) -> Result<Vec<u8>, String> {
+    let mut file = std::fs::File::open(rom).map_err(|e| e.to_string())?;
+    file.seek(SeekFrom::Start(start as u64)).map_err(|e| e.to_string())?;
+    let mut bytes = vec![0u8; end - start];
+    file.read_exact(&mut bytes).map_err(|e| e.to_string())?;
+    Ok(bytes)
 }
 
 pub fn read_entry(entry: &Entry) -> Result<Vec<u8>, String> {
-    let bytes = unpack(std::fs::read(&entry.disk).map_err(|e| e.to_string())?);
+    let raw = read_span(&entry.rom, entry.span)?;
+    if entry.rom_index.is_some() {
+        return Ok(unpack(romarc::unpack(&raw)));
+    }
+    let bytes = unpack(raw);
     Ok(match entry.member {
-        Some((start, end)) => unpack(bytes.get(start..end).ok_or("archive changee depuis la lecture")?.to_vec()),
+        Some((start, end)) => unpack(bytes.get(start..end).ok_or(tr("archive changed since it was read", "archive changee depuis la lecture"))?.to_vec()),
         None => bytes,
     })
 }
@@ -198,16 +1075,86 @@ pub struct Choices {
     pub cells: usize,
     pub model: usize,
     pub models: usize,
+    /// Fichier lié : le modèle d'une animation 3D, les cellules d'une animation 2D ou d'une mise en page.
+    pub linked: Vec<usize>,
+    pub link: usize,
+    /// Séquence ou animation montrée, dans le fichier.
+    pub anim: usize,
+    pub anims: usize,
+    /// Ce que la table du jeu dit de ce fichier (`game_params.tsv`).
+    pub options: game_params::Options,
+}
+
+/// Les options que la table du jeu donne à ce fichier (code du jeu lu dans l'en-tête de la rom).
+fn game_options(entry: &Entry) -> game_params::Options {
+    let Ok(head) = read_span(&entry.rom, (0, 0x10)) else { return game_params::Options::default() };
+    game_params::for_game(&String::from_utf8_lossy(&head[0x0C..0x10])).options_for(&entry.dir, &entry.format())
 }
 
 /// Les fichiers d'une sorte qui vont le mieux avec `sel` : même dossier d'abord, puis le nom
 /// le plus proche ; tout le jeu s'il n'y en a aucun dans le dossier.
+/// Le numéro d'un morceau d'archive sans nom (`x.narc#12`).
+fn member_number(entry: &Entry) -> Option<usize> {
+    if !entry.stem.is_empty() {
+        return None;
+    }
+    entry.path.rsplit_once('#')?.1.parse().ok()
+}
+
+/// Les écrans qui assemblent une planche de tuiles : dans une archive sans noms, ceux qui la suivent et se servent de
+/// presque toute la planche (Pokémon Perle : `batt_bg.narc#15` n'a que faire de l'écran qui le suit) ; sinon ceux qui
+/// ont son nom ou qui la nomment.
+fn screens_for(entries: &[Entry], sel: usize) -> Vec<usize> {
+    const MAX_READ: usize = 40;
+    let me = &entries[sel];
+    if member_number(me).is_some() {
+        let Some(count) = read_entry(me).ok().and_then(|b| g2d::read_tiles(&b).ok()).map(|t| t.count()) else { return Vec::new() };
+        let uses_the_sheet = |e: &Entry| read_entry(e).ok().and_then(|b| g2d::read_screen(&b).ok()).is_some_and(|s| s.entries.iter().map(|e| (e & 0x3FF) as usize + 1).max().unwrap_or(0) * 2 >= count);
+        return entries.iter().enumerate().skip(sel + 1).take_while(|(_, e)| e.dir == me.dir && e.kind == Kind::Screen).filter(|(_, e)| uses_the_sheet(e)).map(|(i, _)| i).collect();
+    }
+    let file_name = me.path.rsplit('/').next().unwrap_or(&me.path).to_lowercase();
+    let names_me = |e: &Entry| read_entry(e).ok().and_then(|b| g2d::link_name(&b)).is_some_and(|name| name.eq_ignore_ascii_case(&file_name));
+    companions(entries, sel, &[Kind::Screen]).into_iter().filter(|&i| entries[i].dir == me.dir).take(MAX_READ).filter(|&i| entries[i].stem == me.stem || names_me(&entries[i])).collect()
+}
+
+/// Dans une archive sans noms, la palette de tuiles 8 bits : celle qui donne une couleur au plus de pixels différents, la
+/// plus proche à égalité. La plus proche tout court tombe souvent sur des couleurs vides (Pokémon Perle). Une archive
+/// trop grosse coûterait trop cher à relire pour chaque palette.
+fn best_palette(entries: &[Entry], sel: usize, palettes: &[usize]) -> usize {
+    const MAX_ARCHIVE: usize = 8 << 20;
+    const MAX_TRIED: usize = 128;
+    let me = &entries[sel];
+    if member_number(me).is_none() || me.span.1 - me.span.0 > MAX_ARCHIVE {
+        return 0;
+    }
+    let Some(tiles) = read_entry(me).ok().and_then(|b| g2d::read_tiles(&b).ok()).filter(|t| t.bpp8) else { return 0 };
+    let mut used = [false; 256];
+    tiles.pixels.iter().for_each(|p| used[*p as usize] = true);
+    let colored = |&i: &usize| {
+        let Some(palette) = read_entry(&entries[i]).ok().and_then(|b| g2d::read_palette(&b).ok()) else { return 0 };
+        palette.colors.iter().enumerate().filter(|(index, color)| used.get(*index) == Some(&true) && color[..3] != [0, 0, 0]).count()
+    };
+    let mut best = (0, 0);
+    for (n, count) in palettes.iter().take(MAX_TRIED).map(colored).enumerate() {
+        if count > best.1 {
+            best = (n, count);
+        }
+    }
+    best.0
+}
+
 fn companions(entries: &[Entry], sel: usize, kinds: &[Kind]) -> Vec<usize> {
     let me = &entries[sel];
     let closeness = |e: &Entry| {
         // rom.bin : les fichiers qui vont ensemble ont des numéros proches
         if let (Some(a), Some(b)) = (me.rom_index, e.rom_index) {
             return (false, std::cmp::Reverse(usize::MAX - a.abs_diff(b) as usize));
+        }
+        // Archive sans noms : le plus proche, d'abord parmi ceux qui suivent (Pokémon : les tuiles, puis leurs palettes)
+        if let (Some(a), Some(b)) = (member_number(me), member_number(e)) {
+            const BEFORE: usize = 1 << 24;
+            let gap = if b > a { b - a } else { a - b + BEFORE };
+            return (false, std::cmp::Reverse(usize::MAX - gap));
         }
         let common = me.stem.chars().zip(e.stem.chars()).take_while(|(a, b)| a == b).count();
         (e.stem != me.stem, std::cmp::Reverse(common))
@@ -244,16 +1191,84 @@ fn best_textures(entries: &[Entry], model: usize, candidates: &[usize]) -> usize
     best.1
 }
 
+/// Les modèles qui ont le squelette de l'animation (le même nombre d'os), les plus proches d'abord.
+fn models_for_animation(entries: &[Entry], sel: usize) -> Vec<usize> {
+    let Some(bones) = read_entry(&entries[sel]).ok().and_then(|b| model3d::read(&b).ok()).and_then(|c| c.animations.first().map(|a| a.objects_curves.len())) else { return Vec::new() };
+    // Écart entre le squelette du modèle et l'animation : un modèle peut avoir quelques os de plus
+    let gap = |i: usize| read_entry(&entries[i]).ok().and_then(|b| model3d::read(&b).ok()).and_then(|c| c.models.iter().filter(|m| m.objects.len() >= bones).map(|m| m.objects.len() - bones).min()).filter(|gap| *gap <= MAX_EXTRA_BONES);
+    let mut found: Vec<(usize, usize)> = companions(entries, sel, &[Kind::Model]).into_iter().take(150).filter_map(|i| gap(i).map(|g| (g, i))).collect();
+    found.sort_by_key(|(g, _)| *g);
+    found.into_iter().map(|(_, i)| i).take(20).collect()
+}
+
+const MAX_EXTRA_BONES: usize = 3;
+
 /// Les fichiers devinés pour montrer `sel`.
 pub fn choices_for(entries: &[Entry], sel: usize) -> Choices {
     let kind = entries[sel].kind;
     let mut c = Choices::default();
     match kind {
+        Kind::ChainSprite | Kind::ChainSpriteTiles => c.palettes = rom_palettes(entries, sel, 32),
+        Kind::RomLevelTiles => c.palettes = rom_palettes(entries, sel, 512),
         Kind::Tiles | Kind::Screen | Kind::Cells => {
             c.palettes = companions(entries, sel, &[Kind::Palette]);
-            if kind != Kind::Tiles {
-                c.tiles = companions(entries, sel, &[Kind::Tiles]);
+            if kind == Kind::Tiles {
+                c.linked = screens_for(entries, sel);
+                c.palette = best_palette(entries, sel, &c.palettes);
+            } else {
+                c.tiles = companions(entries, sel, &[Kind::Tiles, Kind::RawTiles]);
             }
+        }
+        Kind::CellAnim => {
+            c.linked = companions(entries, sel, &[Kind::Cells]);
+            c.palettes = companions(entries, sel, &[Kind::Palette]);
+            c.tiles = companions(entries, sel, &[Kind::Tiles]);
+        }
+        Kind::JCells | Kind::EngineBitmap => c.palettes = companions(entries, sel, &[Kind::Palette]),
+        Kind::Texel => {
+            // `x_texel` : la texture ; `x` : ce qui la relie à sa palette
+            let path = entries[sel].path.strip_suffix("_texel").map(str::to_string);
+            let reference = path.and_then(|p| entry_at(entries, &p));
+            c.palettes = texture_palettes(entries, reference, sel);
+        }
+        Kind::TextureRef => {
+            let target = read_entry(&entries[sel]).ok().and_then(|b| texture_ref(&b)).and_then(|(texel, _)| entry_at(entries, &texel));
+            c.linked = target.into_iter().collect();
+            c.palettes = texture_palettes(entries, Some(sel), sel);
+        }
+        Kind::RawTiles | Kind::RawTexture => {
+            c.options = game_options(&entries[sel]);
+            c.palettes = companions(entries, sel, &[Kind::RawPalette]);
+            // Une palette au nom sans rapport colore n'importe comment : mieux vaut du gris, et la choisir à la main
+            const NAME_MATCH: usize = 4;
+            let named = |&i: &usize| entries[i].stem.chars().zip(entries[sel].stem.chars()).take_while(|(a, b)| a == b).count() >= NAME_MATCH;
+            if kind == Kind::RawTiles && !c.palettes.iter().any(named) {
+                c.palette = c.palettes.len();
+            }
+            if kind == Kind::RawTiles {
+                nitro_palettes(entries, sel, &mut c);
+            }
+            c.width = c.options.width.unwrap_or(0);
+        }
+        Kind::RawScreen => {
+            c.options = game_options(&entries[sel]);
+            c.tiles = companions(entries, sel, &[Kind::RawTiles]);
+            c.palettes = companions(entries, sel, &[Kind::RawPalette]);
+            nitro_palettes(entries, sel, &mut c);
+        }
+        Kind::RomSprite => {
+            c.tiles = companions(entries, sel, &[Kind::RawTiles]);
+            c.palettes = companions(entries, sel, &[Kind::RawPalette]);
+        }
+        Kind::RomBitmap => c.palettes = companions(entries, sel, &[Kind::RawPalette]),
+        Kind::RomImage if read_entry(&entries[sel]).is_ok_and(|b| g2d::rom_image_needs_palette(&b)) => c.palettes = companions(entries, sel, &[Kind::RawPalette]),
+        Kind::JLayout => {
+            c.linked = companions(entries, sel, &[Kind::JCells]);
+            // La palette va avec les cellules (`training_obj`), pas avec la mise en page (`training`)
+            c.palettes = companions(entries, c.linked.first().copied().unwrap_or(sel), &[Kind::Palette]);
+        }
+        Kind::ModelAnim => {
+            c.linked = catch_unwind(AssertUnwindSafe(|| models_for_animation(entries, sel))).unwrap_or_default();
         }
         Kind::Model => {
             c.textures = companions(entries, sel, &[Kind::Textures]);
@@ -265,25 +1280,137 @@ pub fn choices_for(entries: &[Entry], sel: usize) -> Choices {
     c
 }
 
+/// Les palettes Nitro (`.ncl`) d'un fichier brut, après ses palettes brutes : celle que donne la table du jeu,
+/// ou celle de son dossier qui a exactement son nom, est prise d'office.
+fn nitro_palettes(entries: &[Entry], sel: usize, c: &mut Choices) {
+    let nitro = companions(entries, sel, &[Kind::Palette]);
+    let wanted = c.options.palette.as_deref().and_then(|path| entry_at(entries, path)).or_else(|| nitro.iter().copied().find(|&i| entries[i].stem == entries[sel].stem && entries[i].dir == entries[sel].dir));
+    if let Some(wanted) = wanted {
+        c.palettes.retain(|&i| i != wanted);
+        c.palettes.insert(0, wanted);
+        c.palette = 0;
+    } else if c.palette == c.palettes.len() {
+        c.palette += nitro.len();
+    }
+    c.palettes.extend(nitro.into_iter().filter(|&i| Some(i) != wanted));
+}
+
 pub enum Decoded {
     Image { rgba: Rgba, info: String },
     Model { model: model3d::ModelOut, own_textures: usize },
+    /// Une animation de cellules : chaque image et sa durée (1/60 s).
+    Frames { frames: Vec<(Rgba, u16)>, info: String },
+    /// Un modèle et l'animation jouée dessus.
+    Animated { model: model3d::ModelOut, animation: model3d::AnimOut },
+    Audio { wav: Vec<u8>, waveform: Rgba, info: String },
+    Text { lines: Vec<String>, info: String },
+    /// Une vidéo à jouer (`video::VideoPlayer`).
+    Video { bytes: Arc<[u8]>, info: String },
+}
+
+const TEXT_BYTES: usize = 16 * 1024;
+
+/// Les suites de caractères d'un fichier binaire (ASCII et Shift-JIS).
+fn strings_in(bytes: &[u8]) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut start = None;
+    let mut i = 0;
+    let mut close = |start: &mut Option<usize>, end: usize| {
+        if let Some(from) = start.take() {
+            let run: &[u8] = &bytes[from..end];
+            if run.len() >= 4 {
+                let (text, _, bad) = encoding_rs::SHIFT_JIS.decode(run);
+                // Du japonais a des kana (« 謎の男 ») ; des kanji seuls, c'est du binaire lu comme du texte
+                let kana = |c: char| matches!(c, '\u{3040}'..='\u{30FF}');
+                let readable = text.is_ascii() || text.chars().any(kana);
+                if !bad && readable && text.chars().any(|c| c.is_alphanumeric()) {
+                    found.push(text.into_owned());
+                }
+            }
+        }
+    };
+    while i < bytes.len() {
+        let b = bytes[i];
+        let width = match b {
+            0x20..=0x7E => 1,
+            0x81..=0x9F | 0xE0..=0xFC if matches!(bytes.get(i + 1), Some(0x40..=0x7E | 0x80..=0xFC)) => 2,
+            _ => 0,
+        };
+        if width == 0 {
+            close(&mut start, i);
+            i += 1;
+        } else {
+            start.get_or_insert(i);
+            i += width;
+        }
+    }
+    close(&mut start, bytes.len());
+    found
+}
+
+/// Le contenu d'un fichier qu'on ne sait pas décoder : ses textes, puis ses octets.
+pub fn text_lines(bytes: &[u8]) -> Vec<String> {
+    let strings = strings_in(bytes);
+    let in_text: usize = strings.iter().map(String::len).sum();
+    let mut text = vec![t!("Text found: {}", "Textes trouves : {}", strings.len())];
+    text.extend(strings.into_iter().take(2000));
+    let mut hex = vec![t!("Bytes: {} shown of {}", "Octets : {} montres sur {}", bytes.len().min(TEXT_BYTES), bytes.len())];
+    for (row, chunk) in bytes[..bytes.len().min(TEXT_BYTES)].chunks(16).enumerate() {
+        let values: Vec<String> = chunk.iter().map(|b| format!("{b:02x}")).collect();
+        let ascii: String = chunk.iter().map(|&b| if (0x20..0x7F).contains(&b) { b as char } else { '.' }).collect();
+        hex.push(format!("{:06x}  {:<47}  {ascii}", row * 16, values.join(" ")));
+    }
+    // Un fichier surtout fait de texte commence par ce texte ; sinon les quelques mots viennent après les octets
+    let (first, second) = if in_text * 5 >= bytes.len() { (text, hex) } else { (hex, text) };
+    first.into_iter().chain([String::new()]).chain(second).collect()
 }
 
 pub fn size_text(size: usize) -> String {
     if size >= 1 << 20 {
-        format!("{:.1} Mo", size as f64 / (1 << 20) as f64)
+        t!("{:.1} MB", "{:.1} Mo", size as f64 / (1 << 20) as f64)
     } else if size >= 1024 {
-        format!("{} Ko", size / 1024)
+        t!("{} KB", "{} Ko", size / 1024)
     } else {
-        format!("{size} o")
+        t!("{size} B", "{size} o")
+    }
+}
+
+/// Le nom du type de fichier dans la langue choisie (`Kind::label` reste la clé en français).
+pub fn kind_text(kind: Kind) -> &'static str {
+    match kind.label() {
+        "modele 3D" => tr("3D model", "modele 3D"),
+        "textures 3D" => tr("3D textures", "textures 3D"),
+        "tuiles" => tr("tiles", "tuiles"),
+        "ecran" => tr("screen", "ecran"),
+        "cellules" => tr("cells", "cellules"),
+        "animation 3D" => tr("3D animation", "animation 3D"),
+        "animation 2D" => tr("2D animation", "animation 2D"),
+        "cellules J" => tr("cells", "cellules"),
+        "mise en page" => tr("layout", "mise en page"),
+        "son" => tr("sound", "son"),
+        "banque de sons" => tr("sound bank", "banque de sons"),
+        "musique" => tr("music", "musique"),
+        "bruitages" => tr("sound effects", "bruitages"),
+        "archive de son" => tr("sound archive", "archive de son"),
+        "police" => tr("font", "police"),
+        "texte" => tr("text", "texte"),
+        "video" => "video",
+        "compresse" => tr("compressed", "compresse"),
+        "vide" => tr("empty", "vide"),
+        "donnees" => tr("game data", "donnees du jeu"),
+        other => other,
     }
 }
 
 /// Les images en grille, avec 4 pixels entre elles.
 fn sheet(images: &[Rgba]) -> Rgba {
+    sheet_wide(images, 512)
+}
+
+/// La même grille, d'au moins `width` pixels de large.
+fn sheet_wide(images: &[Rgba], width: u32) -> Rgba {
     const GAP: u32 = 4;
-    let max_w = images.iter().map(|i| i.width).max().unwrap_or(1).max(512);
+    let max_w = images.iter().map(|i| i.width).max().unwrap_or(1).max(width);
     let (mut x, mut y, mut line_h, mut places) = (0, 0, 0, Vec::new());
     for img in images {
         if x > 0 && x + img.width > max_w {
@@ -305,6 +1432,49 @@ fn sheet(images: &[Rgba]) -> Rgba {
     out
 }
 
+fn audio(sound: sadl::Sound, extra: String) -> Decoded {
+    let info = t!("{extra}{:.1} s, {} Hz, {} channels", "{extra}{:.1} s, {} Hz, {} voies", sound.seconds(), sound.rate, sound.channels);
+    Decoded::Audio { wav: sound.wav(), waveform: sound.waveform(), info }
+}
+
+/// Sans palette : niveaux de gris.
+/// Certains `.z` sont compressés plusieurs fois (Huffman puis LZ).
+pub const MAX_LAYERS: usize = 3;
+
+pub fn fully_unpacked(mut bytes: Vec<u8>) -> Vec<u8> {
+    for _ in 0..MAX_LAYERS {
+        match decompress_any(&bytes) {
+            Some(inner) => bytes = inner,
+            None => break,
+        }
+    }
+    bytes
+}
+
+/// Les matériaux d'un maillage de Tom and Jerry, un par morceau : `world/x.xof` les liste pour `world/mesh/x.z`.
+fn z_mesh_materials(entries: &[Entry], sel: usize) -> Vec<String> {
+    let path = entries[sel].path.replace("/mesh/", "/");
+    let Some(xof) = path.strip_suffix(".z").and_then(|p| entry_at(entries, &format!("{p}.xof"))) else { return Vec::new() };
+    let Ok(text) = read_entry(&entries[xof]) else { return Vec::new() };
+    String::from_utf8_lossy(&text).lines().filter(|line| line.starts_with("STRUCTOR")).filter_map(|line| line.split_whitespace().nth(2).map(str::to_string)).collect()
+}
+
+/// La texture d'un matériau : `01_bucket` est dessiné avec `world/tex/01_bucket.z`, `BR_glass_e` avec `world/tex/BR_glass.z`.
+fn z_texture(entries: &[Entry], material: &str) -> Option<Rgba> {
+    let short = material.rsplit_once('_').map_or(material, |(name, _)| name);
+    let at = entry_at(entries, &format!("world/tex/{material}.z")).or_else(|| entry_at(entries, &format!("world/tex/{short}.z")))?;
+    g2d::read_z_image(&fully_unpacked(read_entry(&entries[at]).ok()?))
+}
+
+fn grey_palette(tiles: &g2d::Tiles) -> g2d::Palette {
+    g2d::Palette { colors: (0..256).map(|i| if tiles.bpp8 { [i as u8, i as u8, i as u8, 255] } else { let v = (i % 16 * 17) as u8; [v, v, v, 255] }).collect() }
+}
+
+/// Le fichier une fois décompressé, s'il l'est.
+fn unpacked(bytes: &[u8]) -> Vec<u8> {
+    decompress_any(bytes).unwrap_or_else(|| bytes.to_vec())
+}
+
 fn decode_inner(entries: &[Entry], sel: usize, c: &mut Choices) -> Result<Decoded, String> {
     let bytes = read_entry(&entries[sel])?;
     let kind = entries[sel].kind;
@@ -312,21 +1482,26 @@ fn decode_inner(entries: &[Entry], sel: usize, c: &mut Choices) -> Result<Decode
     match kind {
         Kind::Palette => {
             let p = g2d::read_palette(&bytes).map_err(|e| e.to_string())?;
-            Ok(Decoded::Image { rgba: p.swatches(), info: format!("{} couleurs", p.colors.len()) })
+            Ok(Decoded::Image { rgba: p.swatches(), info: t!("{} colors", "{} couleurs", p.colors.len()) })
         }
         Kind::Tiles | Kind::Screen | Kind::Cells => {
             let tiles_bytes = if kind == Kind::Tiles { Some(bytes.clone()) } else { load(&c.tiles, c.tile)? };
-            let tiles = g2d::read_tiles(tiles_bytes.as_deref().ok_or("aucun fichier de tuiles (.ncgr) trouve")?).map_err(|e| e.to_string())?;
-            let palette = match load(&c.palettes, c.palette)? {
-                Some(p) => g2d::read_palette(&p).map_err(|e| e.to_string())?,
-                // Sans palette : niveaux de gris
-                None => g2d::Palette { colors: (0..256).map(|i| if tiles.bpp8 { [i as u8, i as u8, i as u8, 255] } else { let v = (i % 16 * 17) as u8; [v, v, v, 255] }).collect() },
-            };
-            c.banks = if tiles.bpp8 { 1 } else { palette.banks() };
+            let tiles_bytes = tiles_bytes.ok_or(tr("no tile file (.ncgr) found", "aucun fichier de tuiles (.ncgr) trouve"))?;
+            let own_palette = load(&c.palettes, c.palette)?.map(|p| g2d::read_palette(&p).map_err(|e| e.to_string())).transpose()?;
+            // Les tuiles d'un écran peuvent être brutes (`.chr` de Pokémon Dash)
+            let chosen_raw = c.tiles.get(c.tile).is_some_and(|&i| entries[i].kind == Kind::RawTiles);
+            let tiles = if kind != Kind::Tiles && chosen_raw { g2d::raw_tiles(&tiles_bytes, own_palette.as_ref()) } else { g2d::read_tiles(&tiles_bytes).map_err(|e| e.to_string())? };
+            let palette = own_palette.unwrap_or_else(|| grey_palette(&tiles));
+            c.banks = if tiles.bpp8 || !tiles.attrs.is_empty() { 1 } else { palette.banks() };
             c.bank = c.bank.min(c.banks.saturating_sub(1));
-            let what = format!("{} tuiles {} bpp{}", tiles.count(), if tiles.bpp8 { 8 } else { 4 }, if tiles.linear { " (bitmap)" } else { "" });
+            let what = t!("{} tiles {} bpp{}", "{} tuiles {} bpp{}", tiles.count(), if tiles.bpp8 { 8 } else { 4 }, if tiles.linear { " (bitmap)" } else { "" });
             match kind {
                 Kind::Tiles => {
+                    // Une planche est rangée sans égard pour l'image : son écran la remet dans l'ordre
+                    if let Some(screen) = load(&c.linked, c.link)?.and_then(|s| g2d::read_screen(&s).ok()) {
+                        c.width = 0;
+                        return Ok(Decoded::Image { rgba: g2d::render_screen(&screen, &tiles, &palette), info: t!("screen {}x{}, {what}", "ecran {}x{}, {what}", screen.width, screen.height) });
+                    }
                     if c.width == 0 {
                         c.width = tiles.default_width();
                     }
@@ -334,16 +1509,420 @@ fn decode_inner(entries: &[Entry], sel: usize, c: &mut Choices) -> Result<Decode
                 }
                 Kind::Screen => {
                     let screen = g2d::read_screen(&bytes).map_err(|e| e.to_string())?;
-                    Ok(Decoded::Image { rgba: g2d::render_screen(&screen, &tiles, &palette), info: format!("ecran {}x{}, {what}", screen.width, screen.height) })
+                    Ok(Decoded::Image { rgba: g2d::render_screen(&screen, &tiles, &palette), info: t!("screen {}x{}, {what}", "ecran {}x{}, {what}", screen.width, screen.height) })
                 }
                 _ => {
                     let cells = g2d::read_cells(&bytes).map_err(|e| e.to_string())?;
                     c.cells = cells.cells.len();
                     c.cell = c.cell.min(c.cells.saturating_sub(1));
                     let objs = cells.cells.get(c.cell).map_or(0, |o| o.len());
-                    Ok(Decoded::Image { rgba: g2d::render_cell(&cells, c.cell, &tiles, &palette), info: format!("{} cellules ({objs} OBJ), {what}", cells.cells.len()) })
+                    Ok(Decoded::Image { rgba: g2d::render_cell(&cells, c.cell, &tiles, &palette), info: t!("{} cells ({objs} OBJ), {what}", "{} cellules ({objs} OBJ), {what}", cells.cells.len()) })
                 }
             }
+        }
+        Kind::CellAnim => {
+            let sequences = g2d::read_animations(&bytes).map_err(|e| e.to_string())?;
+            c.anims = sequences.len();
+            c.anim = c.anim.min(c.anims.saturating_sub(1));
+            let sequence = sequences.get(c.anim).ok_or(tr("no sequence in the file", "aucune sequence dans le fichier"))?;
+            let cells_bytes = load(&c.linked, c.link)?.ok_or(tr("no cell file (.ncer) found", "aucun fichier de cellules (.ncer) trouve"))?;
+            let cells = g2d::read_cells(&cells_bytes).map_err(|e| e.to_string())?;
+            let tiles_bytes = load(&c.tiles, c.tile)?.ok_or(tr("no tile file (.ncgr) found", "aucun fichier de tuiles (.ncgr) trouve"))?;
+            let tiles = g2d::read_tiles(&tiles_bytes).map_err(|e| e.to_string())?;
+            let palette = match load(&c.palettes, c.palette)? {
+                Some(p) => g2d::read_palette(&p).map_err(|e| e.to_string())?,
+                None => grey_palette(&tiles),
+            };
+            let frames = g2d::render_sequence(&cells, sequence, &tiles, &palette);
+            let info = t!("{} sequences, {} frames in this one", "{} sequences, {} images dans celle-ci", sequences.len(), frames.len());
+            Ok(Decoded::Frames { frames, info })
+        }
+        Kind::JCells | Kind::JLayout => {
+            let is_layout = kind == Kind::JLayout;
+            let cells_bytes = if is_layout { load(&c.linked, c.link)?.ok_or(tr("no cell file (.bncd) found", "aucun fichier de cellules (.bncd) trouve"))? } else { bytes.clone() };
+            let (cells, tiles) = g2d::read_jcells(&cells_bytes).map_err(|e| e.to_string())?;
+            let palette = match load(&c.palettes, c.palette)? {
+                Some(p) => g2d::read_palette(&p).map_err(|e| e.to_string())?,
+                None => grey_palette(&tiles),
+            };
+            if is_layout {
+                let placements = g2d::read_jlayout(&bytes).map_err(|e| e.to_string())?;
+                let info = t!("{} cells placed on the screen", "{} cellules posees sur l'ecran", placements.len());
+                return Ok(Decoded::Image { rgba: g2d::render_layout(&placements, &cells, &tiles, &palette), info });
+            }
+            c.cells = cells.cells.len();
+            c.cell = c.cell.min(c.cells.saturating_sub(1));
+            let objs = cells.cells.get(c.cell).map_or(0, |o| o.len());
+            let info = t!("{} cells ({objs} OBJ)", "{} cellules ({objs} OBJ)", cells.cells.len());
+            Ok(Decoded::Image { rgba: g2d::render_cell(&cells, c.cell, &tiles, &palette), info })
+        }
+        Kind::ModelAnim => {
+            let cont = model3d::read(&bytes).map_err(|e| e.to_string())?;
+            c.anims = cont.animations.len();
+            c.anim = c.anim.min(c.anims.saturating_sub(1));
+            let animation = cont.animations.get(c.anim).ok_or(tr("no animation in the file", "aucune animation dans le fichier"))?;
+            let Some(&rig) = c.linked.get(c.link) else {
+                // Le modèle n'est pas lisible dans la rom (archive compressée...) : ce que dit l'animation
+                let mut lines = vec![tr("No model with this skeleton found in the rom.", "Aucun modele avec ce squelette trouve dans la rom.").to_string(), String::new()];
+                lines.extend(cont.animations.iter().map(|a| t!("{}: {} frames, {} bones", "{} : {} images, {} os", a.name, a.num_frames, a.objects_curves.len())));
+                return Ok(Decoded::Text { lines, info: t!("{} animations", "{} animations", cont.animations.len()) });
+            };
+            let own = model3d::read(&read_entry(&entries[rig])?).map_err(|e| e.to_string())?;
+            // Les textures du modèle, comme pour le modèle seul
+            let textures = companions(entries, rig, &[Kind::Textures]);
+            let others = match best_textures(entries, rig, &textures) {
+                0 => Vec::new(),
+                n => vec![model3d::read(&read_entry(&entries[textures[n - 1]])?).map_err(|e| e.to_string())?],
+            };
+            let lib = model3d::TextureLib::new(&own, &others);
+            let bones = animation.objects_curves.len();
+            let model = own.models.iter().filter(|m| m.objects.len() >= bones).min_by_key(|m| m.objects.len()).ok_or(tr("no model with this skeleton found", "aucun modele avec ce squelette trouve"))?;
+            let out = model3d::build_animation(model, animation).ok_or(tr("no model with this skeleton found", "aucun modele avec ce squelette trouve"))?;
+            Ok(Decoded::Animated { model: model3d::build_model(model, &lib), animation: out })
+        }
+        Kind::Audio => {
+            let sound = match bytes.get(0..4) {
+                Some(b"STRM") => sdat::read_strm(&bytes),
+                Some(b"SWAV") => sdat::read_swav(&bytes),
+                _ if ahx::is_ahx(&bytes) => ahx::decode(&bytes),
+                _ if adx::is_adx(&bytes) => adx::decode(&bytes),
+                _ => sadl::decode(&bytes),
+            };
+            Ok(audio(sound.map_err(|e| e.to_string())?, String::new()))
+        }
+        Kind::AudioBank => {
+            c.anims = sdat::swar_count(&bytes).map_err(|e| e.to_string())?;
+            c.anim = c.anim.min(c.anims.saturating_sub(1));
+            let sound = sdat::read_swar(&bytes, c.anim).map_err(|e| e.to_string())?;
+            let extra = t!("sound {} of {}, ", "son {} sur {}, ", c.anim + 1, c.anims);
+            Ok(audio(sound, extra))
+        }
+        Kind::HomSprite => {
+            let shape = hom::read_shape(&unpacked(&bytes)).ok_or(tr("unreadable sprite", "sprite illisible"))?;
+            c.anims = shape.animations.len();
+            c.anim = c.anim.min(c.anims.saturating_sub(1));
+            let frames = shape.render(c.anim);
+            let info = t!("sprite, {} animations, {} images, {} frames in this one", "sprite, {} animations, {} images, {} etapes dans celle-ci", c.anims, shape.cells.cells.len(), frames.len());
+            Ok(Decoded::Frames { frames, info })
+        }
+        Kind::HomModelTextures => {
+            let images = hom::model_textures(&unpacked(&bytes)).ok_or(tr("unreadable textures", "textures illisibles"))?;
+            let info = t!("{} textures of a 3D model (its geometry is not drawn)", "{} textures d'un modele 3D (sa geometrie n'est pas dessinee)", images.len());
+            Ok(Decoded::Image { rgba: if images.len() == 1 { images.into_iter().next().unwrap() } else { sheet(&images) }, info })
+        }
+        Kind::HomSheet | Kind::SiblingPaletteTiles => {
+            let inner = unpacked(&bytes);
+            let (palette, tiles) = if kind == Kind::HomSheet {
+                hom::read_sheet(&inner).ok_or(tr("unreadable tile sheet", "planche de tuiles illisible"))?
+            } else {
+                let me = &entries[sel];
+                let first = entries.iter().find(|e| e.dir == me.dir && e.path.ends_with("#0")).ok_or(tr("no palette in the table", "pas de palette dans la table"))?;
+                (g2d::raw_palette(&unpacked(&read_entry(first)?)), hom::tiles_4bpp(&inner))
+            };
+            c.banks = palette.banks();
+            c.bank = c.bank.min(c.banks.saturating_sub(1));
+            if c.width == 0 {
+                c.width = 32;
+            }
+            let what = if kind == Kind::HomSheet { tr("palette included, backgrounds not assembled", "palette incluse, fonds pas assembles") } else { tr("palette from the first file of the table", "palette du premier fichier de la table") };
+            let info = t!("{} tiles 4 bpp, {what}", "{} tuiles 4 bpp, {what}", tiles.count());
+            Ok(Decoded::Image { rgba: g2d::render_tiles(&tiles, &palette, c.bank, c.width), info })
+        }
+        Kind::EventScript | Kind::HouseModelAnim => {
+            let inner = unpacked(&bytes);
+            let info = if kind == Kind::EventScript {
+                t!("Event script, {} words of 32 bits (commands not translated)", "Script d'evenement, {} mots de 32 bits (commandes pas traduites)", inner.len() / 4)
+            } else {
+                t!("3D animation, {} frames: its values, not played", "Animation 3D, {} images : ses valeurs, pas jouee", u32::from_le_bytes([inner[0], inner[1], inner[2], inner[3]]))
+            };
+            // Les morceaux d'une archive `sar ` nomment leurs événements (caméra, mouvements, sons...)
+            let names = hom::event_names(&inner);
+            let mut lines = Vec::new();
+            if !names.is_empty() {
+                lines.push(t!("Events: {}", "Evenements : {}", names.join(", ")));
+                lines.extend(text_lines(&inner));
+                lines.push(String::new());
+            }
+            lines.extend(hom::script_lines(&inner));
+            Ok(Decoded::Text { lines, info })
+        }
+        Kind::RomSound => {
+            let me = &entries[sel];
+            let container = entries.iter().find(|e| e.path == me.dir).ok_or(tr("sound file not found", "fichier de sons introuvable"))?;
+            let all = read_entry(container)?;
+            let sounds = romsound::samples(&all);
+            let n = sounds.iter().position(|s| Some((s.start, s.end)) == me.member).ok_or(tr("sound file changed since it was read", "fichier de sons change depuis la lecture"))?;
+            let codec = if sounds[n].adpcm { "IMA ADPCM" } else { "PCM 8 bits" };
+            Ok(audio(romsound::decode(&bytes, &sounds[n]), format!("{codec}, ")))
+        }
+        Kind::TableArchive | Kind::SoundArchive => {
+            let me = &entries[sel];
+            let mut lines: Vec<String> = entries.iter().filter(|e| e.dir == me.path).map(|e| format!("{:<40}  {:<14}  {}", e.member_name.as_deref().unwrap_or(&e.path), kind_text(e.kind), size_text(e.size))).collect();
+            // Un SDAT rangé compressé dans un autre fichier (`dwc/utility.bin`) : ses fichiers ne sont pas dans la liste
+            if lines.is_empty() && kind == Kind::SoundArchive {
+                let inner = unpacked(&bytes);
+                lines = sdat::files(&inner).unwrap_or_default().iter().enumerate().map(|(n, f)| format!("{:<40}  {}", format!("{}.{}", f.name.clone().unwrap_or_else(|| format!("{n:04}")), f.ext), size_text(f.end - f.start))).collect();
+            }
+            let info = t!("Archive of {} files", "Archive de {} fichiers", lines.len());
+            Ok(Decoded::Text { lines, info })
+        }
+        Kind::SarArchive => {
+            let inner = unpacked(&bytes);
+            let mut lines = hom::sar_summary(&inner).unwrap_or_default();
+            lines.push(String::new());
+            lines.extend(text_lines(&inner));
+            Ok(Decoded::Text { lines, info: tr("3D archive (sar), its compressed files are not opened", "Archive 3D (sar), ses fichiers compresses ne sont pas ouverts").into() })
+        }
+        Kind::OffsetTable => {
+            let pairs = hom::mat_entries(&unpacked(&bytes)).ok_or(tr("unreadable table", "table illisible"))?;
+            // L'archive voisine (`Archive.sar` pour `Archive.sar.mat`) : ce que chaque ligne y désigne
+            let me = &entries[sel];
+            let archive = me.path.get(..me.path.len() - 4).unwrap_or_default();
+            let members: Vec<&Entry> = entries.iter().filter(|e| e.dir == archive).collect();
+            let lines = pairs.iter().enumerate().map(|(i, (at, size))| match members.get(i) {
+                Some(m) => format!("{i:4}  {at:#08x}  {:<10}  {}  {}", size_text(*size), m.path, kind_text(m.kind)),
+                None => format!("{i:4}  {at:#08x}  {}", size_text(*size)),
+            }).collect();
+            Ok(Decoded::Text { lines, info: t!("Table of {} files (position, size) of the archive next to it", "Table de {} fichiers (position, taille) de l'archive voisine", pairs.len()) })
+        }
+        Kind::EmbeddedFs => {
+            let inner = unpacked(&bytes);
+            let files = nitrofs::read_embedded(&inner);
+            let lines = files.iter().map(|f| format!("{:<48}  {}", f.path, size_text(f.end - f.start))).collect();
+            Ok(Decoded::Text { lines, info: t!("{} files with their names", "{} fichiers avec leurs noms", files.len()) })
+        }
+        Kind::EmptySlot => Ok(Decoded::Text { lines: vec![tr("Empty slot: the game stores nothing at this number.", "Emplacement vide : le jeu ne range rien a ce numero.").into()], info: tr("empty", "vide").into() }),
+        Kind::Sequence => sequence_preview(entries, sel, &bytes),
+        Kind::SequenceArchive => sequence_archive_preview(entries, sel, &bytes, c),
+        Kind::Instruments => instruments_preview(entries, sel, &bytes, c),
+        Kind::PlainText => {
+            // UTF-16 avec sa marque, UTF-8, sinon Shift-JIS (les jeux japonais)
+            let text = match bytes.get(0..2) {
+                Some([0xFF, 0xFE]) => encoding_rs::UTF_16LE.decode(&bytes).0.into_owned(),
+                _ => match std::str::from_utf8(&bytes) {
+                    Ok(text) => text.to_string(),
+                    Err(_) => encoding_rs::SHIFT_JIS.decode(&bytes).0.into_owned(),
+                },
+            };
+            let lines: Vec<String> = text.lines().map(str::to_string).collect();
+            let info = t!("{} lines", "{} lignes", lines.len());
+            Ok(Decoded::Text { lines, info })
+        }
+        Kind::Compressed => match decompress_any(&bytes) {
+            Some(inner) => {
+                let info = t!("LZ77, {} once decompressed", "LZ77, {} une fois decompresse", size_text(inner.len()));
+                Ok(Decoded::Text { lines: text_lines(&inner), info })
+            }
+            None => Ok(Decoded::Text { lines: text_lines(&bytes), info: t!("Not LZ77: its text and bytes", "Pas du LZ77 : ses textes et ses octets") }),
+        },
+        Kind::NestedRom => {
+            let info = crate::library::read_rom_bytes(&entries[sel].path, &bytes)?;
+            let rgba = if info.icon.is_empty() { Rgba { width: 1, height: 1, data: vec![0; 4] } } else { Rgba { width: 32, height: 32, data: info.icon.clone() } };
+            Ok(Decoded::Image { rgba, info: format!("{}  -  {}  -  {}", info.title.replace('\n', " "), info.publisher, info.code) })
+        }
+        Kind::EngineGeometry | Kind::EngineMesh => {
+            let name = entries[sel].path.rsplit('/').next().unwrap_or("").to_string();
+            if kind == Kind::EngineGeometry {
+                let model = gx_mesh::read_geometry(&bytes, None, &name).map_err(|e| e.to_string())?;
+                return Ok(Decoded::Model { model, own_textures: 0 });
+            }
+            let parts = mesh_parts(&bytes);
+            let mut models = Vec::with_capacity(parts.len());
+            let mut textured = 0;
+            for (geometry, texture, palette) in &parts {
+                // Un morceau manquant ou vide n'empêche pas de montrer les autres
+                let Some(at) = entry_at(entries, geometry) else { continue };
+                let Ok(geometry) = read_entry(&entries[at]) else { continue };
+                let image = entry_at(entries, texture).and_then(|i| engine_texture(entries, i, palette.as_deref()));
+                textured += usize::from(image.is_some());
+                if let Ok(model) = gx_mesh::read_geometry(&geometry, image, &name) {
+                    models.push(model);
+                }
+            }
+            let model = gx_mesh::merge(&name, models).ok_or(tr("unreadable mesh", "maillage illisible"))?;
+            Ok(Decoded::Model { model, own_textures: textured })
+        }
+        Kind::BsTexture => {
+            let inner = decompress_any(&bytes).unwrap_or_else(|| bytes.clone());
+            let (texel, palette) = g2d::read_bstga(&inner).map_err(|e| e.to_string())?;
+            let rgba = g2d::render_texel(&texel, &palette).map_err(|e| e.to_string())?;
+            Ok(Decoded::Image { rgba, info: t!("{}x{}, DS texture format {}", "{}x{}, format de texture DS {}", texel.width, texel.height, texel.format) })
+        }
+        Kind::RawTexture => {
+            let palette = match load(&c.palettes, c.palette)? {
+                Some(p) => g2d::raw_palette(&p),
+                None => g2d::Palette { colors: (0..=255).map(|i| [i, i, i, 255]).collect() },
+            };
+            let texel = g2d::raw_texture(&bytes, &palette);
+            let rgba = g2d::render_texel(&texel, &palette).map_err(|e| e.to_string())?;
+            Ok(Decoded::Image { rgba, info: t!("{}x{} (size guessed)", "{}x{} (taille devinee)", texel.width, texel.height) })
+        }
+        Kind::Bitmap => {
+            let rgba = g2d::read_bmp(&bytes).map_err(|e| e.to_string())?;
+            let info = format!("{}x{}", rgba.width, rgba.height);
+            Ok(Decoded::Image { rgba, info })
+        }
+        Kind::ZipFile => {
+            let lines = zip_lines(&bytes);
+            Ok(Decoded::Text { lines, info: t!("Zip archive: the list of its files", "Archive zip : la liste de ses fichiers") })
+        }
+        Kind::PaletteTiles => {
+            let inner = decompress_any(&bytes).unwrap_or_else(|| bytes.clone());
+            let (palette, tiles) = g2d::read_palette_tiles(&inner).ok_or(tr("unreadable tile sheet", "planche de tuiles illisible"))?;
+            if c.width == 0 {
+                // 40 tuiles de large = 320 pixels, la largeur des planches de Heroes of Mana
+                c.width = if tiles.count() % 40 == 0 && tiles.count() % 32 != 0 { 40 } else { 32 };
+            }
+            let info = t!("{} tiles {} bpp, palette included", "{} tuiles {} bpp, palette incluse", tiles.count(), if tiles.bpp8 { 8 } else { 4 });
+            Ok(Decoded::Image { rgba: g2d::render_tiles(&tiles, &palette, 0, c.width), info })
+        }
+        Kind::RomImage => {
+            let palette = if g2d::rom_image_needs_palette(&bytes) { load(&c.palettes, c.palette)?.map(|p| g2d::raw_palette(&p)) } else { None };
+            let image = g2d::read_rom_image_with(&bytes, palette.as_ref()).ok_or(tr("unreadable image", "image illisible"))?;
+            let info = t!("{} x {} pixels, {} bpp", "{} x {} pixels, {} bpp", image.rgba.width, image.rgba.height, if image.bpp8 { 8 } else { 4 });
+            Ok(Decoded::Image { rgba: image.rgba, info })
+        }
+        Kind::RomSprite => {
+            let sprite = g2d::read_rom_sprite(&bytes).ok_or(tr("unreadable sprite", "sprite illisible"))?;
+            let tiles = load(&c.tiles, c.tile)?.ok_or(tr("no tile file found", "aucun fichier de tuiles trouve"))?;
+            let palette = match load(&c.palettes, c.palette)? {
+                Some(p) => g2d::raw_palette(&p),
+                None => grey_palette(&g2d::raw_tiles(&[], None)),
+            };
+            let count = sprite.frames.len();
+            let info = t!("sprite {} x {}, {} frames", "sprite {} x {}, {} images", sprite.width, sprite.height, count);
+            let frames: Vec<Rgba> = (0..count).map(|f| g2d::rom_sprite_tiles(&sprite, f, &tiles).map(|t| g2d::render_rom_sprite(&sprite, f, &t, &palette))).collect::<Option<_>>().ok_or(tr("the tiles do not match the sprite", "les tuiles ne vont pas avec le sprite"))?;
+            if count == 1 {
+                return Ok(Decoded::Image { rgba: frames.into_iter().next().unwrap(), info });
+            }
+            // Le rythme de l'animation n'est pas dans le fichier : 10 images par seconde
+            Ok(Decoded::Frames { frames: frames.into_iter().map(|f| (f, 6)).collect(), info })
+        }
+        Kind::RomBitmap => {
+            let palette = load(&c.palettes, c.palette)?.map(|p| g2d::raw_palette(&p));
+            let rgba = g2d::render_rom_bitmap(&bytes, palette.as_ref()).ok_or(tr("no palette found", "aucune palette trouvee"))?;
+            let info = format!("{}x{}, 8 bpp", rgba.width, rgba.height);
+            Ok(Decoded::Image { rgba, info })
+        }
+        Kind::GameData => {
+            let (lines, what) = game_data_lines(&bytes);
+            Ok(Decoded::Text { lines, info: t!("Game data ({}): its structure, not drawn", "Donnees du jeu ({}) : leur structure, pas de dessin", what) })
+        }
+        Kind::ChainSprite | Kind::ChainSpriteTiles => {
+            let (sprite, tiles) = sprite_files(entries, sel, &bytes).ok_or(tr("no matching sprite file", "aucun fichier de sprite qui va avec"))?;
+            let palette = match load(&c.palettes, c.palette)? {
+                Some(p) => g2d::raw_palette(&p),
+                None => g2d::raw_palette(&[]),
+            };
+            let images = amaze::render_sprite(&sprite, &tiles, &palette);
+            let info = t!("{} frames, {} bpp (all of them in order, the game's sequences are elsewhere)", "{} images, {} bpp (toutes dans l'ordre, les sequences du jeu sont ailleurs)", images.len(), if sprite.bpp8 { 8 } else { 4 });
+            Ok(Decoded::Frames { frames: images.into_iter().map(|image| (image, SPRITE_FRAME)).collect(), info })
+        }
+        Kind::RomLevelTiles => {
+            let tiles = amaze::read_level_tiles(&bytes).ok_or(tr("unreadable tile sheet", "planche de tuiles illisible"))?;
+            let palette = match load(&c.palettes, c.palette)? {
+                Some(p) => g2d::raw_palette(&p),
+                None => grey_palette(&tiles),
+            };
+            if c.width == 0 {
+                c.width = 32;
+            }
+            let info = t!("{} level tiles, 8 bpp (the sheet, not the assembled level)", "{} tuiles de niveau, 8 bpp (la planche, pas le niveau assemble)", tiles.count());
+            Ok(Decoded::Image { rgba: g2d::render_tiles(&tiles, &palette, 0, c.width), info })
+        }
+        Kind::AnmFile => Ok(Decoded::Text { lines: anm_lines(&bytes), info: t!("Animation not played: its content", "Animation pas jouee : son contenu") }),
+        Kind::ZImage => {
+            let inner = fully_unpacked(bytes.clone());
+            let name = entries[sel].stem.clone();
+            let materials = z_mesh_materials(entries, sel);
+            let textured = std::cell::Cell::new(0);
+            let texture_of = |part: usize| {
+                let image = materials.get(part).and_then(|material| z_texture(entries, material));
+                textured.set(textured.get() + usize::from(image.is_some()));
+                image
+            };
+            let is_mesh = entries[sel].path.contains("/mesh/");
+            if let Some(model) = is_mesh.then(|| gx_mesh::read_world_mesh(&inner, &name, texture_of)).flatten() {
+                return Ok(Decoded::Model { model, own_textures: textured.get() });
+            }
+            match g2d::read_z_image(&inner) {
+                Some(rgba) => {
+                    let info = format!("{}x{}", rgba.width, rgba.height);
+                    Ok(Decoded::Image { rgba, info })
+                }
+                None => Ok(Decoded::Text { lines: text_lines(&inner), info: t!("Not an image: {} once decompressed", "Pas une image : {} une fois decompresse", size_text(inner.len())) }),
+            }
+        }
+        Kind::Video => Ok(video_preview(bytes)),
+        Kind::Texel | Kind::TextureRef => {
+            let texel_bytes = if kind == Kind::Texel { bytes.clone() } else { load(&c.linked, c.link)?.ok_or(tr("texture file not found", "fichier de la texture introuvable"))? };
+            let texel = g2d::read_texel(&texel_bytes).map_err(|e| e.to_string())?;
+            let palette = match load(&c.palettes, c.palette)? {
+                Some(p) => g2d::read_palette(&p).map_err(|e| e.to_string())?,
+                None => g2d::Palette { colors: (0..=255).map(|i| [i, i, i, 255]).collect() },
+            };
+            let rgba = g2d::render_texel(&texel, &palette).map_err(|e| e.to_string())?;
+            Ok(Decoded::Image { rgba, info: t!("{}x{}, DS texture format {}", "{}x{}, format de texture DS {}", texel.width, texel.height, texel.format) })
+        }
+        Kind::EngineBitmap => {
+            let palette = match load(&c.palettes, c.palette)? {
+                Some(p) => g2d::read_palette(&p).map_err(|e| e.to_string())?,
+                None => g2d::Palette { colors: (0..=255).map(|i| [i, i, i, 255]).collect() },
+            };
+            let rgba = g2d::render_engine_bitmap(&bytes, &palette).map_err(|e| e.to_string())?;
+            let info = format!("{}x{}", rgba.width, rgba.height);
+            Ok(Decoded::Image { rgba, info })
+        }
+        Kind::NitroArchive => {
+            let lines: Vec<String> = nitro_archive_members(&bytes).into_iter().map(|(name, start, end)| format!("{name}  {}  {}", size_text(end - start), kind_text(sniff(&bytes[start..end])))).collect();
+            Ok(Decoded::Text { info: t!("Archive of {} files", "Archive de {} fichiers", lines.len()), lines })
+        }
+        Kind::RelocModule => {
+            let (lines, info) = reloc_module_lines(&bytes)?;
+            Ok(Decoded::Text { lines, info })
+        }
+        Kind::TileFont => tile_font(entries, sel),
+        Kind::LzSprites => lz_sprites(entries, sel),
+        Kind::Font => {
+            let (rgba, count) = g2d::render_font(&bytes).map_err(|e| e.to_string())?;
+            Ok(Decoded::Image { rgba, info: t!("{count} characters", "{count} caracteres") })
+        }
+        Kind::Messages => {
+            let lines = if bytes.starts_with(b"GNAL") { lang_lines(&bytes) } else { bmg_lines(&bytes) };
+            let info = t!("{} messages", "{} messages", lines.len());
+            Ok(Decoded::Text { lines, info })
+        }
+        Kind::RawPalette => {
+            let p = g2d::raw_palette(&decompress_any(&bytes).unwrap_or_else(|| bytes.clone()));
+            Ok(Decoded::Image { rgba: p.swatches(), info: t!("{} colors", "{} couleurs", p.colors.len()) })
+        }
+        Kind::RawTiles | Kind::RawScreen => {
+            // Les tuiles codées d'un sprite de rom.bin : celles de sa première image
+            let rom_bin = entries[sel].rom_index.is_some();
+            let unpacked = |b: Vec<u8>| decompress_any(&b).or_else(|| rom_bin.then(|| g2d::read_rom_tiles(&b, 0, 64 * 1024)).flatten()).unwrap_or(b);
+            // Palette brute, ou palette Nitro (`.ncl` de Pokémon Dash)
+            let palette = load(&c.palettes, c.palette)?.map(|p| if sniff(&p) == Kind::Palette { g2d::read_palette(&p).map_err(|e| e.to_string()) } else { Ok(g2d::raw_palette(&unpacked(p))) }).transpose()?;
+            let tiles_bytes = if kind == Kind::RawTiles { Some(bytes.clone()) } else { load(&c.tiles, c.tile)? };
+            let tiles_bytes = unpacked(tiles_bytes.ok_or(tr("no tile file (.nbfc) found", "aucun fichier de tuiles (.nbfc) trouve"))?);
+            let tiles = match c.options.bpp8 {
+                Some(bpp8) => g2d::raw_tiles_bpp(&tiles_bytes, bpp8),
+                None => g2d::raw_tiles(&tiles_bytes, palette.as_ref()),
+            };
+            let palette = palette.unwrap_or_else(|| grey_palette(&tiles));
+            if kind == Kind::RawScreen {
+                let mut screen = g2d::raw_screen(&bytes);
+                if let Some(bank) = c.options.bank {
+                    screen.entries.iter_mut().for_each(|e| *e = (*e & 0x0FFF) | (bank & 15) << 12);
+                }
+                return Ok(Decoded::Image { rgba: g2d::render_screen(&screen, &tiles, &palette), info: t!("screen {}x{}", "ecran {}x{}", screen.width, screen.height) });
+            }
+            c.banks = if tiles.bpp8 { 1 } else { palette.banks() };
+            c.bank = c.bank.min(c.banks.saturating_sub(1));
+            if c.width == 0 {
+                c.width = tiles.default_width();
+            }
+            let info = t!("{} tiles {} bpp", "{} tuiles {} bpp", tiles.count(), if tiles.bpp8 { 8 } else { 4 });
+            Ok(Decoded::Image { rgba: g2d::render_tiles(&tiles, &palette, c.bank, c.width), info })
         }
         Kind::Textures => {
             let cont = model3d::read(&bytes).map_err(|e| e.to_string())?;
@@ -366,17 +1945,116 @@ fn decode_inner(entries: &[Entry], sel: usize, c: &mut Choices) -> Result<Decode
             c.models = models.len();
             c.model = c.model.min(models.len().saturating_sub(1));
             if models.is_empty() {
-                return Err("aucun modele dans le fichier".into());
+                return Err(tr("no model in the file", "aucun modele dans le fichier").into());
             }
             Ok(Decoded::Model { model: models.swap_remove(c.model), own_textures: own.textures.len() })
         }
-        _ => Err("format non pris en charge".into()),
+        Kind::Nitro3dOther => {
+            // Animations de matériaux (.nsbta, .nsbtp...) : ce qu'elles contiennent, sans les jouer
+            let mut lines = Vec::new();
+            if let Ok(cont) = model3d::read(&bytes) {
+                lines.extend(cont.patterns.iter().map(|p| t!("Texture animation {}: {} frames", "Animation de textures {} : {} images", p.name, p.num_frames)));
+                lines.extend(cont.mat_anims.iter().map(|m| t!("Material animation {}: {} frames", "Animation de materiau {} : {} images", m.name, m.num_frames)));
+            }
+            lines.push(String::new());
+            lines.extend(text_lines(&bytes));
+            Ok(Decoded::Text { lines, info: t!("Animation not played: its content", "Animation pas jouee : son contenu") })
+        }
+        // Scripts et fichiers maison : leurs textes et leurs octets (décompressés s'ils le sont)
+        _ => match decompress_any(&bytes) {
+            Some(inner) => {
+                let info = t!("Not decoded: {} once decompressed", "Pas decode : {} une fois decompresse", size_text(inner.len()));
+                Ok(Decoded::Text { lines: text_lines(&inner), info })
+            }
+            None => Ok(Decoded::Text { lines: text_lines(&bytes), info: t!("Not decoded: its text and bytes", "Pas decode : ses textes et ses octets") }),
+        },
     }
+}
+
+pub const THUMB_SIZE: u32 = 96;
+/// Images gardées au plus pour une vignette animée.
+const THUMB_FRAMES: usize = 24;
+
+/// L'image dans un carré de la vignette : agrandie sans lissage (d'un nombre entier de fois) ou réduite, centrée.
+fn fit_thumb(image: &Rgba) -> Rgba {
+    let side = THUMB_SIZE as usize;
+    let mut out = Rgba { width: THUMB_SIZE, height: THUMB_SIZE, data: vec![0; side * side * 4] };
+    let longest = image.width.max(image.height).max(1) as f32;
+    let scale = if longest > THUMB_SIZE as f32 { THUMB_SIZE as f32 / longest } else { (THUMB_SIZE as f32 / longest).floor().max(1.0) };
+    let (w, h) = (((image.width as f32 * scale) as usize).clamp(1, side), ((image.height as f32 * scale) as usize).clamp(1, side));
+    let (ox, oy) = ((side - w) / 2, (side - h) / 2);
+    for y in 0..h {
+        for x in 0..w {
+            let sx = ((x as f32 / scale) as usize).min(image.width.max(1) as usize - 1);
+            let sy = ((y as f32 / scale) as usize).min(image.height.max(1) as usize - 1);
+            let from = (sy * image.width as usize + sx) * 4;
+            if let Some(pixel) = image.data.get(from..from + 4) {
+                let to = ((oy + y) * side + ox + x) * 4;
+                out.data[to..to + 4].copy_from_slice(pixel);
+            }
+        }
+    }
+    out
+}
+
+/// La vignette de `sel` : une ou plusieurs images (avec leur durée en 1/60 s) ; `None` pour un fichier sans image.
+pub fn thumbnail(entries: &[Entry], sel: usize) -> Option<Vec<(Rgba, u16)>> {
+    // Jouer une musique entière pour une vignette serait trop long
+    if matches!(entries[sel].kind, Kind::Sequence | Kind::SequenceArchive | Kind::Instruments) {
+        return None;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let mut choices = choices_for(entries, sel);
+        match decode(entries, sel, &mut choices).ok()? {
+            Decoded::Image { rgba, .. } => Some(vec![(fit_thumb(&rgba), 60)]),
+            Decoded::Audio { waveform, .. } => Some(vec![(fit_thumb(&waveform), 60)]),
+            Decoded::Frames { frames, .. } => {
+                let step = frames.len().div_ceil(THUMB_FRAMES).max(1);
+                Some(frames.chunks(step).map(|group| (fit_thumb(&group[0].0), group.iter().map(|f| f.1).sum())).collect())
+            }
+            Decoded::Model { model, .. } => Some(vec![(model3d::render_thumbnail(&model, None, model.min, model.max, THUMB_SIZE), 60)]),
+            Decoded::Animated { model, animation } => {
+                let step = animation.frames.len().div_ceil(THUMB_FRAMES).max(1);
+                let duration = animation.step.saturating_mul(step as u16).max(1);
+                Some(animation.frames.iter().step_by(step).map(|pose| (model3d::render_thumbnail(&model, Some(pose), animation.min, animation.max, THUMB_SIZE), duration)).collect())
+            }
+            Decoded::Video { bytes, .. } => video_thumbnail(bytes),
+            Decoded::Text { .. } => None,
+        }
+    }))
+    .unwrap_or(None)
+}
+
+/// Durée d'une image de sprite (1/60 s) : la vraie est dans les séquences du jeu.
+const SPRITE_FRAME: u16 = 6;
+
+/// Le descripteur et les tuiles d'un sprite, depuis l'un ou l'autre.
+fn sprite_files(entries: &[Entry], sel: usize, bytes: &[u8]) -> Option<(amaze::Sprite, Vec<u8>)> {
+    let me = entries[sel].rom_index?;
+    let near = |wanted: Kind| entries.iter().filter(move |e| e.kind == wanted && e.rom_index.is_some_and(|n| n.abs_diff(me) <= 3)).filter_map(|e| read_entry(e).ok());
+    if entries[sel].kind == Kind::ChainSprite {
+        let sprite = amaze::read_sprite(bytes)?;
+        let tiles = near(Kind::ChainSpriteTiles).find(|t| amaze::tiles_match(&sprite, t))?;
+        return Some((sprite, tiles));
+    }
+    let sprite = near(Kind::ChainSprite).find_map(|d| amaze::read_sprite(&d).filter(|s| amaze::tiles_match(s, bytes)))?;
+    Some((sprite, bytes.to_vec()))
+}
+
+/// Les palettes d'un fichier de rom.bin : la taille voulue d'abord, puis celles qui suivent le fichier, les plus proches en tête.
+fn rom_palettes(entries: &[Entry], sel: usize, size: usize) -> Vec<usize> {
+    let mut list = companions(entries, sel, &[Kind::RawPalette]);
+    let me = entries[sel].rom_index.unwrap_or(0);
+    list.sort_by_key(|&i| {
+        let n = entries[i].rom_index.unwrap_or(0);
+        (entries[i].size != size, if n > me { n - me } else { me - n + (1 << 24) })
+    });
+    list
 }
 
 /// L'aperçu de `sel`. Un fichier mal formé donne une erreur, il ne fait pas tomber le studio.
 pub fn decode(entries: &[Entry], sel: usize, c: &mut Choices) -> Result<Decoded, String> {
-    catch_unwind(AssertUnwindSafe(|| decode_inner(entries, sel, c))).unwrap_or_else(|_| Err("le decodage a plante (fichier inattendu)".into()))
+    catch_unwind(AssertUnwindSafe(|| decode_inner(entries, sel, c))).unwrap_or_else(|_| Err(tr("decoding crashed (unexpected file)", "le decodage a plante (fichier inattendu)").into()))
 }
 
 // --------------------------------------------------------------------------------------------
@@ -478,16 +2156,8 @@ fn modified_secs(path: &Path) -> u64 {
     path.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs())
 }
 
-fn stamp_of(files: &Path) -> u64 {
-    modified_secs(files) ^ romarc_dir(files).map_or(0, |d| modified_secs(&d).rotate_left(21))
-}
-
-/// Combien de fichiers annonce la table d'offsets de rom.bin (voir romarc.py).
-fn rom_table_entries(disk: &Path) -> Option<usize> {
-    let mut head = [0u8; 4];
-    std::fs::File::open(disk).ok()?.read_exact(&mut head).ok()?;
-    let first = u32::from_le_bytes(head) as usize;
-    (first >= 8 && first % 4 == 0 && first <= disk.metadata().ok()?.len() as usize).then_some(first / 4 - 1)
+fn stamp_of(rom: &Path) -> u64 {
+    modified_secs(rom) ^ rom.metadata().map_or(0, |m| m.len()).rotate_left(21)
 }
 
 /// Essaie de montrer un fichier avec le code de l'aperçu.
@@ -505,6 +2175,15 @@ fn try_show(entries: &[Entry], sel: usize) -> Result<String, String> {
                 Err(format!("image vide {}x{}", rgba.width, rgba.height))
             }
         }
+        Decoded::Frames { frames, .. } => {
+            if frames.iter().any(|(image, _)| image.data.chunks_exact(4).any(|p| p[3] != 0)) {
+                Ok(format!("animation {} images", frames.len()))
+            } else {
+                Err("animation vide".into())
+            }
+        }
+        Decoded::Animated { animation, .. } => Ok(format!("animation {} images", animation.frames.len())),
+        Decoded::Audio { info, .. } | Decoded::Text { info, .. } | Decoded::Video { info, .. } => Ok(info),
         Decoded::Model { model, .. } => {
             if model.triangle_count == 0 {
                 Err("modele sans triangles".into())
@@ -524,10 +2203,10 @@ fn is_media(entry: &Entry) -> bool {
 }
 
 /// Les chiffres d'un jeu, et l'essai d'un fichier de chaque format.
-pub fn game_stats(files: &Path) -> GameStats {
-    let entries = scan(files);
-    let mut stats = GameStats { stamp: stamp_of(files), ..GameStats::default() };
-    let romarc_files = entries.iter().filter(|e| e.rom_index.is_some()).count();
+pub fn game_stats(rom: &Path) -> GameStats {
+    let entries = scan(rom);
+    let mut stats = GameStats { stamp: stamp_of(rom), ..GameStats::default() };
+    let rom_bin_total = entries.iter().filter(|e| e.rom_index.is_some()).count();
     for (i, e) in entries.iter().enumerate() {
         let is_top_file = e.member.is_none() && e.rom_index.is_none();
         let parsed_archive = e.kind == Kind::Archive && read_entry(e).ok().is_some_and(|b| narc::read(&b).is_ok());
@@ -536,8 +2215,7 @@ pub fn game_stats(files: &Path) -> GameStats {
         if is_top_file && !is_media(e) {
             stats.data_bytes += e.size as u64;
             let part = if is_rom_bin {
-                let total = rom_table_entries(&e.disk).unwrap_or(romarc_files.max(1));
-                (romarc_files as f64 / total.max(1) as f64).min(1.0)
+                if rom_bin_total > 0 { 1.0 } else { 0.0 }
             } else if (e.kind == Kind::Archive && !parsed_archive) || (e.kind == Kind::Other && e.size >= BIG_FILE) {
                 0.0
             } else {
@@ -546,7 +2224,7 @@ pub fn game_stats(files: &Path) -> GameStats {
             stats.extracted_bytes += (e.size as f64 * part) as u64;
         }
         // Fichiers : une archive ouverte ne compte pas, ce qu'elle contient oui
-        if !parsed_archive && !(is_rom_bin && romarc_files > 0) {
+        if !parsed_archive && !(is_rom_bin && rom_bin_total > 0) {
             stats.files += 1;
             stats.viewable += usize::from(e.kind.viewable());
         }
@@ -601,14 +2279,14 @@ fn save_index(stats: &HashMap<String, GameStats>) {
     }
 }
 
-/// Met l'index à jour jeu après jeu (dans un fil à part) ; `fresh` refait tous les jeux.
-pub fn run_index(root: &Path, state: &Arc<Mutex<IndexState>>, fresh: bool) {
-    let games = find_games(root);
+/// Met l'index à jour rom après rom (dans un fil à part) ; `fresh` les refait toutes.
+pub fn run_index(dir: &Path, state: &Arc<Mutex<IndexState>>, fresh: bool) {
+    let games = find_games(dir);
     let known = if fresh { HashMap::new() } else { load_index() };
     {
         let mut s = state.lock().unwrap();
         s.total = games.len();
-        s.stats = known.iter().filter(|(label, stat)| games.iter().any(|g| &g.label == *label && stat.stamp == stamp_of(&g.files))).map(|(l, s)| (l.clone(), s.clone())).collect();
+        s.stats = known.iter().filter(|(label, stat)| games.iter().any(|g| &g.label == *label && stat.stamp == stamp_of(&g.rom))).map(|(l, s)| (l.clone(), s.clone())).collect();
         s.done = s.stats.len();
         s.revision += 1;
     }
@@ -617,11 +2295,160 @@ pub fn run_index(root: &Path, state: &Arc<Mutex<IndexState>>, fresh: bool) {
         if fresh_enough {
             continue;
         }
-        let stats = game_stats(&game.files);
+        let stats = game_stats(&game.rom);
         let mut s = state.lock().unwrap();
         s.stats.insert(game.label.clone(), stats);
         s.done += 1;
         s.revision += 1;
         save_index(&s.stats);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Une rom avec NitroFS : `rom.bin` (un fichier en copie, un en données brutes) et une palette.
+    fn rom_with_files(name: &str) -> PathBuf {
+        let mut rom_bin: Vec<u8> = [12u32, 20, 28].iter().flat_map(|v| v.to_le_bytes()).collect();
+        rom_bin.extend([0x00, 4, 0, 0, b'B', b'M', b'D', b'0']);
+        rom_bin.extend([0x60, 16, 0, 0, 1, 2, 3, 4]);
+        let mut rom = nds_nitro::nitrofs::tests_rom(b"RLCN....", &rom_bin);
+        rom[0x15C..0x15E].copy_from_slice(&0xCF56u16.to_le_bytes());
+        let dir = std::env::temp_dir().join(format!("ndsgs-scan-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("jeu.nds");
+        std::fs::write(&path, rom).unwrap();
+        path
+    }
+
+    #[test]
+    fn raw_files_are_known_by_their_extension() {
+        assert_eq!(by_extension(Kind::Other, "data/icon.NBFC"), Kind::RawTiles);
+        assert_eq!(by_extension(Kind::Other, "a.nbfp"), Kind::RawPalette);
+        assert_eq!(by_extension(Kind::Other, "a.xyz"), Kind::Other);
+        assert_eq!(by_extension(Kind::Other, "a.txt"), Kind::PlainText);
+        assert_eq!(by_extension(Kind::Model, "a.nbfc"), Kind::Model);
+    }
+
+    #[test]
+    fn splits_tables_of_positions() {
+        let mut bytes: Vec<u8> = [8u32, 12].iter().flat_map(|v| v.to_le_bytes()).collect();
+        bytes.extend(b"AAAABB");
+        assert_eq!(table_members(&bytes), [(8, 12), (12, 14)]);
+        assert!(table_members(b"pas une table").is_empty());
+        assert!(table_members(&[0u8; 16]).is_empty());
+    }
+
+    #[test]
+    fn reads_all_parts_of_a_mesh() {
+        // Battle of Giants : plusieurs morceaux, sans palette
+        let long = b"HSEM\x02\0\0\0\x0E\0\0\x003d/geometry/a\0\x03\0\0\x00t/a\0\0\x03\0\xFF\x7F\x0E\0\0\x003d/geometry/b\0\x03\0\0\x00t/b\0\0";
+        let parts = mesh_parts(long);
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[1], ("3d/geometry/b".to_string(), "t/b".to_string(), None));
+        // Rayman : compte sur un octet, palette nommée
+        let short = b"HSEM\x01\x0D\0\0\x003d/geometry/a\x03\0\0\x00t/a\x0C\0\0\x003d/palette/p";
+        assert_eq!(mesh_parts(short), [("3d/geometry/a".to_string(), "t/a".to_string(), Some("3d/palette/p".to_string()))]);
+    }
+
+    #[test]
+    fn reads_video_headers() {
+        let mut b = vec![0u8; 0x24];
+        b[0..4].copy_from_slice(b"BIKi");
+        b[8] = 100;
+        b[0x15] = 1;
+        b[0x18] = 192;
+        b[0x1C] = 30;
+        b[0x20] = 1;
+        assert!(video_lines(&b)[0].contains("256x192, 100 frames, 30.0"));
+    }
+
+    #[test]
+    fn reads_engine_texts_and_texture_links() {
+        let mut b = b"GNAL\x01\0\0\0\0\0\0\0\x01\0\0\0\x02\0\0\0Hi".to_vec();
+        assert_eq!(lang_lines(&b), ["   0  Hi"]);
+        b = b"TXET\x03\0\0\0a/b\x04\0\0\0c/d\0".to_vec();
+        assert_eq!(texture_ref(&b), Some(("a/b".to_string(), "c/d".to_string())));
+    }
+
+    #[test]
+    fn reads_bmg_messages() {
+        let mut b = vec![0u8; 0x20];
+        b[0..8].copy_from_slice(b"MESGbmg1");
+        b[0x10] = 2;
+        b.extend(b"INF1\x18\0\0\0\x01\0\x04\0\0\0\0\0\x02\0\0\0\0\0\0\0");
+        b.extend(b"DAT1\x10\0\0\0\0\0H\0i\0\0\0\0\0");
+        assert_eq!(bmg_lines(&b), ["   0  Hi"]);
+    }
+
+    #[test]
+    fn finds_nitro_files_stuck_in_a_file() {
+        let mut bytes = vec![0u8; 8];
+        bytes.extend(b"RLCN\xFF\xFE\x00\x01\x14\x00\x00\x00\x10\x00\x01\x00");
+        bytes.extend([0u8; 4]);
+        bytes.extend(b"RLCN sans en-tete valide........");
+        // Un début de fichier compressé : la taille tient, pas la taille de l'en-tête
+        bytes.extend(b"RGCN\xFF\xFE\x01\x01\x08\x00\x00\x00\x01\x00RAHC");
+        assert_eq!(embedded_files(&bytes), [(8, 28, "nclr")]);
+    }
+
+    #[test]
+    fn shows_text_and_bytes_of_unknown_files() {
+        let mut bytes = b"\x00\x01boss_broly.ima\x00".to_vec();
+        bytes.extend([0x83, 0x75, 0x83, 0x8D, 0x83, 0x8A, 0x00]);
+        let lines = text_lines(&bytes);
+        assert_eq!(lines[1], "boss_broly.ima");
+        assert_eq!(lines[2], "\u{30d6}\u{30ed}\u{30ea}");
+        assert!(lines.last().unwrap().starts_with("000010  "));
+        // Surtout du binaire : les octets d'abord, et des kanji seuls ne sont pas du texte
+        let mut noise = vec![0xFFu8; 64];
+        noise.extend([0x8A, 0xA3, 0x8E, 0x94, 0x00]);
+        let lines = text_lines(&noise);
+        assert!(lines[0].starts_with("Bytes"));
+        assert!(lines.iter().any(|l| l == "Text found: 0"));
+    }
+
+    #[test]
+    fn titles_fit_the_font() {
+        assert_eq!(plain_title("Madagascar™", "MADAGASCAR"), "Madagascar");
+        assert_eq!(plain_title("Pokémon Dash", "POKEMON DASH"), "Pokemon Dash");
+        assert_eq!(plain_title("ゲームででましたっ！", "POWERPUFF"), "POWERPUFF");
+    }
+
+    #[test]
+    fn lists_and_reads_files_from_the_rom() {
+        let path = rom_with_files("list");
+        let entries = scan(&path);
+        let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths, ["data/a.bin", "rom.bin", "rom.bin#0", "rom.bin#1"]);
+        assert_eq!(entries[0].kind, Kind::Palette);
+        assert_eq!(read_entry(&entries[0]).unwrap(), b"RLCN....");
+        // rom.bin#0 : dépaqueté, reconnu par sa signature
+        assert_eq!(entries[2].kind, Kind::Model);
+        assert_eq!(read_entry(&entries[2]).unwrap(), b"BMD0");
+        assert_eq!(entries[2].format(), "nsbmd");
+        // rom.bin#1 : ressemble seulement à un fichier empaqueté
+        assert_eq!(read_entry(&entries[3]).unwrap(), [0x60, 16, 0, 0, 1, 2, 3, 4]);
+        assert_eq!(entries[3].format(), "bin");
+    }
+
+    #[test]
+    fn the_stats_count_rom_bin() {
+        let stats = game_stats(&rom_with_files("stats"));
+        // data/a.bin (8 octets) et rom.bin (28 octets), lisibles tous les deux
+        assert_eq!(stats.data_bytes, 36);
+        assert_eq!(stats.extracted_bytes, 36);
+    }
+
+    #[test]
+    fn a_broken_rom_gives_nothing() {
+        let dir = std::env::temp_dir().join(format!("ndsgs-scan-broken-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("casse.nds");
+        std::fs::write(&path, [0u8; 8]).unwrap();
+        assert!(scan(&path).is_empty());
+        assert!(scan(&dir.join("absente.nds")).is_empty());
     }
 }

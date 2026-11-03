@@ -53,6 +53,10 @@ pub fn save_path(game: &str, slot: &str) -> PathBuf {
 
 /// Écrit `text` dans `path` sans jamais laisser un fichier à moitié écrit ; garde l'ancien en `.bak`.
 pub fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
+    write_atomic_bytes(path, text.as_bytes())
+}
+
+pub fn write_atomic_bytes(path: &Path, text: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }

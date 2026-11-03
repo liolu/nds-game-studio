@@ -1,7 +1,7 @@
 //! Outils de développement : voir le code du jeu (F5) et changer le jeu en changeant le code.
 //!
 //! - **F5** ouvre (ou ferme) la fenêtre « Code » : un éditeur des fichiers du jeu en cours (ou du
-//!   studio dans le menu), avec l'état de la compilation et ses erreurs. **Ctrl+S** enregistre ; un
+//!   studio dans le menu), avec l'état de la compilation et ses erreurs. **Ctrl+S** (Cmd+S sur macOS) enregistre ; un
 //!   fichier changé par un autre éditeur est relu s'il n'a pas de modification en cours.
 //! - **Rechargement** : quand un fichier du jeu ou du moteur est enregistré, le studio recompile en
 //!   arrière-plan. Si ça compile, il se relance tout seul sur le même jeu, avec les fenêtres à la
@@ -28,6 +28,7 @@ use bevy::ui_widgets::{Activate, Button, TextInput};
 use bevy::window::{WindowRef, WindowResolution};
 use bevy::winit::WINIT_WINDOWS;
 
+use crate::i18n::{t, tr};
 use crate::link::ShowToast;
 use crate::screens::{Aspect, DsScreens, ScreenLayout};
 use crate::studio::{ActiveGame, AutoStart};
@@ -172,11 +173,13 @@ struct Dev {
 pub struct DevSettings {
     /// Recompiler et relancer quand un fichier est enregistré.
     pub auto_reload: bool,
+    /// Accès développeur : montre les outils de validation dans Options > Développement.
+    pub developer_access: bool,
 }
 
 impl Default for DevSettings {
     fn default() -> Self {
-        Self { auto_reload: true }
+        Self { auto_reload: true, developer_access: false }
     }
 }
 
@@ -266,7 +269,7 @@ fn start_build(root: PathBuf, state: Arc<Mutex<BuildState>>) {
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
             let old = exe.with_extension(format!("old-{}", std::process::id()));
             let renamed = std::fs::rename(&exe, &old).is_ok();
-            let output = cargo_command(&root).output().map_err(|e| format!("cargo introuvable : {e}"));
+            let output = cargo_command(&root).output().map_err(|e| t!("cargo not found: {e}", "cargo introuvable : {e}"));
             let restore = || {
                 if renamed && !exe.exists() {
                     let _ = std::fs::rename(&old, &exe);
@@ -292,7 +295,7 @@ fn start_build(root: PathBuf, state: Arc<Mutex<BuildState>>) {
             if !exe.exists() {
                 // Rien n'a été relinké : on garde l'actuel
                 restore();
-                return Err("Compilation terminee mais aucun nouvel executable (rien a recompiler ?)".into());
+                return Err(tr("Build finished but no new executable (nothing to rebuild?)", "Compilation terminee mais aucun nouvel executable (rien a recompiler ?)").into());
             }
             Ok(())
         })();
@@ -348,7 +351,7 @@ fn watch_sources(time: Res<Time<Real>>, settings: Res<DevSettings>, mut dev: Res
         Some(_) if dev.pending && *dev.build.lock().unwrap() != BuildState::Building => {
             dev.pending = false;
             info!("code modifie : recompilation");
-            toast.write(ShowToast("Code modifie : recompilation...".into()));
+            toast.write(ShowToast(tr("Code changed: rebuilding...", "Code modifie : recompilation...").into()));
             start_build(root, dev.build.clone());
         }
         _ => {}
@@ -375,7 +378,7 @@ fn finish_build(
     *reported = Some(state.clone());
     match state {
         BuildState::Failed(_) => {
-            toast.write(ShowToast("Erreur de compilation : voir la fenetre Code (F5)".into()));
+            toast.write(ShowToast(tr("Build error: see the Code window (F5)", "Erreur de compilation : voir la fenetre Code (F5)").into()));
         }
         BuildState::Done => {
             let Some(screens) = screens else { return };
@@ -390,7 +393,7 @@ fn finish_build(
                     exit.write(AppExit::Success);
                 }
                 Err(e) => {
-                    toast.write(ShowToast(format!("Relance impossible : {e}")));
+                    toast.write(ShowToast(t!("Cannot restart: {e}", "Relance impossible : {e}")));
                 }
             }
         }
@@ -469,9 +472,7 @@ fn files_for(root: &Path, game: Option<&str>) -> Vec<PathBuf> {
 }
 
 fn monospace_font(fonts: &mut Assets<Font>) -> Option<Handle<Font>> {
-    let windir = std::env::var_os("WINDIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
-    let bytes = std::fs::read(windir.join("Fonts").join("consola.ttf")).ok()?;
-    Some(fonts.add(Font::from_bytes(bytes)))
+    crate::launcher::system_font(fonts, &["consola.ttf"], &["Menlo.ttc", "Monaco.ttf"])
 }
 
 fn toggle_code_window(
@@ -508,7 +509,7 @@ fn toggle_code_window(
         return;
     }
     if dev.root.is_none() {
-        toast.write(ShowToast("Code source introuvable : F5 marche avec le depot (compilation locale)".into()));
+        toast.write(ShowToast(tr("Source code not found: F5 works with the repository (local build)", "Code source introuvable : F5 marche avec le depot (compilation locale)").into()));
         return;
     }
     if view.font.is_none() {
@@ -576,7 +577,7 @@ fn save_file(path: &Path, text: &str, view: &mut CodeView, toast: &mut MessageWr
             info!("enregistre : {}", path.display());
         }
         Err(e) => {
-            toast.write(ShowToast(format!("Enregistrement impossible : {e}")));
+            toast.write(ShowToast(t!("Cannot save: {e}", "Enregistrement impossible : {e}")));
         }
     }
 }
@@ -636,7 +637,7 @@ fn refresh_code_window(
             save_file(&previous, &text, &mut view, &mut toast);
         }
         if other_file || (changed_on_disk && !view.dirty) {
-            let content = std::fs::read_to_string(&path).unwrap_or_else(|e| format!("Lecture impossible : {e}"));
+            let content = std::fs::read_to_string(&path).unwrap_or_else(|e| t!("Cannot read: {e}", "Lecture impossible : {e}"));
             commands.entity(editor).insert(self::editable(&content));
             view.go_top = 3;
             view.saved = content;
@@ -649,10 +650,10 @@ fn refresh_code_window(
     let build = dev.build.lock().unwrap().clone();
     let file = view.files.get(view.current).and_then(|p| p.strip_prefix(&root).ok()).map(|p| p.display().to_string()).unwrap_or_default();
     let line = match &build {
-        BuildState::Building => format!("{file}   |   Recompilation en cours..."),
-        BuildState::Failed(_) => format!("{file}   |   Erreur de compilation (le jeu continue avec l'ancien code)"),
-        _ if view.dirty => format!("{file}   |   Modifie : Ctrl+S pour enregistrer (le studio recompile et se relance)"),
-        _ => format!("{file}   |   Ctrl+S enregistre : le studio recompile et se relance tout seul"),
+        BuildState::Building => t!("{file}   |   Rebuilding...", "{file}   |   Recompilation en cours..."),
+        BuildState::Failed(_) => t!("{file}   |   Build error (the game keeps running the old code)", "{file}   |   Erreur de compilation (le jeu continue avec l'ancien code)"),
+        _ if view.dirty => t!("{file}   |   Modified: {SAVE_KEY} to save (the studio rebuilds and restarts)", "{file}   |   Modifie : {SAVE_KEY} pour enregistrer (le studio recompile et se relance)"),
+        _ => t!("{file}   |   {SAVE_KEY} saves: the studio rebuilds and restarts by itself", "{file}   |   {SAVE_KEY} enregistre : le studio recompile et se relance tout seul"),
     };
     if let Ok(mut s) = status.single_mut()
         && s.0 != line
@@ -667,6 +668,9 @@ fn refresh_code_window(
         }
     }
 }
+
+/// Touche d'enregistrement, comme les raccourcis du champ de texte de Bevy.
+const SAVE_KEY: &str = if cfg!(target_os = "macos") { "Cmd+S" } else { "Ctrl+S" };
 
 /// Modifications en cours, Ctrl+S, et le clavier rendu au jeu quand on quitte la fenêtre du code.
 fn edit_code(
@@ -690,9 +694,9 @@ fn edit_code(
     if !window.focused && typing_in_editor(Some(&focus), &editor_marks) {
         focus.clear();
     }
-    let ctrl = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
+    let command = keys.any_pressed(if cfg!(target_os = "macos") { [KeyCode::SuperLeft, KeyCode::SuperRight] } else { [KeyCode::ControlLeft, KeyCode::ControlRight] });
     if window.focused
-        && ctrl
+        && command
         && keys.just_pressed(KeyCode::KeyS)
         && let (Some((path, _)), Ok(editable)) = (view.loaded.clone(), editors.single())
     {

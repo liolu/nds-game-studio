@@ -1,5 +1,6 @@
 id = "dualshock-4"
-name = "Manette PlayStation 4 (DualShock 4)"
+name = "PlayStation 4 Controller (DualShock 4)"
+name_fr = "Manette PlayStation 4 (DualShock 4)"
 names = ["wireless controller", "dualshock 4", "dualshock4", "ps4", "playstation 4"]
 vendor_ids = [0x054C]
 product_ids = [0x05C4, 0x09CC, 0x0BA0]

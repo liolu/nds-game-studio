@@ -5,14 +5,29 @@ edition.workspace = true
 description = "Moteur de jeux DS natifs (Bevy) : deux ecrans 256x192, fenetres liees ou separees, entrees DS, specification par jeu"
 
 [dependencies]
-bevy.workspace = true
+# wav : jouer les sons des jeux (fenetre Assets)
+bevy = { workspace = true, features = ["wav", "system_clipboard"] }
+encoding_rs = "0.8"
 nds-nitro = { path = "../nitro" }
+nds-video = { path = "../video" }
 serde = { version = "1", features = ["derive"] }
 toml = "1.1"
 serde_json = "1"
 dirs = "5"
+# Jaquettes (Options > Launcher) : telechargement et lecture
+ureq = { version = "3", features = ["native-tls"], default-features = false }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# Boite a outils des jeux natifs
+zip = { version = "2", default-features = false, features = ["deflate"] }
+# Controler l'archive d'un mod telecharge (SHA256SUMS)
+sha2 = "0.10"
+# Choisir le fichier ou le dossier d'un mod
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 # Meme version que bevy_winit : positionner la fenetre du bas directement
 winit = { version = "0.30", default-features = false }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Memory", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }

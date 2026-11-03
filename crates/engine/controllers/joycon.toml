@@ -1,5 +1,6 @@
 id = "joycon"
-name = "Joy-Con (paire)"
+name = "Joy-Con (pair)"
+name_fr = "Joy-Con (paire)"
 names = ["joy-con", "joycon", "joy con"]
 vendor_ids = [0x057E]
 product_ids = [0x2006, 0x2007, 0x200E]

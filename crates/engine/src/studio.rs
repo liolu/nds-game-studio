@@ -131,7 +131,7 @@ fn apply_spec(world: &mut World, spec: &GameSpec, title: &str) {
     let gap = spec.screens.gap as f32;
     for (entity, rows) in [(Some(main), if bottom.is_some() { 1.0 } else { 2.0 }), (bottom, 1.0)] {
         let Some(mut window) = entity.and_then(|e| world.get_mut::<Window>(e)) else { continue };
-        window.title = if Some(main) == entity { title.to_string() } else { format!("{title} - ecran tactile") };
+        window.title = if Some(main) == entity { title.to_string() } else { crate::i18n::t!("{title} - touch screen", "{title} - ecran tactile") };
         if let Some(scale) = spec.screens.scale {
             let scale = scale.clamp(1, 8) as f32;
             let height = if rows == 2.0 { 2.0 * SCREEN_H as f32 + gap } else { SCREEN_H as f32 };

@@ -1,15 +1,21 @@
 //! La bibliothèque du launcher, sans interface : les roms du dossier `rom` (à côté du launcher),
 //! ce qu'on lit dans leur en-tête (nom, éditeur, icône), l'ajout d'une rom et les préférences.
 //!
-//! Les roms ne sont jamais émulées : elles identifient le jeu (code `AQIE`...) pour trouver sa
-//! décompilation et son module natif, et fourniront ses fichiers au runtime.
+//! Les dossiers de jeux sont de vrais sous-dossiers de `rom` : une rom y est désignée par son chemin relatif
+//! (`Nintendo/jeu.nds`, avec des `/` partout), et les favoris d'une rom à la racine restent valables.
+//!
+//! Les roms ne sont jamais émulées : elles identifient le jeu (code `AQIE`...) pour trouver son module
+//! natif, et donnent ses fichiers à la fenêtre Assets (F6) et au runtime.
 
-use std::collections::HashMap;
+use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+
+use crate::i18n::{t, tr};
 
 const HEADER_SIZE: usize = 0x200;
 /// CRC du logo Nintendo, le même dans toutes les roms DS.
@@ -21,6 +27,7 @@ const TITLE_LANGUAGES: [usize; 6] = [2, 1, 3, 5, 4, 0];
 
 #[derive(Clone, Debug)]
 pub struct RomInfo {
+    /// Chemin relatif au dossier des roms (voir plus haut).
     pub file: String,
     pub path: PathBuf,
     pub title: String,
@@ -38,13 +45,13 @@ impl RomInfo {
         match self.code.as_bytes().get(3) {
             Some(b'E') => "USA",
             Some(b'P') => "Europe",
-            Some(b'J') => "Japon",
+            Some(b'J') => tr("Japan", "Japon"),
             Some(b'F') => "France",
-            Some(b'D') => "Allemagne",
-            Some(b'S') => "Espagne",
-            Some(b'I') => "Italie",
-            Some(b'K') => "Coree",
-            _ => "Autre",
+            Some(b'D') => tr("Germany", "Allemagne"),
+            Some(b'S') => tr("Spain", "Espagne"),
+            Some(b'I') => tr("Italy", "Italie"),
+            Some(b'K') => tr("Korea", "Coree"),
+            _ => tr("Other", "Autre"),
         }
     }
 
@@ -121,15 +128,25 @@ fn parse_rom(file: &str, path: &Path, header: &[u8], banner: Option<&[u8]>, size
     RomInfo { file: file.to_string(), path: path.to_path_buf(), title, publisher, code, internal_name, size, icon: banner.map(decode_icon).unwrap_or_default() }
 }
 
+/// Le titre, l'éditeur et l'icône d'une rom déjà en mémoire (`.srl` dans une autre rom).
+pub fn read_rom_bytes(file: &str, bytes: &[u8]) -> Result<RomInfo, String> {
+    if bytes.len() < HEADER_SIZE || le16(bytes, 0x15C) != LOGO_CRC {
+        return Err(t!("{file}: not a DS rom", "{file} : pas une rom DS"));
+    }
+    let banner_at = le32(bytes, 0x68) as usize;
+    let banner = (banner_at != 0).then(|| bytes.get(banner_at..banner_at + BANNER_SIZE)).flatten();
+    Ok(parse_rom(file, Path::new(file), &bytes[..HEADER_SIZE], banner, bytes.len() as u64))
+}
+
 /// Lit l'en-tête d'une rom DS (le reste du fichier n'est pas lu). Erreur si ce n'est pas une rom.
 pub fn read_rom(path: &Path) -> Result<RomInfo, String> {
     let file_name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let mut file = File::open(path).map_err(|e| format!("{file_name} : {e}"))?;
     let size = file.metadata().map_err(|e| format!("{file_name} : {e}"))?.len();
     let mut header = [0u8; HEADER_SIZE];
-    file.read_exact(&mut header).map_err(|_| format!("{file_name} : pas une rom DS (trop petit)"))?;
+    file.read_exact(&mut header).map_err(|_| t!("{file_name}: not a DS rom (too small)", "{file_name} : pas une rom DS (trop petit)"))?;
     if le16(&header, 0x15C) != LOGO_CRC {
-        return Err(format!("{file_name} : pas une rom DS"));
+        return Err(t!("{file_name}: not a DS rom", "{file_name} : pas une rom DS"));
     }
     let banner_at = u64::from(le32(&header, 0x68));
     let mut banner = vec![0u8; BANNER_SIZE];
@@ -150,23 +167,110 @@ fn has_rom_extension(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("nds") || e.eq_ignore_ascii_case("dsi"))
 }
 
-/// Ce qui change quand le dossier change : noms et tailles triés.
+fn walk(dir: &Path, prefix: &str, stamp: &mut Vec<(String, u64)>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let relative = format!("{prefix}{name}");
+        // Un lien symbolique n'est pas suivi : pas de boucle possible
+        if entry.file_type().is_ok_and(|t| t.is_dir()) {
+            if !name.starts_with('.') {
+                let folder = format!("{relative}/");
+                walk(&entry.path(), &folder, stamp);
+                stamp.push((folder, 0));
+            }
+        } else if has_rom_extension(&entry.path()) {
+            stamp.push((relative, entry.metadata().map_or(0, |m| m.len())));
+        }
+    }
+}
+
+/// Ce qui change quand le dossier change : les roms (chemin relatif, taille) et les sous-dossiers (`nom/`, 0), triés.
 pub fn folder_stamp(dir: &Path) -> Vec<(String, u64)> {
-    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
-    let mut stamp: Vec<(String, u64)> = entries
-        .flatten()
-        .filter(|e| has_rom_extension(&e.path()))
-        .map(|e| (e.file_name().to_string_lossy().into_owned(), e.metadata().map_or(0, |m| m.len())))
-        .collect();
+    let mut stamp = Vec::new();
+    walk(dir, "", &mut stamp);
     stamp.sort();
     stamp
 }
 
-/// Les roms du dossier, triées par titre (les fichiers illisibles sont ignorés).
+/// Les sous-dossiers, chemins relatifs sans `/` à la fin.
+pub fn folders_in(stamp: &[(String, u64)]) -> Vec<String> {
+    stamp.iter().filter_map(|(name, _)| name.strip_suffix('/').map(str::to_string)).collect()
+}
+
+/// Les roms du dossier et de ses sous-dossiers, triées par titre (les fichiers illisibles sont ignorés).
 pub fn scan_roms(dir: &Path) -> Vec<RomInfo> {
-    let mut roms: Vec<RomInfo> = folder_stamp(dir).iter().filter_map(|(name, _)| read_rom(&dir.join(name)).ok()).collect();
+    let mut roms: Vec<RomInfo> = folder_stamp(dir)
+        .iter()
+        .filter(|(name, _)| !name.ends_with('/'))
+        .filter_map(|(name, _)| {
+            let mut info = read_rom(&dir.join(name)).ok()?;
+            info.file = name.clone();
+            Some(info)
+        })
+        .collect();
     roms.sort_by_key(|r| r.title.to_lowercase());
     roms
+}
+
+/// Le dossier d'une rom ou d'un dossier (chemin relatif) ; vide à la racine.
+pub fn parent_of(relative: &str) -> &str {
+    relative.rsplit_once('/').map_or("", |(parent, _)| parent)
+}
+
+/// Le dernier élément d'un chemin relatif.
+pub fn last_name(relative: &str) -> &str {
+    relative.rsplit('/').next().unwrap_or(relative)
+}
+
+fn join_relative(folder: &str, name: &str) -> String {
+    if folder.is_empty() { name.to_string() } else { format!("{folder}/{name}") }
+}
+
+/// Le chemin d'un sous-dossier (vide = le dossier des roms).
+pub fn folder_path(dir: &Path, folder: &str) -> PathBuf {
+    if folder.is_empty() { dir.to_path_buf() } else { dir.join(folder) }
+}
+
+/// Un nom qui reste un seul dossier sur tous les systèmes (les caractères interdits sous Windows sont refusés partout :
+/// le dossier des roms peut changer de machine).
+fn valid_folder_name(name: &str) -> bool {
+    const MAX_NAME: usize = 64;
+    !name.is_empty() && name.chars().count() <= MAX_NAME && !name.starts_with('.') && !name.ends_with('.') && !name.chars().any(|c| c.is_control() || "/\\:*?\"<>|".contains(c))
+}
+
+/// Crée un dossier de jeux dans `parent` ; rend son chemin relatif.
+pub fn create_folder(dir: &Path, parent: &str, name: &str) -> Result<String, String> {
+    let name = name.trim();
+    if !valid_folder_name(name) {
+        return Err(t!("Invalid folder name: {name}", "Nom de dossier invalide : {name}"));
+    }
+    let relative = join_relative(parent, name);
+    let path = dir.join(&relative);
+    if path.exists() {
+        return Err(t!("{name} already exists", "{name} existe deja"));
+    }
+    std::fs::create_dir_all(&path).map_err(|e| format!("{name} : {e}"))?;
+    Ok(relative)
+}
+
+/// Retire un dossier de jeux vide (jamais une rom).
+pub fn remove_folder(dir: &Path, folder: &str) -> Result<(), String> {
+    std::fs::remove_dir(dir.join(folder)).map_err(|e| format!("{folder} : {e}"))
+}
+
+/// Range une rom dans un dossier, sans jamais écraser un fichier ; rend son nouveau chemin relatif.
+pub fn move_rom(dir: &Path, file: &str, folder: &str) -> Result<String, String> {
+    let relative = join_relative(folder, last_name(file));
+    if relative == file {
+        return Ok(relative);
+    }
+    let target = dir.join(&relative);
+    if target.exists() {
+        return Err(t!("{relative} already exists", "{relative} existe deja"));
+    }
+    std::fs::rename(dir.join(file), &target).map_err(|e| format!("{file} : {e}"))?;
+    Ok(relative)
 }
 
 /// Résultat de l'ajout d'une rom : son titre, et si elle était déjà dans le dossier.
@@ -188,7 +292,7 @@ fn same_start(a: &Path, b: &Path) -> bool {
 /// Copie une rom dans le dossier (fichier temporaire puis renommage : jamais de rom à moitié écrite).
 pub fn import_rom(source: &Path, dir: &Path) -> Result<Imported, String> {
     let info = read_rom(source)?;
-    let name = source.file_name().ok_or("nom de fichier invalide")?;
+    let name = source.file_name().ok_or(tr("invalid file name", "nom de fichier invalide"))?;
     std::fs::create_dir_all(dir).map_err(|e| format!("{} : {e}", dir.display()))?;
     let mut target = dir.join(name);
     // Même nom mais autre rom (autre version du jeu) : les deux sont gardées
@@ -203,28 +307,12 @@ pub fn import_rom(source: &Path, dir: &Path) -> Result<Imported, String> {
         n += 1;
     }
     let part = target.with_extension("part");
-    std::fs::copy(source, &part).map_err(|e| format!("copie impossible : {e}"))?;
+    std::fs::copy(source, &part).map_err(|e| t!("cannot copy: {e}", "copie impossible : {e}"))?;
     std::fs::rename(&part, &target).map_err(|e| {
         let _ = std::fs::remove_file(&part);
-        format!("copie impossible : {e}")
+        t!("cannot copy: {e}", "copie impossible : {e}")
     })?;
     Ok(Imported { title: info.title, already: false })
-}
-
-/// Code du jeu -> projet de décompilation, d'après la rom à la racine de chaque projet.
-pub fn find_projects(root: &Path) -> HashMap<String, String> {
-    let mut projects = HashMap::new();
-    let Ok(games) = std::fs::read_dir(root) else { return projects };
-    for game in games.flatten().filter(|g| g.path().is_dir()) {
-        let Ok(files) = std::fs::read_dir(game.path()) else { continue };
-        for path in files.flatten().map(|f| f.path()).filter(|p| has_rom_extension(p)) {
-            let mut start = [0u8; 0x10];
-            if File::open(&path).and_then(|mut f| f.read_exact(&mut start)).is_ok() {
-                projects.entry(ascii(&start[0x0C..])).or_insert_with(|| game.file_name().to_string_lossy().into_owned());
-            }
-        }
-    }
-    projects
 }
 
 /// Vue de la liste des jeux.
@@ -236,14 +324,127 @@ pub enum LibraryView {
     List,
 }
 
+/// Ordre des jeux dans la vue.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SortKey {
+    #[default]
+    Title,
+    Publisher,
+    Developer,
+    Year,
+    Genre,
+    Tag,
+    Region,
+    Size,
+    Decomp,
+}
+
+impl SortKey {
+    pub const ALL: [SortKey; 9] = [SortKey::Title, SortKey::Publisher, SortKey::Developer, SortKey::Year, SortKey::Genre, SortKey::Tag, SortKey::Region, SortKey::Size, SortKey::Decomp];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SortKey::Title => tr("Name", "Nom"),
+            SortKey::Publisher => tr("Publisher", "Editeur"),
+            SortKey::Developer => tr("Developer", "Developpeur"),
+            SortKey::Year => tr("Year", "Annee"),
+            SortKey::Genre => "Genre",
+            SortKey::Tag => "Tag",
+            SortKey::Region => "Region",
+            SortKey::Size => tr("Size", "Taille"),
+            SortKey::Decomp => "Decomp",
+        }
+    }
+
+    /// Le plus récent, le plus gros, le plus avancé d'abord.
+    pub fn starts_reversed(self) -> bool {
+        matches!(self, SortKey::Year | SortKey::Size | SortKey::Decomp)
+    }
+}
+
+/// Ce qu'on compare pour un jeu.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SortCell {
+    Number(f32),
+    Text(String),
+}
+
+impl SortCell {
+    fn compare(&self, other: &SortCell) -> Ordering {
+        match (self, other) {
+            (SortCell::Number(a), SortCell::Number(b)) => a.total_cmp(b),
+            (SortCell::Text(a), SortCell::Text(b)) => a.cmp(b),
+            (SortCell::Number(_), SortCell::Text(_)) => Ordering::Less,
+            (SortCell::Text(_), SortCell::Number(_)) => Ordering::Greater,
+        }
+    }
+}
+
+/// Trie (valeur, titre plié, jeu). Sans valeur, un jeu reste à la fin dans les deux sens ; à égalité, l'ordre du titre.
+pub fn sort_games<T>(mut games: Vec<(Option<SortCell>, String, T)>, reverse: bool) -> Vec<T> {
+    games.sort_by(|a, b| {
+        let by_value = match (&a.0, &b.0) {
+            (None, None) => Ordering::Equal,
+            (None, Some(_)) => Ordering::Greater,
+            (Some(_), None) => Ordering::Less,
+            (Some(x), Some(y)) if reverse => y.compare(x),
+            (Some(x), Some(y)) => x.compare(y),
+        };
+        by_value.then_with(|| a.1.cmp(&b.1))
+    });
+    games.into_iter().map(|(_, _, game)| game).collect()
+}
+
+/// Minuscules sans accents : « Pokémon » se trouve en tapant « pokemon ». Le ™ et le ® ne comptent pas.
+pub fn fold(text: &str) -> String {
+    text.chars()
+        .flat_map(char::to_lowercase)
+        .filter(|c| !matches!(c, '™' | '®' | '©'))
+        .map(|c| match c {
+            'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' | 'ā' => 'a',
+            'ç' => 'c',
+            'è' | 'é' | 'ê' | 'ë' | 'ē' => 'e',
+            'ì' | 'í' | 'î' | 'ï' | 'ī' => 'i',
+            'ñ' => 'n',
+            'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'ō' => 'o',
+            'ù' | 'ú' | 'û' | 'ü' | 'ū' => 'u',
+            'ý' | 'ÿ' => 'y',
+            other => other,
+        })
+        .collect()
+}
+
+/// Tous les mots cherchés sont dans le texte, dans n'importe quel ordre. Les deux sont déjà pliés (`fold`).
+pub fn matches_search(haystack: &str, query: &str) -> bool {
+    query.split_whitespace().all(|word| haystack.contains(word))
+}
+
+const MAX_TAG: usize = 32;
+
 /// Préférences du launcher (`launcher.toml`, à part d'options.toml : réinitialiser les options ne
 /// doit pas effacer les favoris).
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LibraryPrefs {
     /// Noms de fichier des roms, dans l'ordre où elles ont été ajoutées aux favoris.
     pub favorites: Vec<String>,
     pub view: LibraryView,
+    /// Jaquettes des jeux installés : téléchargées depuis GameTDB et montrées à la place de l'icône.
+    pub covers: bool,
+    /// Mise à jour remise à plus tard : sa version, et jusqu'à quand (secondes depuis 1970).
+    pub update_later: String,
+    pub update_later_until: u64,
+    pub sort: SortKey,
+    pub sort_reverse: bool,
+    /// Tags de l'utilisateur, par code de jeu : ils suivent le jeu d'un dossier à l'autre.
+    pub tags: BTreeMap<String, Vec<String>>,
+}
+
+impl Default for LibraryPrefs {
+    fn default() -> Self {
+        LibraryPrefs { favorites: Vec::new(), view: LibraryView::default(), covers: true, update_later: String::new(), update_later_until: 0, sort: SortKey::default(), sort_reverse: false, tags: BTreeMap::new() }
+    }
 }
 
 fn prefs_path() -> PathBuf {
@@ -271,6 +472,43 @@ impl LibraryPrefs {
             self.favorites.retain(|f| f != file);
         } else {
             self.favorites.push(file.to_string());
+        }
+    }
+
+    pub fn tags_of(&self, code: &str) -> &[String] {
+        self.tags.get(code).map_or(&[], Vec::as_slice)
+    }
+
+    /// Tous les tags, sans doublon, triés.
+    pub fn all_tags(&self) -> Vec<String> {
+        let mut all: Vec<String> = self.tags.values().flatten().cloned().collect();
+        all.sort_by_key(|tag| fold(tag));
+        all.dedup();
+        all
+    }
+
+    /// Le tag sous l'orthographe déjà utilisée ailleurs : « RPG » et « rpg » restent un seul tag.
+    pub fn add_tag(&mut self, code: &str, tag: &str) -> Result<(), String> {
+        let tag = tag.trim();
+        if tag.is_empty() || tag.chars().count() > MAX_TAG || tag.chars().any(char::is_control) {
+            return Err(t!("Invalid tag: {tag}", "Tag invalide : {tag}"));
+        }
+        let wanted = fold(tag);
+        let name = self.all_tags().into_iter().find(|known| fold(known) == wanted).unwrap_or_else(|| tag.to_string());
+        let tags = self.tags.entry(code.to_string()).or_default();
+        if !tags.contains(&name) {
+            tags.push(name);
+            tags.sort_by_key(|tag| fold(tag));
+        }
+        Ok(())
+    }
+
+    pub fn remove_tag(&mut self, code: &str, tag: &str) {
+        if let Some(tags) = self.tags.get_mut(code) {
+            tags.retain(|t| t != tag);
+            if tags.is_empty() {
+                self.tags.remove(code);
+            }
         }
     }
 }
@@ -350,8 +588,96 @@ mod tests {
     }
 
     #[test]
+    fn roms_in_subfolders() {
+        let dir = temp_dir("folders");
+        std::fs::write(dir.join("a.nds"), fake_rom("A\nEditeur")).unwrap();
+        assert_eq!(create_folder(&dir, "", "  Nintendo ").unwrap(), "Nintendo");
+        assert_eq!(create_folder(&dir, "Nintendo", "Mario").unwrap(), "Nintendo/Mario");
+        assert!(create_folder(&dir, "", "Nintendo").is_err(), "existe deja");
+        for name in ["", "  ", "..", ".cache", "a/b", "a\\b", "a:b", "fin."] {
+            assert!(create_folder(&dir, "", name).is_err(), "{name}");
+        }
+        std::fs::write(dir.join("Nintendo/Mario/b.nds"), fake_rom("B\nEditeur")).unwrap();
+        std::fs::write(dir.join("Nintendo/photo.txt"), "pas une rom").unwrap();
+
+        let stamp = folder_stamp(&dir);
+        assert_eq!(folders_in(&stamp), ["Nintendo", "Nintendo/Mario"]);
+        let files: Vec<String> = scan_roms(&dir).into_iter().map(|r| r.file).collect();
+        assert_eq!(files, ["a.nds", "Nintendo/Mario/b.nds"]);
+        assert_eq!(parent_of("Nintendo/Mario/b.nds"), "Nintendo/Mario");
+        assert_eq!(parent_of("a.nds"), "");
+        assert_eq!(last_name("Nintendo/Mario"), "Mario");
+
+        assert_eq!(move_rom(&dir, "a.nds", "Nintendo").unwrap(), "Nintendo/a.nds");
+        assert!(dir.join("Nintendo/a.nds").exists() && !dir.join("a.nds").exists());
+        assert_eq!(move_rom(&dir, "Nintendo/a.nds", "Nintendo").unwrap(), "Nintendo/a.nds", "deja rangee");
+        // Même nom ailleurs : refusé, rien n'est écrasé
+        std::fs::write(dir.join("a.nds"), fake_rom("Autre\nEditeur")).unwrap();
+        assert!(move_rom(&dir, "a.nds", "Nintendo").is_err());
+        assert_eq!(read_rom(&dir.join("Nintendo/a.nds")).unwrap().title, "A");
+        assert_eq!(move_rom(&dir, "Nintendo/Mario/b.nds", "").unwrap(), "b.nds");
+
+        assert!(remove_folder(&dir, "Nintendo").is_err(), "pas vide");
+        remove_folder(&dir, "Nintendo/Mario").unwrap();
+        assert!(!dir.join("Nintendo/Mario").exists());
+    }
+
+    #[test]
+    fn import_of_a_selection_reports_each_file() {
+        let source_dir = temp_dir("selection-source");
+        let dir = temp_dir("selection-target").join("rom");
+        let (nds, dsi, photo) = (source_dir.join("jeu.nds"), source_dir.join("jeu.dsi"), source_dir.join("photo.nds"));
+        std::fs::write(&nds, fake_rom("Le Jeu\nEditeur")).unwrap();
+        std::fs::write(&dsi, fake_rom("Le Jeu DSi\nEditeur")).unwrap();
+        std::fs::write(&photo, vec![1u8; 0x400]).unwrap();
+        assert_eq!(import_rom(&nds, &dir).unwrap(), Imported { title: "Le Jeu".into(), already: false });
+        assert_eq!(import_rom(&dsi, &dir).unwrap(), Imported { title: "Le Jeu DSi".into(), already: false });
+        assert!(import_rom(&photo, &dir).is_err());
+        let names: Vec<String> = folder_stamp(&dir).into_iter().map(|(n, _)| n).collect();
+        assert_eq!(names, ["jeu.dsi", "jeu.nds"]);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2, "aucun fichier temporaire ne reste");
+    }
+
+    #[test]
+    fn sorting_keeps_unknown_values_last() {
+        let games = || vec![(None, "a".to_string(), "sans"), (Some(SortCell::Number(2006.0)), "b".to_string(), "2006"), (Some(SortCell::Number(2010.0)), "c".to_string(), "2010"), (Some(SortCell::Number(2006.0)), "a".to_string(), "2006 a")];
+        assert_eq!(sort_games(games(), false), ["2006 a", "2006", "2010", "sans"]);
+        assert_eq!(sort_games(games(), true), ["2010", "2006 a", "2006", "sans"]);
+    }
+
+    #[test]
+    fn search_ignores_case_accents_and_word_order() {
+        assert_eq!(fold("Pokémon™ Noir"), "pokemon noir");
+        let game = fold("LEGO Star Wars II  LucasArts 2006 Action");
+        assert!(matches_search(&game, &fold("star LUCASARTS")));
+        assert!(matches_search(&game, &fold("2006")));
+        assert!(matches_search(&game, ""));
+        assert!(!matches_search(&game, &fold("star trek")));
+        assert!(matches_search(&fold("ポケモン"), &fold("ポケ")));
+    }
+
+    #[test]
+    fn tags_stay_one_spelling() {
+        let mut prefs = LibraryPrefs::default();
+        prefs.add_tag("AAAE", " RPG ").unwrap();
+        prefs.add_tag("BBBE", "rpg").unwrap();
+        prefs.add_tag("BBBE", "Enfance").unwrap();
+        prefs.add_tag("BBBE", "RPG").unwrap();
+        assert_eq!(prefs.tags_of("BBBE"), ["Enfance", "RPG"]);
+        assert_eq!(prefs.all_tags(), ["Enfance", "RPG"]);
+        for bad in ["", "  ", "a\nb", &"x".repeat(MAX_TAG + 1)] {
+            assert!(prefs.add_tag("AAAE", bad).is_err(), "{bad}");
+        }
+        prefs.remove_tag("BBBE", "RPG");
+        prefs.remove_tag("AAAE", "RPG");
+        assert!(prefs.tags_of("AAAE").is_empty());
+        assert_eq!(prefs.all_tags(), ["Enfance"]);
+    }
+
+    #[test]
     fn prefs_round_trip_and_favorites() {
-        let mut prefs = LibraryPrefs { favorites: vec![], view: LibraryView::List };
+        let mut prefs = LibraryPrefs { favorites: vec![], view: LibraryView::List, covers: true, sort: SortKey::Year, sort_reverse: true, ..Default::default() };
+        prefs.add_tag("AL7E", "Lego").unwrap();
         prefs.toggle_favorite("a.nds");
         prefs.toggle_favorite("b.nds");
         prefs.toggle_favorite("a.nds");
@@ -359,5 +685,8 @@ mod tests {
         let text = toml::to_string_pretty(&prefs).unwrap();
         assert_eq!(toml::from_str::<LibraryPrefs>(&text).unwrap(), prefs);
         assert_eq!(toml::from_str::<LibraryPrefs>("").unwrap(), LibraryPrefs::default());
+        // Un launcher.toml d'avant les jaquettes les active ; un « non » choisi reste un non
+        assert!(toml::from_str::<LibraryPrefs>("view = \"grid\"").unwrap().covers);
+        assert!(!toml::from_str::<LibraryPrefs>("covers = false").unwrap().covers);
     }
 }

@@ -7,8 +7,12 @@
 //!   double-clic agrandit / restaure ;
 //! - les bords et les coins redimensionnent la fenêtre (curseur de redimensionnement au survol) ;
 //! - ombre de fenêtre gardée.
+//!
+//! macOS : winit refuse `drag_resize_window`, le moteur suit donc lui-même la souris (`Resizing`).
 
 use bevy::ecs::system::NonSendMarker;
+use bevy::input::mouse::{AccumulatedMouseMotion, MouseButtonInput};
+use bevy::input::ButtonState;
 use bevy::math::CompassOctant;
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
@@ -26,6 +30,10 @@ const BUTTON_W: f32 = 46.0;
 /// Largeur de la zone des bords qui redimensionne.
 const EDGE: f32 = 6.0;
 const DOUBLE_CLICK: f64 = 0.4;
+/// Ce que macOS fait autrement : voir `Resizing`, `is_maximized` et `release_for_system_drag`.
+const MACOS: bool = cfg!(target_os = "macos");
+/// Plus petite fenêtre redimensionnée à la main (pixels logiques).
+const MIN_SIZE: Vec2 = Vec2::new(320.0, 240.0);
 
 const BAR: Color = Color::srgb(0.125, 0.125, 0.14);
 const HOVER: Color = Color::srgb(0.22, 0.22, 0.25);
@@ -164,12 +172,31 @@ fn click(
     }
 }
 
-fn is_maximized(window: Entity) -> bool {
+/// La réponse exacte, à garder pour un geste du joueur : sur macOS, winit remplace le style de la
+/// fenêtre le temps de répondre, ce qui peut perdre le relâchement du clic en cours.
+fn exactly_maximized(window: Entity) -> bool {
     WINIT_WINDOWS.with_borrow(|w| w.get_window(window).is_some_and(|w| w.is_maximized()))
 }
 
+/// Sûr à chaque image. macOS : voir `exactly_maximized` ; une fenêtre agrandie y prend toute la
+/// largeur de l'écran (si le Dock est sur le côté, elle passe pour une fenêtre normale).
+pub(crate) fn is_maximized(window: Entity) -> bool {
+    if !MACOS {
+        return exactly_maximized(window);
+    }
+    WINIT_WINDOWS.with_borrow(|w| w.get_window(window).is_some_and(|w| w.current_monitor().is_some_and(|monitor| w.outer_size().width >= monitor.size().width)))
+}
+
+/// macOS : le système garde le relâchement pendant qu'il déplace la fenêtre, et sans lui le clic
+/// suivant ne compte plus. On le donne au moteur nous-mêmes.
+pub(crate) fn release_for_system_drag(released: &mut MessageWriter<MouseButtonInput>, button: MouseButton, window: Entity) {
+    if MACOS {
+        released.write(MouseButtonInput { button, state: ButtonState::Released, window });
+    }
+}
+
 fn toggle_maximized(window: Entity, windows: &mut Query<&mut Window>) {
-    let maximized = is_maximized(window);
+    let maximized = exactly_maximized(window);
     if let Ok(mut w) = windows.get_mut(window) {
         w.set_maximized(!maximized);
     }
@@ -255,18 +282,83 @@ fn resize_cursor(octant: CompassOctant) -> SystemCursorIcon {
     }
 }
 
+/// Redimensionnement suivi par le moteur : la fenêtre au moment du clic et la souris depuis.
+struct Resizing {
+    window: Entity,
+    octant: CompassOctant,
+    position: Vec2,
+    size: Vec2,
+    moved: Vec2,
+}
+
+impl Resizing {
+    fn start(window: Entity, octant: CompassOctant) -> Option<Resizing> {
+        WINIT_WINDOWS.with_borrow(|w| {
+            let w = w.get_window(window)?;
+            let position = w.outer_position().ok()?;
+            let size = w.inner_size();
+            Some(Resizing { window, octant, position: Vec2::new(position.x as f32, position.y as f32), size: Vec2::new(size.width as f32, size.height as f32), moved: Vec2::ZERO })
+        })
+    }
+
+    fn apply(&self) {
+        WINIT_WINDOWS.with_borrow(|w| {
+            let Some(w) = w.get_window(self.window) else { return };
+            let scale = w.scale_factor() as f32;
+            let (position, size) = resized(self.octant, self.position, self.size, self.moved * scale, MIN_SIZE * scale);
+            let _ = w.request_inner_size(winit::dpi::PhysicalSize::new(size.x as u32, size.y as u32));
+            if position != self.position {
+                w.set_outer_position(winit::dpi::PhysicalPosition::new(position.x as i32, position.y as i32));
+            }
+        });
+    }
+}
+
+/// La fenêtre après avoir tiré ce bord de `moved` : le bord opposé ne bouge pas.
+fn resized(octant: CompassOctant, position: Vec2, size: Vec2, moved: Vec2, min: Vec2) -> (Vec2, Vec2) {
+    let (west, east) = (matches!(octant, CompassOctant::West | CompassOctant::NorthWest | CompassOctant::SouthWest), matches!(octant, CompassOctant::East | CompassOctant::NorthEast | CompassOctant::SouthEast));
+    let (north, south) = (matches!(octant, CompassOctant::North | CompassOctant::NorthWest | CompassOctant::NorthEast), matches!(octant, CompassOctant::South | CompassOctant::SouthWest | CompassOctant::SouthEast));
+    let along = |low: bool, high: bool, moved: f32, position: f32, size: f32, min: f32| {
+        if low {
+            let new = (size - moved).max(min.min(size));
+            (position + size - new, new)
+        } else if high {
+            (position, (size + moved).max(min.min(size)))
+        } else {
+            (position, size)
+        }
+    };
+    let (x, width) = along(west, east, moved.x, position.x, size.x, min.x);
+    let (y, height) = along(north, south, moved.y, position.y, size.y, min.y);
+    (Vec2::new(x, y), Vec2::new(width, height))
+}
+
 /// Déplacer par la barre, redimensionner par les bords, double-clic pour agrandir.
+#[allow(clippy::too_many_arguments)]
 fn window_chrome(
     mut commands: Commands,
     time: Res<Time<Real>>,
     buttons: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
+    motion: Res<AccumulatedMouseMotion>,
+    mut released: MessageWriter<MouseButtonInput>,
     bars: Query<&TitleBar>,
     title_buttons: Query<(&TitleButton, &Hovered)>,
     mut windows: Query<(Entity, &mut Window, Option<&CursorIcon>)>,
     mut last_click: Local<Option<(Entity, f64)>>,
+    mut resizing: Local<Option<Resizing>>,
     _main_thread: NonSendMarker,
 ) {
+    if let Some(resize) = resizing.as_mut() {
+        if buttons.pressed(MouseButton::Left) {
+            if motion.delta != Vec2::ZERO {
+                resize.moved += motion.delta;
+                resize.apply();
+            }
+            return;
+        }
+        *resizing = None;
+    }
     let windowed: Vec<Entity> = bars.iter().map(|b| b.0).collect();
     let mut toggle = None;
     for (entity, mut window, cursor_icon) in &mut windows {
@@ -289,7 +381,11 @@ fn window_chrome(
         }
         debug!("barre de titre : clic a {cursor} (bord {edge:?}, bouton {over_button})");
         if let Some(octant) = edge {
-            window.start_drag_resize(octant);
+            if MACOS {
+                *resizing = Resizing::start(entity, octant);
+            } else {
+                window.start_drag_resize(octant);
+            }
         } else if cursor.y < TITLE_H && !over_button {
             let now = time.elapsed_secs_f64();
             if matches!(*last_click, Some((e, t)) if e == entity && now - t < DOUBLE_CLICK) {
@@ -298,14 +394,16 @@ fn window_chrome(
             } else {
                 *last_click = Some((entity, now));
                 window.start_drag_move();
+                release_for_system_drag(&mut released, MouseButton::Left, entity);
             }
         }
     }
     if let Some(entity) = toggle {
-        let maximized = is_maximized(entity);
+        let maximized = exactly_maximized(entity);
         if let Ok((_, mut window, _)) = windows.get_mut(entity) {
             window.set_maximized(!maximized);
         }
+        release_for_system_drag(&mut released, MouseButton::Left, entity);
     }
 }
 
@@ -346,5 +444,18 @@ mod tests {
         assert_eq!(edge_at(Vec2::new(498.0, 400.0), size), Some(CompassOctant::East));
         assert_eq!(edge_at(Vec2::new(250.0, 797.0), size), Some(CompassOctant::South));
         assert_eq!(edge_at(Vec2::new(250.0, 400.0), size), None);
+    }
+
+    #[test]
+    fn manual_resize_keeps_the_opposite_edge() {
+        let (position, size, min) = (Vec2::new(100.0, 50.0), Vec2::new(800.0, 600.0), Vec2::new(320.0, 240.0));
+        let moved = Vec2::new(30.0, -20.0);
+        assert_eq!(resized(CompassOctant::East, position, size, moved, min), (position, Vec2::new(830.0, 600.0)));
+        assert_eq!(resized(CompassOctant::South, position, size, moved, min), (position, Vec2::new(800.0, 580.0)));
+        assert_eq!(resized(CompassOctant::NorthWest, position, size, moved, min), (Vec2::new(130.0, 30.0), Vec2::new(770.0, 620.0)));
+        // Trop petite : elle s'arrête, et le bord opposé reste à sa place
+        let (p, s) = resized(CompassOctant::West, position, size, Vec2::new(5000.0, 0.0), min);
+        assert_eq!(s.x, 320.0);
+        assert_eq!(p.x + s.x, position.x + size.x);
     }
 }

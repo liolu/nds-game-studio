@@ -1,0 +1,15 @@
+[package]
+name = "nds-mod-tools"
+version.workspace = true
+edition.workspace = true
+description = "Exporte les fichiers d'un jeu DS vers PNG, OBJ, WAV, MP3, MP4, TXT, les reimporte et fabrique une copie modifiee de la rom sans toucher a l'originale"
+license = "LGPL-2.1-or-later"
+
+[dependencies]
+cgmath = "0.18"
+encoding_rs = "0.8"
+image = { version = "0.25", default-features = false, features = ["png"] }
+nds-nitro = { path = "../../crates/nitro" }
+nds-video = { path = "../../crates/video" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
