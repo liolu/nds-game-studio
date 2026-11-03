@@ -27,6 +27,7 @@ pub mod primitives;
 pub mod adx;
 pub mod g2d;
 pub mod gx_mesh;
+pub mod hom;
 pub mod model3d;
 pub mod narc;
 pub mod nitrofs;
@@ -110,6 +111,10 @@ pub enum Kind {
     PaletteTiles,
     /// Image 2D de `rom.bin` (moteur Amaze) : palette, carte et tuiles.
     RomImage,
+    /// Sprite de `rom.bin` (Les Sims 2) : ses OBJ, une ou plusieurs images ; tuiles et palette dans les fichiers voisins.
+    RomSprite,
+    /// Image 8 bpp de `rom.bin` (Les Sims 2), sa palette dedans ou au fichier d'avant.
+    RomBitmap,
     /// Fichier `.z` (Tom and Jerry) : image, écran ou texture une fois décompressé.
     ZImage,
     /// Animation `.anm` : un résumé, elle n'est pas jouée.
@@ -126,6 +131,29 @@ pub enum Kind {
     RawScreen,
     /// Script compilé (SB, DCPB) : montré en texte et en octets.
     Script,
+    /// Sprite de Heroes of Mana fait de six blocs (`hom::read_shape`) : joué comme une animation.
+    HomSprite,
+    /// Textures d'un modèle 3D de Heroes of Mana (`model00.bin`...) ; la géométrie n'est pas lue.
+    HomModelTextures,
+    /// Planche de Heroes of Mana : palette de 256 couleurs puis tuiles 4 bpp ; les fonds et sprites de la fin ne sont
+    /// pas assemblés.
+    HomSheet,
+    /// Tuiles 4 bpp dont la palette est le premier morceau de la même table (`ending.dat` de Heroes of Mana).
+    SiblingPaletteTiles,
+    /// Script d'événement de Heroes of Mana (`event/*.bin`) : ses commandes en mots de 32 bits.
+    EventScript,
+    /// Animation 3D maison (`modelanim01.bin`) : ses valeurs, elle n'est pas jouée.
+    HouseModelAnim,
+    /// Fichiers qui en contiennent d'autres, montrés par la liste de ce qu'ils contiennent : table de positions au début
+    /// (`.dat`, `.bin`), archive `sar `, table `.mat` (position, taille), fichier avec son propre NitroFS.
+    TableArchive,
+    SarArchive,
+    OffsetTable,
+    EmbeddedFs,
+    /// Emplacement vide d'une table (quelques octets à zéro).
+    EmptySlot,
+    /// Données d'un moteur maison sans image ni son (objets, niveaux, tables de `rom.bin`) : leur structure en texte.
+    GameData,
     /// Autres fichiers Nitro 3D sans rien à montrer (BTP0, BTA0...).
     Nitro3dOther,
     /// Autre fichier Nitro 2D (NANR, NMCR...).
@@ -160,7 +188,8 @@ impl Kind {
             Kind::PlainText => "texte",
             Kind::Texel | Kind::TextureRef | Kind::RawTexture | Kind::BsTexture => "texture",
             Kind::EngineGeometry | Kind::EngineMesh => "modele 3D",
-            Kind::Bitmap | Kind::ZImage | Kind::RomImage => "image",
+            Kind::Bitmap | Kind::ZImage | Kind::RomImage | Kind::RomBitmap => "image",
+            Kind::RomSprite => "sprite",
             Kind::PaletteTiles => "tuiles",
             Kind::AnmFile => "animation 2D",
             Kind::ZipFile => "archive",
@@ -172,7 +201,15 @@ impl Kind {
             Kind::RawTiles => "tuiles",
             Kind::RawPalette => "palette",
             Kind::RawScreen => "ecran",
-            Kind::Script => "script",
+            Kind::Script | Kind::EventScript => "script",
+            Kind::HomSprite => "sprite",
+            Kind::HomModelTextures => "textures 3D",
+            Kind::HomSheet | Kind::SiblingPaletteTiles => "tuiles",
+            Kind::HouseModelAnim => "animation 3D",
+            Kind::TableArchive | Kind::SarArchive | Kind::EmbeddedFs => "archive",
+            Kind::OffsetTable => "table",
+            Kind::EmptySlot => "vide",
+            Kind::GameData => "donnees",
             Kind::Nitro3dOther => "3D (anim)",
             Kind::Nitro2dOther => "2D (anim)",
             Kind::Other => "",
@@ -180,7 +217,7 @@ impl Kind {
     }
 
     pub fn viewable(self) -> bool {
-        matches!(self, Kind::Model | Kind::Textures | Kind::Palette | Kind::Tiles | Kind::Screen | Kind::Cells | Kind::ModelAnim | Kind::CellAnim | Kind::JCells | Kind::JLayout | Kind::Audio | Kind::AudioBank | Kind::Font | Kind::Messages | Kind::PaletteTiles | Kind::RomImage | Kind::ZImage | Kind::AnmFile | Kind::EngineGeometry | Kind::EngineMesh | Kind::RawTexture | Kind::BsTexture | Kind::Bitmap | Kind::ZipFile | Kind::Video | Kind::Texel | Kind::TextureRef | Kind::EngineBitmap | Kind::PlainText | Kind::Compressed | Kind::NestedRom | Kind::RawTiles | Kind::RawPalette | Kind::RawScreen | Kind::Script | Kind::Sequence | Kind::SequenceArchive | Kind::Instruments | Kind::SoundArchive | Kind::NitroArchive | Kind::RelocModule | Kind::TileFont | Kind::LzSprites)
+        matches!(self, Kind::Model | Kind::Textures | Kind::Palette | Kind::Tiles | Kind::Screen | Kind::Cells | Kind::ModelAnim | Kind::CellAnim | Kind::JCells | Kind::JLayout | Kind::Audio | Kind::AudioBank | Kind::Font | Kind::Messages | Kind::PaletteTiles | Kind::RomImage | Kind::ZImage | Kind::AnmFile | Kind::EngineGeometry | Kind::EngineMesh | Kind::RawTexture | Kind::BsTexture | Kind::Bitmap | Kind::ZipFile | Kind::Video | Kind::Texel | Kind::TextureRef | Kind::EngineBitmap | Kind::PlainText | Kind::Compressed | Kind::NestedRom | Kind::RawTiles | Kind::RawPalette | Kind::RawScreen | Kind::Script | Kind::Sequence | Kind::SequenceArchive | Kind::Instruments | Kind::SoundArchive | Kind::HomSprite | Kind::HomModelTextures | Kind::HomSheet | Kind::SiblingPaletteTiles | Kind::EventScript | Kind::HouseModelAnim | Kind::TableArchive | Kind::SarArchive | Kind::OffsetTable | Kind::EmbeddedFs | Kind::EmptySlot | Kind::GameData | Kind::Nitro3dOther | Kind::RomSprite | Kind::RomBitmap | Kind::NitroArchive | Kind::RelocModule | Kind::TileFont | Kind::LzSprites)
     }
 }
 

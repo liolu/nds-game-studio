@@ -23,7 +23,24 @@ fn u32_at(b: &[u8], off: usize) -> Option<usize> {
 
 /// Les fichiers de la rom, triés par chemin (sans tenir compte de la casse).
 pub fn read(rom: &[u8]) -> Result<Vec<File>> {
-    let (Some(fnt_at), Some(fnt_size), Some(fat_at), Some(fat_size)) = (u32_at(rom, 0x40), u32_at(rom, 0x44), u32_at(rom, 0x48), u32_at(rom, 0x4C)) else { bail!("en-tete de rom trop court") };
+    read_tables(rom, 0x40)
+}
+
+/// Un fichier qui commence par sa propre table des noms puis sa table des positions (`dwc/utility.bin` de Heroes of
+/// Mana) : ses fichiers, positions comptées depuis son début. Vide si ce n'est pas un tel fichier.
+pub fn read_embedded(file: &[u8]) -> Vec<File> {
+    let (Some(fnt_at), Some(fnt_size), Some(fat_at)) = (u32_at(file, 0), u32_at(file, 4), u32_at(file, 8)) else { return Vec::new() };
+    // Les tables suivent l'en-tête de 16 octets, la seconde à peine plus loin que la fin de la première
+    if fnt_at != 16 || fat_at < fnt_at + fnt_size || fat_at - (fnt_at + fnt_size) >= 32 {
+        return Vec::new();
+    }
+    let files = read_tables(file, 0).unwrap_or_default();
+    if files.iter().any(|f| f.path.chars().any(|c| c.is_control() || c == char::REPLACEMENT_CHARACTER)) { Vec::new() } else { files }
+}
+
+fn read_tables(rom: &[u8], header_at: usize) -> Result<Vec<File>> {
+    let at = |i: usize| u32_at(rom, header_at + i * 4);
+    let (Some(fnt_at), Some(fnt_size), Some(fat_at), Some(fat_size)) = (at(0), at(1), at(2), at(3)) else { bail!("en-tete de rom trop court") };
     let (Some(fnt), Some(fat)) = (rom.get(fnt_at..fnt_at + fnt_size), rom.get(fat_at..fat_at + fat_size)) else { bail!("tables NitroFS hors de la rom") };
     let mut files = Vec::new();
     walk(rom, fnt, fat, 0, "", &mut files, 0);

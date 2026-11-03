@@ -49,6 +49,7 @@ fn block<'a>(file: &'a [u8], names: &[&[u8; 4]]) -> Result<&'a [u8]> {
 //  Palettes
 // --------------------------------------------------------------------------------------------
 
+#[derive(Clone)]
 pub struct Palette {
     pub colors: Vec<[u8; 4]>,
 }
@@ -320,20 +321,33 @@ pub struct RomImage {
 /// u16 : palette (bits 0-1 : 1 = 256 couleurs, 2 = 16), sorte (bits 2-4 : 6 = carte + tuiles), copie des tuiles
 /// (bits 5-6 : 0 telles quelles, 3 codeur du jeu). Puis la palette, largeur et hauteur en tuiles (u16), la carte (u16,
 /// alignée sur 4 octets), la taille des tuiles (u16) et les tuiles. Sans signature : les tuiles doivent aller
-/// exactement jusqu'à la plus haute tuile de la carte, sinon `None`.
+/// exactement jusqu'à la plus haute tuile de la carte, sinon `None`. Avec 256 couleurs, les tuiles peuvent être en
+/// 4 bpp (32 octets) : le groupe de 16 couleurs est alors celui de la carte (Les Sims 2). Palette 0 : pas de palette dans
+/// le fichier, elle est dans un autre (`palette`, du gris sans elle).
 pub fn read_rom_image(file: &[u8]) -> Option<RomImage> {
+    read_rom_image_with(file, None)
+}
+
+/// L'image n'a pas sa palette dedans (`read_rom_image`).
+pub fn rom_image_needs_palette(file: &[u8]) -> bool {
+    file.first().is_some_and(|b| b & 3 == 0)
+}
+
+pub fn read_rom_image_with(file: &[u8], outside: Option<&Palette>) -> Option<RomImage> {
     /// N° de tuile sur 10 bits, 64 octets par tuile au plus.
     const MOST_TILE_BYTES: usize = 1024 * 64;
     let head = u16::from_le_bytes([*file.first()?, *file.get(1)?]);
-    let (colors_size, bpp8) = match head & 3 {
-        1 => (0x200, true),
-        2 => (0x20, false),
+    let colors_size = match head & 3 {
+        0 => 0,
+        1 => 0x200,
+        2 => 0x20,
         _ => return None,
     };
     if head >> 2 & 7 != 6 {
         return None;
     }
-    let palette = raw_palette(file.get(2..2 + colors_size)?);
+    let grey = Palette { colors: (0..256).map(|i| { let v = (i % 16 * 17) as u8; [v, v, v, 255] }).collect() };
+    let palette = if colors_size > 0 { raw_palette(file.get(2..2 + colors_size)?) } else { outside.cloned().unwrap_or(grey) };
     let u16_at = |at: usize| file.get(at..at + 2).map(|b| u16::from_le_bytes([b[0], b[1]]) as usize);
     let (size_at, map_at) = (2 + colors_size, 6 + colors_size);
     let (width, height) = (u16_at(size_at)?, u16_at(size_at + 2)?);
@@ -354,9 +368,13 @@ pub fn read_rom_image(file: &[u8]) -> Option<RomImage> {
         }
         _ => return None,
     };
-    let tile_bytes = if bpp8 { 64 } else { 32 };
     let highest = entries.iter().map(|e| (e & 0x3FF) as usize).max()?;
-    if data.len() != (highest + 1) * tile_bytes {
+    let bpp8 = match data.len() / (highest + 1) {
+        64 if colors_size != 0x20 => true,
+        32 => false,
+        _ => return None,
+    };
+    if data.len() % (highest + 1) != 0 {
         return None;
     }
     let pixels = if bpp8 { data } else { data.iter().flat_map(|b| [b & 15, b >> 4]).collect() };
@@ -366,7 +384,8 @@ pub fn read_rom_image(file: &[u8]) -> Option<RomImage> {
     for (i, &e) in entries.iter().enumerate() {
         let (x, y) = ((i % width) as i64 * 8, (i / width) as i64 * 8);
         // Une seule palette de 16 couleurs dans le fichier : le groupe de la carte vaut pour la mémoire de la console
-        draw_tile(&mut rgba, &tiles, (e & 0x3FF) as usize, &palette, 0, x, y, e & 0x400 != 0, e & 0x800 != 0);
+        let bank = if palette.colors.len() > 16 && !bpp8 { (e >> 12) as usize } else { 0 };
+        draw_tile(&mut rgba, &tiles, (e & 0x3FF) as usize, &palette, bank, x, y, e & 0x400 != 0, e & 0x800 != 0);
     }
     Some(RomImage { rgba, bpp8 })
 }
@@ -477,6 +496,123 @@ pub fn render_cell(cells: &Cells, index: usize, tiles: &Tiles, palette: &Palette
         }
     }
     out
+}
+
+/// Un sprite de `rom.bin` des Sims 2 : ses tuiles 4 bpp sont le fichier d'avant, sa palette celui d'après.
+pub struct RomSprite {
+    pub width: u32,
+    pub height: u32,
+    /// Taille des tuiles d'une image, en octets.
+    pub tile_bytes: usize,
+    pub frames: Vec<RomSpriteFrame>,
+}
+
+pub struct RomSpriteFrame {
+    /// Position de l'OBJ en haut à gauche, par rapport au point d'accroche du sprite.
+    pub origin: (i32, i32),
+    pub objs: Vec<Obj>,
+    /// Début des tuiles de l'image dans un fichier de tuiles codé (`read_rom_tiles`).
+    pub packed_at: usize,
+}
+
+/// u8 largeur, u8 hauteur, 4 octets à 0, u16 images, u32 taille des tuiles d'une image, puis la position de chaque image
+/// (u16, depuis l'octet 12). Une image : u16 OBJ (bit 7 : drapeau), u8 largeur et hauteur, u16 début de ses tuiles codées,
+/// s16 x et y de l'origine, et un u32 par OBJ : x sur 9 bits, y sur 7, taille (bits 18-19) et forme (bits 20-21) de la
+/// DS, n° de tuile de 32 octets (bits 22-31). Sans signature : le fichier doit finir avec la dernière image.
+pub fn read_rom_sprite(file: &[u8]) -> Option<RomSprite> {
+    const MOST_FRAMES: usize = 256;
+    let (width, height) = (*file.first()? as u32, *file.get(1)? as u32);
+    let count = u16_at(file, 6).ok()? as usize;
+    if width == 0 || height == 0 || file.get(2..6)? != [0; 4] || !(1..=MOST_FRAMES).contains(&count) {
+        return None;
+    }
+    let tile_bytes = u32_at(file, 8).ok()? as usize;
+    let mut frames = Vec::with_capacity(count);
+    let mut end = 12 + count * 2;
+    for f in 0..count {
+        let at = 12 + u16_at(file, 12 + f * 2).ok()? as usize;
+        let objs = (u16_at(file, at).ok()? & 0x7F) as usize;
+        if at != end || objs == 0 {
+            return None;
+        }
+        let packed_at = u16_at(file, at + 4).ok()? as usize;
+        let origin = (u16_at(file, at + 6).ok()? as i16 as i32, u16_at(file, at + 8).ok()? as i16 as i32);
+        let objs = (0..objs)
+            .map(|i| {
+                let v = u32_at(file, at + 10 + i * 4).ok()?;
+                let (width, height) = OBJ_SIZES.get((v >> 20 & 3) as usize)?[(v >> 18 & 3) as usize];
+                Some(Obj { x: ((v & 0x1FF) as i32) << 23 >> 23, y: ((v >> 9 & 0x7F) as i32) << 25 >> 25, width, height, tile: v >> 22, bank: 0, hflip: false, vflip: false, bpp8: false })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        // Les OBJ doivent tenir dans les tuiles
+        if objs.iter().any(|o| (o.tile + o.width * o.height / 64) as usize * 32 > tile_bytes) {
+            return None;
+        }
+        end = at + 10 + objs.len() * 4;
+        frames.push(RomSpriteFrame { origin, objs, packed_at });
+    }
+    (end == file.len()).then_some(RomSprite { width, height, tile_bytes, frames })
+}
+
+/// Tuiles codées par le codeur du jeu : u16 sorte (0x60 dans l'octet du bas), u16, puis un flux par image du sprite.
+/// `None` si ce n'en est pas.
+pub fn read_rom_tiles(file: &[u8], packed_at: usize, size: usize) -> Option<Vec<u8>> {
+    if *file.first()? != 0x60 {
+        return None;
+    }
+    let mut blob = vec![0; 4];
+    blob.extend_from_slice(file.get(4 + packed_at..)?);
+    crate::romarc::own_coder_up_to(&blob, size).filter(|t| !t.is_empty() && t.len() % 32 == 0)
+}
+
+/// Les tuiles de l'image `frame` : brutes (une image à la suite de l'autre) ou codées.
+pub fn rom_sprite_tiles(sprite: &RomSprite, frame: usize, tiles: &[u8]) -> Option<Vec<u8>> {
+    let size = sprite.tile_bytes;
+    if tiles.len() >= size * sprite.frames.len() && tiles.len() % size.max(1) == 0 {
+        return tiles.get(frame * size..(frame + 1) * size).map(<[u8]>::to_vec);
+    }
+    read_rom_tiles(tiles, sprite.frames.get(frame)?.packed_at, size)
+}
+
+/// Une image du sprite dans son cadre (largeur x hauteur), le premier OBJ dessus.
+pub fn render_rom_sprite(sprite: &RomSprite, frame: usize, tiles: &[u8], palette: &Palette) -> Rgba {
+    let mut out = Rgba { width: sprite.width, height: sprite.height, data: vec![0; (sprite.width * sprite.height * 4) as usize] };
+    let Some(f) = sprite.frames.get(frame) else { return out };
+    for obj in f.objs.iter().rev() {
+        let across = obj.width / 8;
+        for t in 0..across * (obj.height / 8) {
+            let at = (obj.tile + t) as usize * 32;
+            let Some(tile) = tiles.get(at..at + 32) else { continue };
+            let (tx, ty) = ((obj.x - f.origin.0) as i64 + (t % across) as i64 * 8, (obj.y - f.origin.1) as i64 + (t / across) as i64 * 8);
+            for (i, byte) in tile.iter().enumerate() {
+                let (x, y) = (tx + (i % 4) as i64 * 2, ty + (i / 4) as i64);
+                put(&mut out, x, y, palette.color(0, byte & 15, false));
+                put(&mut out, x + 1, y, palette.color(0, byte >> 4, false));
+            }
+        }
+    }
+    out
+}
+
+/// Image 8 bpp de `rom.bin` des Sims 2, sans signature : u16 largeur, u16 hauteur, u16 4, 6 octets, puis les pixels (sa
+/// palette est le fichier d'avant) ; ou la palette de 256 couleurs suivie des pixels d'un carré (textures). `true` si la
+/// palette est dedans.
+pub fn rom_bitmap_shape(file: &[u8]) -> Option<(u32, u32, bool)> {
+    let (w, h) = (u16_at(file, 0).ok()? as usize, u16_at(file, 2).ok()? as usize);
+    if (8..=256).contains(&w) && (8..=256).contains(&h) && u16_at(file, 4).ok()? == 4 && file.len() == 12 + w * h {
+        return Some((w as u32, h as u32, false));
+    }
+    let side = [16usize, 32, 64, 128].into_iter().find(|s| file.len() == 512 + s * s)?;
+    Some((side as u32, side as u32, true))
+}
+
+pub fn render_rom_bitmap(file: &[u8], palette: Option<&Palette>) -> Option<Rgba> {
+    let (w, h, own) = rom_bitmap_shape(file)?;
+    let own_palette = own.then(|| raw_palette(&file[..512]));
+    let palette = own_palette.as_ref().or(palette)?;
+    let pixels = &file[file.len() - (w * h) as usize..];
+    let data = pixels.iter().flat_map(|&p| palette.color(0, p, true)).collect();
+    Some(Rgba { width: w, height: h, data })
 }
 
 // --------------------------------------------------------------------------------------------
