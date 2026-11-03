@@ -68,6 +68,34 @@ def rom_images(rom_path, build_info_offset):
     return images, entry
 
 
+def rom_overlays(rom_path):
+    """Les overlays de l'ARM9 d'apres la rom, decompresses : numero -> (adresse, octets)."""
+    with open(rom_path, "rb") as f:
+        rom = f.read()
+    fat, table, size = struct.unpack_from("<I", rom, 0x48)[0], *struct.unpack_from("<II", rom, 0x50)
+    out = {}
+    for at in range(table, table + size, 32):
+        num, ram, _size, _bss, _ctor, _ctor_end, file_id, packed = struct.unpack_from("<8I", rom, at)
+        start, end = struct.unpack_from("<II", rom, fat + file_id * 8)
+        raw = rom[start:end]
+        if packed >> 24 & 1:
+            raw = blz_uncompress(raw, ram, ram + (packed & 0xFFFFFF))
+        out[num] = (ram, raw)
+    return out
+
+
+def read_memory(game, addr, n):
+    """Le code d'un overlay passe avant les modules : ses adresses peuvent etre aussi celles des donnees d'un autre."""
+    for num, start, end in game.overlays:
+        if start <= addr < end:
+            base, raw = game.overlay_images[num]
+            return raw[addr - base : addr - base + n]
+    for base, raw in game.image.values():
+        if base <= addr < base + len(raw):
+            return raw[addr - base : addr - base + n]
+    return None
+
+
 def default_name(addr):
     return "func_%08x" % addr
 
@@ -81,7 +109,7 @@ def export(game, code, sha1, path):
     known = set(game.functions)
     loads = sorted([frm, to & ~1] for frm, (kind, to) in game.relocs.items() if kind == "load" and (to & ~1) in known)
     data = {n: a for n, a in game.data.items() if not re.match(r"(data|lbl|func|sub|unk)_", n)}
-    recipe = {"code": code, "sha1": sha1, "build_info": game.build_info, "functions": functions, "loads": loads, "data": data}
+    recipe = {"code": code, "sha1": sha1, "build_info": game.build_info, "functions": functions, "loads": loads, "data": data, "overlays": game.overlays}
     # sans date dans le fichier : une recette identique ne change pas dans git
     with open(path, "wb") as raw, gzip.GzipFile(filename="", fileobj=raw, mode="wb", compresslevel=9, mtime=0) as z:
         z.write(json.dumps(recipe, separators=(",", ":")).encode("utf8"))
@@ -103,9 +131,8 @@ class RecipeGame:
         self.units = []
         self.build_info = r["build_info"]
         self.image, self.entry = rom_images(rom_path, self.build_info)
+        self.overlays = [tuple(o) for o in r.get("overlays", [])]
+        self.overlay_images = rom_overlays(rom_path) if self.overlays else {}
 
     def memory(self, addr, n):
-        for base, raw in self.image.values():
-            if base <= addr < base + len(raw):
-                return raw[addr - base : addr - base + n]
-        return None
+        return read_memory(self, addr, n)

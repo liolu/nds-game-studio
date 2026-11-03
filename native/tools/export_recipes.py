@@ -17,9 +17,9 @@ import native_build
 import recipe
 
 GAMES = HERE.parent / "games"
-PLAYABLE = {"AJTP", "AR5E", "AL7E"}
+PLAYABLE = {"AJTP", "AR5E", "AL7E", "APDE"}
 # A augmenter quand le runtime, le traducteur ou les recettes changent : le launcher retelecharge et regenere.
-TOOLCHAIN = 13
+TOOLCHAIN = 14
 
 
 def game_state(project, version, game):
@@ -90,6 +90,8 @@ def main():
             continue
         try:
             game = native_build.Game(project, version)
+            if not native_build.game_patches(code).get("overlays"):
+                game.overlays = []
             recipe.export(game, code, recipe.rom_sha1(rom), GAMES / (code + ".json.gz"))
         except Exception as e:
             print(code, project.name, "echec :", e)

@@ -51,7 +51,11 @@ int io_irq_ready(void) {
     return (REG32(IO + 0x210) & if_state) != 0;
 }
 
+extern const u32 nds_old_sdk;
+
 /* ------------------------------------------------------------------ DMA */
+static u8 dma_on[4]; /* nds_old_sdk : une copie immediate part quand le canal s'active, pas a chaque ecriture de son controle */
+
 static void dma_run(int i) {
     u32 base = IO + 0xB0 + i * 12;
     u32 src = REG32(base), dst = REG32(base + 4), cnt = REG32(base + 8);
@@ -82,6 +86,7 @@ static void dma_run(int i) {
     if (((cnt >> 21) & 3) != 3) REG32(base + 4) = dst;
     REG32(base) = src;
     if (!((cnt >> 25) & 1) || mode == 0 || mode == 7) REG32(base + 8) = cnt & 0x7FFFFFFFu;
+    dma_on[i] = REG32(base + 8) >> 31;
     if (cnt & (1u << 30)) io_raise(1u << (8 + i));
 }
 
@@ -173,9 +178,13 @@ void io_wait_irq(void) {
 
 /* donnees du SDK dans la memoire DS */
 typedef struct { u16 need; u16 depth; u32 current; u32 list; u32 cb; } ThreadInfo;
+/* SDK des premiers jeux (nds_old_sdk) : current et list un mot plus loin, file des fils en attente = masque de leurs numeros */
+typedef struct { u16 need; u16 depth; u32 unknown; u32 current; u32 list; u32 cb; } OldThreadInfo;
 GAME_SYM(OSi_ThreadInfo);
 GAME_SYM(OSi_IrqThreadQueue);
 #define thread_info ((ThreadInfo *)DS(GAME_ADDR(OSi_ThreadInfo)))
+#define old_thread_info ((OldThreadInfo *)DS(GAME_ADDR(OSi_ThreadInfo)))
+#define thread_current (*(nds_old_sdk ? &old_thread_info->current : &thread_info->current))
 #define irq_queue ((u32 *)DS(GAME_ADDR(OSi_IrqThreadQueue))) /* [2] */
 extern u64 GAME_FN(OS_SelectThread)();
 extern u64 OS_SaveContext();
@@ -195,7 +204,7 @@ void irq_deliver(void) {
     OPEN();
     while (!in_irq && !(nds_cpsr & 0x80) && (REG32(IO + 0x208) & 1) && (REG32(IO + 0x210) & if_state)) {
         u32 saved = nds_cpsr;
-        u32 handler = *(u32 *)DS(0x027E3FFCu); /* gestionnaire du SDK, ecrit par le jeu */
+        u32 handler = *(u32 *)DS(nds_dtcm_base() + 0x3FFCu); /* gestionnaire du SDK, ecrit par le jeu */
         if (!handler) break;
         Fn vec = (Fn)nds_call_target(handler);
         in_irq = 1;
@@ -203,12 +212,27 @@ void irq_deliver(void) {
         REG32(IO + 0x214) = if_state;
         CLOSE();
         net_irq();
+        /* NDS_EH : la pile ARM du fil interrompu est en cours d'usage, l'interruption a la sienne comme sur le DS */
+        u32 saved_sp = nds_sp, saved_lr = nds_lr;
+        nds_sp = nds_dtcm_base() + 0x3F80u;
         vec(0, 0, 0, 0);
+        nds_sp = saved_sp;
+        nds_lr = saved_lr;
         OPEN();
         nds_cpsr = saved;
         in_irq = 0;
         /* comme OS_IrqHandler_ThreadSwitch : reveiller ceux qui attendaient une interruption */
-        if (irq_queue[0]) {
+        if (nds_old_sdk) {
+            u16 mask = *(u16 *)irq_queue;
+            if (mask) {
+                *(u16 *)irq_queue = 0;
+                for (u32 t = old_thread_info->list; t; t = ((u32 *)DS(t))[0x68 / 4]) {
+                    u32 *th = (u32 *)DS(t);
+                    if (mask >> th[0x6C / 4] & 1) th[0x64 / 4] = 1;
+                }
+                thread_info->need = 1;
+            }
+        } else if (irq_queue[0]) {
             u32 t = irq_queue[0];
             while (t) {
                 u32 *th = (u32 *)DS(t);
@@ -224,12 +248,12 @@ void irq_deliver(void) {
         }
         if (thread_info->need) {
             thread_info->need = 0;
-            u32 cur = thread_info->current;
+            u32 cur = thread_current;
             u32 next = (u32)GAME_FN(OS_SelectThread)();
             if (cur && next && cur != next) {
                 CLOSE();
                 if ((u32)OS_SaveContext(cur) == 0) {
-                    thread_info->current = next;
+                    thread_current = next;
                     OS_LoadContext(next);
                 }
                 OPEN();
@@ -334,6 +358,25 @@ static void sqrt_unit(void) {
     REG32(IO + 0x2B0) = cnt & ~0x8000u;
 }
 
+/* Pilote de carte propre au jeu (Pokemon Dash) : commande 0xB7 sur le bus, mots recus par un DMA en mode carte, interruption a la fin */
+static int card_rom_read(void) {
+    if (!nds_old_sdk || REG8(IO + 0x1A8) != 0xB7) return 0;
+    int channel = -1;
+    for (int i = 0; i < 4 && channel < 0; i++) {
+        u32 cnt = REG32(IO + 0xB8 + i * 12);
+        if ((cnt >> 31) && ((cnt >> 27) & 7) == 5) channel = i;
+    }
+    if (channel < 0) return 0;
+    u32 pos = (u32)REG8(IO + 0x1A9) << 24 | (u32)REG8(IO + 0x1AA) << 16 | (u32)REG8(IO + 0x1AB) << 8 | REG8(IO + 0x1AC);
+    u32 blocks = (REG32(IO + 0x1A4) >> 24) & 7;
+    u32 size = blocks == 7 ? 4 : blocks ? 0x100u << blocks : 0;
+    if (pos + size > nds_rom_size) nds_fatal("lecture de carte hors de la rom : %x + %x", pos, size);
+    nds_copy(DS(REG32(IO + 0xB4 + channel * 12)), nds_rom + pos, size);
+    REG32(IO + 0x1A4) &= 0x7F7FFFFFu;
+    if (REG8(IO + 0x1A1) & 0x40) io_raise(1u << 19);
+    return 1;
+}
+
 void io_after_write(u32 addr) {
     nds_in_veh = 1;
     u32 r = addr - IO;
@@ -341,9 +384,11 @@ void io_after_write(u32 addr) {
     if (r >= 0xB0 && r < 0xE0) {
         int i = (r - 0xB0) / 12;
         u32 cnt = REG32(IO + 0xB8 + i * 12);
-        if ((r - 0xB0) % 12 >= 8 && (cnt >> 31)) {
+        if ((r - 0xB0) % 12 >= 8) {
             u32 mode = (cnt >> 27) & 7;
-            if (mode == 0 || mode == 7) dma_run(i);
+            int started = (cnt >> 31) && (!dma_on[i] || !nds_old_sdk);
+            dma_on[i] = cnt >> 31;
+            if (started && (mode == 0 || mode == 7)) dma_run(i);
         }
     } else if (r >= 0x100 && r < 0x110) {
         int i = (r - 0x100) / 4;
@@ -362,8 +407,8 @@ void io_after_write(u32 addr) {
         if (REG32(IO + 0x184) & 8) fifo_r = fifo_w;
         REG32(IO + 0x184) &= ~0x4008u; /* bits d'action, pas d'etat */
     } else if (word == 0x1A4) {
-        /* commande de carte : pret tout de suite, le seul mot lu ainsi est l'identifiant de la rom */
-        if (REG32(IO + 0x1A4) >> 31) {
+        /* commande de carte : pret tout de suite. Sans DMA, le seul mot lu ainsi est l'identifiant de la rom */
+        if (REG32(IO + 0x1A4) >> 31 && !card_rom_read()) {
             REG32(IO + 0x1A4) = (REG32(IO + 0x1A4) & 0x7FFFFFFFu) | (1u << 23);
             REG32(0x04100010u) = 0x00000FC2u;
         }

@@ -11,6 +11,7 @@ import re
 
 from capstone import CS_ARCH_ARM, CS_MODE_ARM, CS_MODE_THUMB, Cs
 from capstone.arm import (
+    ARM_INS_BL, ARM_INS_BLX,
     ARM_CC_AL, ARM_CC_LO as ARM_CC_CC, ARM_CC_HS as ARM_CC_CS, ARM_CC_EQ, ARM_CC_GE, ARM_CC_GT, ARM_CC_HI, ARM_CC_LE,
     ARM_CC_LS, ARM_CC_LT, ARM_CC_MI, ARM_CC_NE, ARM_CC_PL, ARM_CC_VC, ARM_CC_VS, ARM_OP_IMM, ARM_OP_MEM, ARM_OP_REG,
     ARM_OP_CIMM, ARM_OP_PIMM,
@@ -90,7 +91,14 @@ static inline s32 SAT32(s64 v) { return v > 0x7FFFFFFFLL ? 0x7FFFFFFF : v < -0x8
     v = ((~(_a ^ _b) & (_a ^ res)) >> 31); n = res >> 31; z = res == 0; } while (0)
 #define SUBF(a, b, ci) ADDF((a), ~(u32)(b), (ci))
 #define NZ(x) (n = (u32)(x) >> 31, z = (u32)(x) == 0)
+#ifdef NDS_EH
+/* exceptions C++ (arm2c.Lifter.eh_end_catch) : pile ARM continue, vraies adresses de retour et registres r4-r11 de l'appelant, le derouleur du jeu les lit */
+extern u32 nds_sp, nds_lr, nds_cs[8], nds_eh_regs[11]; extern u64 nds_eh_resume();
+u32 nds_eh_enter(u32 func, u32 size, u32 sp); void nds_eh_leave(u32 key); u32 nds_eh_save(u32 key) __attribute__((returns_twice));
+#define CALLF(f) do { nds_sp = sp; nds_lr = lr; nds_cs[0] = r4; nds_cs[1] = r5; nds_cs[2] = r6; nds_cs[3] = r7; nds_cs[4] = r8; nds_cs[5] = r9; nds_cs[6] = r10; nds_cs[7] = r11; u64 _t = ((u64 (*)())(f))(r0, r1, r2, r3); r0 = (u32)_t; r1 = (u32)(_t >> 32); } while (0)
+#else
 #define CALLF(f) do { u64 _t = ((u64 (*)())(f))(r0, r1, r2, r3, @STACK@); r0 = (u32)_t; r1 = (u32)(_t >> 32); } while (0)
+#endif
 """
 PRELUDE = PRELUDE.replace("@STACK@", ", ".join("P32(sp + %d)" % (4 * k) for k in range(STACK_ARGS)))
 
@@ -120,6 +128,7 @@ class Lifter:
         self.gosub_funcs = set()  # fonctions avec des sous-routines internes (bl dans la fonction, registres partages)
         self.sizes = {}
         self.debug_pc = False
+        self.eh_end_catch = None  # adresse de __end_catch : le jeu lance de vraies exceptions C++ (NDS_EH du PRELUDE)
 
     def decode(self, addr, thumb):
         raw = self.memory(addr, 8)
@@ -603,32 +612,41 @@ class Lifter:
         seen_order = []
         work = [entry]
         pending_next = {}
+        pads = []
         while work:
-            pc = work.pop()
-            self.recent = []
-            self.prev_set_lr = False
-            while pc not in out:
-                if pc != entry and self.is_entry(pc):
-                    out[pc] = ("CALLF(%s); %s" % (self.call_name(pc), RET), None, 0)
-                    break
-                ins = self.decode(pc, thumb)
-                if ins is None:
-                    out[pc] = ('nds_unhandled(__func__, 0x%x);' % pc, None, 2)
-                    break
-                before = set(labels)
-                text, ends = self.emit(ins, labels)
-                if self.debug_pc:
-                    text = "nds_pc = 0x%x; nds_r[0]=r0; nds_r[1]=r1; nds_r[2]=r2; nds_r[3]=r3; nds_r[4]=r4; nds_r[5]=r5; %s" % (pc, text)
-                out[pc] = (text, pc + ins.size, ins.size)
-                self.prev_set_lr = ins.mnemonic.startswith("mov") and ins.op_str.startswith("lr, pc")
-                self.recent.append(ins)
-                work.extend(labels - before)
-                if self.extra_starts:
-                    work.extend(self.extra_starts)
-                    self.extra_starts = []
-                if ends:
-                    break
-                pc += ins.size
+            while work:
+                pc = work.pop()
+                self.recent = []
+                self.prev_set_lr = False
+                while pc not in out:
+                    if pc != entry and self.is_entry(pc):
+                        out[pc] = ("CALLF(%s); %s" % (self.call_name(pc), RET), None, 0)
+                        break
+                    ins = self.decode(pc, thumb)
+                    if ins is None:
+                        out[pc] = ('nds_unhandled(__func__, 0x%x);' % pc, None, 2)
+                        break
+                    before = set(labels)
+                    text, ends = self.emit(ins, labels)
+                    if self.eh_end_catch is not None and ins.id in (ARM_INS_BL, ARM_INS_BLX):
+                        text = text.replace("CALLF(", "lr=0x%xu;CALLF(" % (pc + ins.size))
+                    if self.debug_pc:
+                        text = "nds_pc = 0x%x; nds_r[0]=r0; nds_r[1]=r1; nds_r[2]=r2; nds_r[3]=r3; nds_r[4]=r4; nds_r[5]=r5; %s" % (pc, text)
+                    out[pc] = (text, pc + ins.size, ins.size)
+                    self.prev_set_lr = ins.mnemonic.startswith("mov") and ins.op_str.startswith("lr, pc")
+                    self.recent.append(ins)
+                    work.extend(labels - before)
+                    if self.extra_starts:
+                        work.extend(self.extra_starts)
+                        self.extra_starts = []
+                    if ends:
+                        break
+                    pc += ins.size
+            pad = self.landing_pad(entry, out)
+            if pad is not None:
+                pads.append(pad)
+                labels.add(pad)
+                work.append(pad)
         lines = []
         addrs = sorted(out)
         for i, a in enumerate(addrs):
@@ -661,6 +679,17 @@ class Lifter:
             "  u32 r4=0,r5=0,r6=0,r7=0,r8=0,r9=0,r10=0,r11=0,r12=0,lr=MAGIC_LR,res=0,sh=0,pc_val=0; u32 n=0,z=0,c=0,v=0;",
             "  " + " ".join("stack_[%d]=a%d;" % (self.frame_words(out) + i, i) for i in range(STACK_ARGS)),
         ]
+        if self.eh_end_catch is not None:
+            head[1] = "  u32 sp = nds_sp;"
+            head[2] = head[2].replace("lr=MAGIC_LR", "lr=nds_lr")
+            head[2] = head[2].replace("r4=0,r5=0,r6=0,r7=0,r8=0,r9=0,r10=0,r11=0,", "r4=nds_cs[0],r5=nds_cs[1],r6=nds_cs[2],r7=nds_cs[3],r8=nds_cs[4],r9=nds_cs[5],r10=nds_cs[6],r11=nds_cs[7],")
+            head[3] = "  u32 lr0_ = lr;"
+            text = re.sub(r"\((\w+)==MAGIC_LR\)", r"(\1==MAGIC_LR||\1==lr0_)", text)
+            text = re.sub(r"\((\w+) != MAGIC_LR\)", r"(\1 != MAGIC_LR\&\&\1 != lr0_)", text)
+            if pads:
+                cases = " ".join("case 0x%xu: goto L%08x;" % (p, p) for p in pads)
+                head.append("  u32 eh_key_ = nds_eh_enter(0x%xu, 0x%xu, sp);" % (entry, self.sizes.get(entry, 0)))
+                head.append("  if (nds_eh_save(eh_key_)) { r4=nds_eh_regs[0]; r5=nds_eh_regs[1]; r6=nds_eh_regs[2]; r7=nds_eh_regs[3]; r8=nds_eh_regs[4]; r9=nds_eh_regs[5]; r10=nds_eh_regs[6]; r11=nds_eh_regs[7]; sp=nds_eh_regs[8]; r12=nds_eh_regs[9]; r0=r1=r2=r3=0; switch (nds_eh_regs[10]) { %s default: nds_unhandled(__func__, nds_eh_regs[10]); } }" % cases)
         if name in self.gosub_funcs:
             head.append("  static void *const gs_[] = { %s0 };" % "".join("&&L%08x, " % a for a in self.gosub_labels))
         if entry in self.hooks:
@@ -668,12 +697,31 @@ class Lifter:
         if entry in self.gates:
             head.append("  { extern int %s(u32); if (%s(r0)) %s }" % (self.gates[entry], self.gates[entry], RET))
         body = "\n".join(head) + "\n" + text + "\n  " + RET + "\n}\n"
+        if pads:
+            body = body.replace(RET, "{ nds_eh_leave(eh_key_); " + RET + " }")
         if name in self.flag_funcs:
             body = body.replace(RET, "{ SAVEF(); " + RET + " }")
         if entry in self.exit_hooks:
             fn = self.exit_hooks[entry]
             body = body.replace(RET, "{ extern void %s(void); %s(); %s }" % (fn, fn, RET))
         return body
+
+    def landing_pad(self, entry, out):
+        """Debut d'un bloc catch pas encore traduit : rien n'y saute, seul le derouleur y arrive. Il finit par __end_catch."""
+        if self.eh_end_catch is None:
+            return None
+        size = self.sizes.get(entry, 0)
+        start = None
+        for pc in range(entry, entry + size, 4):
+            if pc in out:
+                start = None
+                continue
+            if start is None:
+                start = pc
+            ins = self.decode(pc, False)
+            if ins is not None and ins.id == ARM_INS_BL and ins.operands[0].imm & 0xFFFFFFFF == self.eh_end_catch:
+                return start
+        return None
 
     def frame_words(self, out):
         """Borne haute de la pile de la fonction : toutes ses descentes de sp additionnees."""

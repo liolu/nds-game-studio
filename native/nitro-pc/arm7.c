@@ -12,6 +12,7 @@ typedef struct SNDCommand {
     u32 arg[4];
 } SNDCommand;
 
+extern const u32 nds_old_sdk;
 static volatile u32 *shared; /* SNDSharedWork (dans la memoire DS) : son premier mot compte les listes de commandes traitees */
 static u32 logged;
 
@@ -21,8 +22,10 @@ volatile u32 *snd_shared(void) { return shared; }
 /* addr : adresse DS de la premiere commande, chainees par adresses DS */
 static void snd_list(u32 addr) {
     for (SNDCommand *c = addr ? (SNDCommand *)DS(addr) : 0; c; c = c->next ? (SNDCommand *)DS(c->next) : 0) {
-        if (c->id == 29) snd_set_shared(c->arg[0]);
-        snd_command(c->id, c->arg);
+        /* SDK des premiers jeux : trois commandes de moins apres PREPARE_SEQ (SHARED_WORK = 26 au lieu de 29) */
+        u32 id = nds_old_sdk && c->id >= 3 ? c->id + 3 : c->id;
+        if (id == 29) snd_set_shared(c->arg[0]);
+        snd_command(id, c->arg);
     }
     if (shared) shared[0]++;
 }

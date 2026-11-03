@@ -48,13 +48,14 @@ _Static_assert(__builtin_offsetof(Slot, x) == 32 && __builtin_offsetof(Slot, d) 
 #endif
 _Static_assert(__builtin_offsetof(Slot, sp) == SLOT_SP && __builtin_offsetof(Slot, pc) == SLOT_PC, "decalages du Slot");
 
-static Slot slots[64];
+enum { SLOTS = 256 }; /* les fils, et les fonctions du jeu avec un catch en cours */
+static Slot slots[SLOTS];
 uptr nds_last_load_sp; /* pile du dernier contexte charge, pour le journal d'un plantage */
 
 static Slot *slot_of(u32 ctx) {
-    for (int i = 0; i < 64; i++)
+    for (int i = 0; i < SLOTS; i++)
         if (slots[i].ctx == ctx) return &slots[i];
-    for (int i = 0; i < 64; i++)
+    for (int i = 0; i < SLOTS; i++)
         if (!slots[i].ctx) { slots[i].ctx = ctx; return &slots[i]; }
     nds_fatal("trop de threads");
     return 0;
@@ -84,6 +85,7 @@ Slot *nds_load_slot(u32 ctx) {
 __asm__(
     ".text\n"
     FUNC(OS_SaveContext)
+    FUNC(nds_eh_save)
     "  mov 4(%esp), %eax\n  push %eax\n  call " SYM(nds_save_slot) "\n  add $4, %esp\n"
     "  mov %ebp, 20(%eax)\n  mov %ebx, 24(%eax)\n  mov %esi, 28(%eax)\n  mov %edi, 32(%eax)\n"
     "  mov (%esp), %ecx\n  mov %ecx, 36(%eax)\n  lea 4(%esp), %ecx\n  mov %ecx, 4(%eax)\n"
@@ -99,6 +101,7 @@ __asm__(
 __asm__(
     ".text\n"
     FUNC(OS_SaveContext)
+    FUNC(nds_eh_save)
     "  push %rdi\n  call " SYM(nds_save_slot) "\n  pop %rdi\n"
     "  mov (%rsp), %rcx\n  mov %rcx, 24(%rax)\n  lea 8(%rsp), %rcx\n  mov %rcx, 16(%rax)\n"
     "  mov %rbx, 32(%rax)\n  mov %rbp, 40(%rax)\n  mov %r12, 48(%rax)\n  mov %r13, 56(%rax)\n"
@@ -118,6 +121,7 @@ __asm__(
 __asm__(
     ".text\n"
     FUNC(OS_SaveContext)
+    FUNC(nds_eh_save)
     "  stp x29, x30, [sp, #-16]!\n  mov x29, sp\n  bl " SYM(nds_save_slot) "\n  ldp x29, x30, [sp], #16\n"
     "  mov x1, sp\n  stp x1, x30, [x0, #16]\n"
     "  stp x19, x20, [x0, #32]\n  stp x21, x22, [x0, #48]\n  stp x23, x24, [x0, #64]\n  stp x25, x26, [x0, #80]\n"
@@ -168,8 +172,53 @@ void nds_ctx_init(u32 ctx, u8 *stack, u32 size, void (*entry)(u32), u32 func) {
 
 u32 nds_ctx_func(u32 ctx) { return slot_of(ctx)->func; }
 
+/* ------------------------------------------------------------------ exceptions C++ du jeu (NDS_EH de arm2c.py)
+ * Le derouleur du jeu tourne tel quel : il lit la pile ARM et ses tables, appelle les destructeurs. A la fin, au lieu de
+ * sauter a l'adresse du catch (func_020b3594 de Pokemon Dash), il arrive ici : on revient dans la fonction de l'hote qui
+ * porte ce catch, enregistree a son entree, cle = sp a l'entree (une pile par fil, donc unique). */
+u32 nds_sp = 0x027FF000u, nds_lr = 0xFFFFFFFEu, nds_cs[8], nds_eh_regs[11];
+static struct { u32 func, size, key; } eh_frames[SLOTS];
+
+u32 nds_eh_enter(u32 func, u32 size, u32 sp) {
+    int free_at = -1;
+    for (int i = 0; i < SLOTS; i++) {
+        if (eh_frames[i].key == sp && eh_frames[i].func == func) return sp;
+        if (!eh_frames[i].key && free_at < 0) free_at = i;
+    }
+    if (free_at < 0) nds_fatal("trop de fonctions avec un catch en cours");
+    eh_frames[free_at].func = func;
+    eh_frames[free_at].size = size;
+    eh_frames[free_at].key = sp;
+    return sp;
+}
+
+void nds_eh_leave(u32 key) {
+    for (int i = 0; i < SLOTS; i++)
+        if (eh_frames[i].key == key) eh_frames[i].key = 0;
+    for (int i = 0; i < SLOTS; i++)
+        if (slots[i].ctx == key) slots[i].ctx = 0;
+}
+
+extern u64 OS_LoadContext();
+
+void nds_eh_resume(u32 context, u32 info, u32 pc) {
+    const u32 *c = (const u32 *)DS(context);
+    for (int i = 0; i < 8; i++) nds_eh_regs[i] = c[(0x2C + i * 4) / 4];
+    u32 sp = c[0x5C / 4] - c[0x64 / 4];
+    nds_eh_regs[8] = sp;
+    nds_eh_regs[9] = c[0x64 / 4];
+    nds_eh_regs[10] = pc;
+    u32 best = 0;
+    for (int i = 0; i < SLOTS; i++) {
+        u32 key = eh_frames[i].key;
+        if (key > sp && pc - eh_frames[i].func < eh_frames[i].size && (!best || key < best)) best = key;
+    }
+    if (!best) nds_fatal("exception du jeu : pas de fonction de l'hote pour le catch %x, sp=%x", pc, sp);
+    OS_LoadContext(best);
+}
+
 void nds_dump_threads(void) {
-    for (int i = 0; i < 64; i++) {
+    for (int i = 0; i < SLOTS; i++) {
         if (!slots[i].ctx || !slots[i].sp) continue;
         u32 state = *(u32 *)DS(slots[i].ctx + 0x64);
         nds_log("  thread ctx=%x etat=%u pc=%8x", slots[i].ctx, state, (u32)slots[i].pc);

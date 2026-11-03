@@ -136,5 +136,9 @@ Limites : les ombres (mode 3 des polygones) ne sont pas dessinées. Un objet que
 - `cargo run --release -p nds-engine --example native_check -- <code> <rom> <capture.png> <s> [enter@s] [touch@s]` :
   passe par le vrai moteur, sans focus (`NDSGS_NATIVE_MUTE=1`, `NDSGS_NATIVE_DIR`).
 
-Essayé jusqu'au jeu : Tom et Jerry Tales (AJTP), Rayman Raving Rabbids (AR5E), Lego Star Wars II (AL7E) sur Windows ;
+Essayé jusqu'au jeu : Tom et Jerry Tales (AJTP), Rayman Raving Rabbids (AR5E), Lego Star Wars II (AL7E), Pokémon Dash (APDE) sur Windows ;
 sur Mac, seulement AL7E, sans fenêtre.
+
+## Jeux au SDK ancien : Pokémon Dash
+
+SDK plus ancien, pilote de carte propre au jeu et vraies exceptions C++. Tout est réservé à ce jeu dans `games/patches.json` : `nds_old_sdk` (fils, numéros des commandes de son, DMA, carte), `overlays`, `eh_end_catch` (pile ARM réelle et registres transmis, `NDS_EH` de `arm2c.py` ; le dérouleur du jeu tourne tel quel). Les autres jeux gardent leur code.

@@ -93,10 +93,10 @@
   },
   "APDE": {
    "c": 16.02,
-   "code": 16.66,
+   "code": 18.66,
    "data": 97.22,
-   "play": "stuck",
-   "status": "experimental"
+   "play": "playable",
+   "status": "ok"
   },
   "AQIE": {
    "c": 11.75,
@@ -419,5 +419,5 @@
    "status": "experimental"
   }
  },
- "toolchain": 13
+ "toolchain": 14
 }
