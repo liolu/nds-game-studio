@@ -139,6 +139,85 @@ fn read_wave(file: &[u8], at: usize) -> Result<Sound> {
     Ok(Sound { rate: rate as u32, channels: 1, samples: voice(data, kind) })
 }
 
+/// Un son d'une banque, avec de quoi le faire boucler (position en échantillons).
+pub(crate) struct Wave {
+    pub rate: u32,
+    pub samples: Vec<i16>,
+    pub loop_start: Option<usize>,
+}
+
+/// Le son `index` d'une banque `SWAR`, pour le synthétiseur.
+pub(crate) fn swar_wave(file: &[u8], index: usize) -> Option<Wave> {
+    let sound = read_swar(file, index).ok()?;
+    let at = u32_at(file, 0x3C + index * 4)?;
+    let (&kind, &looped, loop_at) = (file.get(at)?, file.get(at + 1)?, u16_at(file, at + 6)?);
+    let loop_start = (looped != 0).then(|| match kind {
+        PCM8 => loop_at * 4,
+        PCM16 => loop_at * 2,
+        _ => (loop_at * 4).saturating_sub(4) * 2,
+    });
+    Some(Wave { rate: sound.rate, samples: sound.samples, loop_start })
+}
+
+/// Les catégories du bloc INFO.
+const INFO_SEQUENCES: usize = 0;
+const INFO_BANKS: usize = 2;
+const INFO_WAVES: usize = 3;
+const NO_ARCHIVE: usize = 0xFFFF;
+
+/// L'entrée `index` d'une catégorie d'INFO.
+fn info_record(file: &[u8], category: usize, index: usize) -> Option<usize> {
+    let info = u32_at(file, 0x18)?;
+    let list = u32_at(file, info + 8 + category * 4)?;
+    let entry = u32_at(file, info + list + 4 + index * 4)?;
+    (index < u32_at(file, info + list)? && entry != 0).then_some(info + entry)
+}
+
+/// La position du fichier n° `id` dans l'archive.
+fn fat_file(file: &[u8], id: usize) -> Option<&[u8]> {
+    let fat = u32_at(file, 0x20)?;
+    let (start, size) = (u32_at(file, fat + 12 + id * 16)?, u32_at(file, fat + 16 + id * 16)?);
+    file.get(start..start + size)
+}
+
+/// Le n° d'un fichier d'après sa position (celle que donne `files`).
+fn file_id_at(file: &[u8], start: usize) -> Option<usize> {
+    let fat = u32_at(file, 0x20)?;
+    (0..u32_at(file, fat + 8)?.min(65536)).find(|id| u32_at(file, fat + 12 + id * 16) == Some(start))
+}
+
+/// La banque et le volume de la séquence qui est à cette position (entrée d'INFO : fichier, 2 octets, banque, volume).
+pub fn sequence_settings(file: &[u8], start: usize) -> Option<(usize, u8)> {
+    let id = file_id_at(file, start)?;
+    let count = u32_at(file, u32_at(file, 0x18)? + u32_at(file, u32_at(file, 0x18)? + 8)?)?;
+    (0..count.min(65536)).find_map(|i| {
+        let record = info_record(file, INFO_SEQUENCES, i)?;
+        (u16_at(file, record)? == id).then_some((u16_at(file, record + 4)?, *file.get(record + 6)?))
+    })
+}
+
+/// Le n° d'une banque d'après la position de son fichier.
+pub fn bank_at(file: &[u8], start: usize) -> Option<usize> {
+    let id = file_id_at(file, start)?;
+    let info = u32_at(file, 0x18)?;
+    let count = u32_at(file, info + u32_at(file, info + 8 + INFO_BANKS * 4)?)?;
+    (0..count.min(65536)).find(|&i| info_record(file, INFO_BANKS, i).and_then(|record| u16_at(file, record)) == Some(id))
+}
+
+/// Le fichier `SBNK` de la banque n° `bank` et ses quatre archives de sons.
+pub fn bank_files(file: &[u8], bank: usize) -> Option<(&[u8], [Option<&[u8]>; 4])> {
+    let record = info_record(file, INFO_BANKS, bank)?;
+    let bank_file = fat_file(file, u16_at(file, record)?)?;
+    let archive = |slot: usize| {
+        let index = u16_at(file, record + 4 + slot * 2)?;
+        if index == NO_ARCHIVE {
+            return None;
+        }
+        fat_file(file, u16_at(file, info_record(file, INFO_WAVES, index)?)?)
+    };
+    Some((bank_file, [archive(0), archive(1), archive(2), archive(3)]))
+}
+
 /// Le nombre de sons d'une banque `SWAR`.
 pub fn swar_count(file: &[u8]) -> Result<usize> {
     if file.get(0..4) != Some(b"SWAR") {
