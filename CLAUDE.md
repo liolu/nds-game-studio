@@ -32,6 +32,15 @@
 - Une entite de jeu doit avoir `Engine::Main.layers()` ou `Engine::Sub.layers()` (sinon invisible) et `in_game()`.
   Logique de jeu dans `FixedUpdate` avec `.run_if(playing("<id>"))`.
 
+## Assets : parametres par jeu
+
+Chaque jeu peut partager un format avec d'autres et en differer sur un detail. Regles :
+
+1. Avant d'ecrire un decodeur ou de dire qu'un fichier n'est pas lu, essayer sur ce jeu tous les parametres existants : `cargo run --release -p nds-engine --example asset_params -- <dossier des roms> <rapport.tsv> [--images=<dossier>] [--write]`.
+2. Ce qui est vrai pour tous les jeux va dans le code commun. Ce qui n'est vrai que pour un jeu s'enregistre pour ce jeu dans `crates/engine/src/game_params.tsv` (`code`, `*.ext` ou `dossier/*.ext`, sorte suivie d'options : `palette=dossier/nom.ncl`, `bpp=4|8`, `bank=n`, `width=n` ; `Other` refuse une devinette fausse), jamais comme une nouvelle devinette qui change les autres jeux. Un nouveau parametre se teste sur tous les jeux.
+3. Une image ne se croit qu'a l'oeil : un decodeur qui accepte un fichier ne prouve rien, sur 60 jeux presque toutes ses images etaient du bruit, et un texte de secours n'est pas une reussite. Les propositions pas encore vues restent dans `game_params_a_voir.tsv` et passent dans la table une fois vues justes.
+4. Apres un changement de la table, augmenter `INDEX_VERSION` (`asset_scan.rs`).
+
 ## Branches et versions
 
 - `experimental` = branche de travail (par defaut). Chaque push publie la pre-release `experimental`.
