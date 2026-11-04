@@ -23,7 +23,7 @@ for src in "$LUAU"/VM/src/*.cpp "$LUAU"/Compiler/src/*.cpp "$LUAU"/Ast/src/*.cpp
   while [ "$(jobs -r | wc -l)" -ge 8 ]; do sleep 0.2; done
 done
 wait
-$CXX $FLAGS $INC -I"$HERE/../sdk" -c "$HERE/nds_luau.cpp" -o "$WORK/nds_luau.o"
+$CXX $FLAGS $INC -c "$HERE/nds_luau.cpp" -o "$WORK/nds_luau.o"
 mkdir -p "$(dirname "$OUT")"
 $CXX $LINK "$WORK/nds_luau.o" "${OBJS[@]}" -o "$OUT"
 echo "$OUT $(wc -c < "$OUT") octets"
