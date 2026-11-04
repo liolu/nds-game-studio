@@ -83,6 +83,8 @@ jobs:
               --notes "Telecharges par le launcher pour generer les jeux natifs depuis la rom du joueur. Aucun code de jeu." || true
           fi
           gh release upload native-toolchain native-toolchain-*.zip --clobber
+          # l'index des jeux : le launcher le telecharge, un jeu ou un runtime arrive sans nouveau launcher
+          gh release upload native-toolchain native/games/index.json --clobber
 
   toolchain-macos:
     needs: runtime-macos

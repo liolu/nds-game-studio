@@ -519,7 +519,9 @@ static void load_manifest_list(const char *path) {
         { const char *mp = j_text(e, "multiplayer"); m->net_safe = mp && str_eq(mp, "safe"); }
         u32 major, minor;
         const char *want = j_text(e, "api");
+        const char *pre = j_text(e, "refused"); /* ce que le launcher est seul a savoir (la rom) */
         if (!id) refuse(m, "manifeste sans \"id\"", 0);
+        else if (pre) refuse(m, pre, 0);
         else if (parse_version(want, &major, &minor)) refuse(m, "manifeste sans \"api\"", 0);
         else if (major != NDS_API_MAJOR) refuse(m, "interface d'une autre version majeure que 1 : ", want);
         else if (minor > NDS_API_MINOR) refuse(m, "interface plus recente que celle de ce runtime (1.0), mettre le jeu a jour : ", want);

@@ -172,6 +172,10 @@ struct Launcher {
     dragging: Option<String>,
     /// Ce qu'on tape là est l'adresse de l'hôte d'une partie en réseau.
     typing_host: bool,
+    /// Ce qu'on tape là est un réglage texte d'un mod : (mod, clé).
+    typing_setting: Option<(String, String)>,
+    /// Le réglage d'un mod attend une touche : (mod, clé).
+    binding: Option<(String, String)>,
 }
 
 /// Bilan d'un ajout de plusieurs roms : chaque message remplace le précédent, une erreur passerait
@@ -306,7 +310,7 @@ impl Plugin for LauncherPlugin {
         app.init_resource::<Launcher>()
             .add_systems(Startup, setup)
             .add_systems(OnEnter(StudioState::Menu), spawn_launcher.before(crate::studio::auto_start))
-            .add_systems(Update, (take_drops, poll_picker, poll_copies, poll_disk, back_key, drag_game, type_folder_name, type_mod_link, type_search, type_tag, leave_search, expire_confirm, log_clicks, rebuild, show_status).chain().run_if(in_state(StudioState::Menu)))
+            .add_systems(Update, (take_drops, poll_picker, poll_copies, poll_disk, back_key, drag_game, type_folder_name, type_mod_link, bind_mod_key, type_search, type_tag, leave_search, expire_confirm, log_clicks, rebuild, show_status).chain().run_if(in_state(StudioState::Menu)))
             .add_systems(Update, (activity_visibility, activity_now, activity_decomp, activity_history, note_update, poll_mods).run_if(in_state(StudioState::Menu)))
             .add_systems(Update, (wheel, (looks, drop_looks).chain(), view_choice_looks, lang_choice_looks, base_mods_looks, version_text, redo_on_language))
             .init_resource::<UpdateOffer>()
@@ -772,7 +776,7 @@ fn poll_disk(mut lau: ResMut<Launcher>, mut images: ResMut<Assets<Image>>, time:
 
 fn back_key(keys: Res<ButtonInput<KeyCode>>, mut lau: ResMut<Launcher>, screens: Res<DsScreens>, windows: Query<&Window>) {
     let focused = windows.get(screens.main_window()).is_ok_and(|w| w.focused);
-    if !focused || !keys.just_pressed(KeyCode::Escape) || lau.naming.is_some() || lau.mod_link.is_some() || lau.tag_input.is_some() || lau.search_focus || lau.dragging.is_some() {
+    if !focused || !keys.just_pressed(KeyCode::Escape) || lau.naming.is_some() || lau.mod_link.is_some() || lau.binding.is_some() || lau.tag_input.is_some() || lau.search_focus || lau.dragging.is_some() {
         return;
     }
     if lau.open.is_some() {
@@ -835,6 +839,7 @@ fn type_mod_link(mut typed: MessageReader<KeyboardInput>, mut lau: ResMut<Launch
             Key::Escape => {
                 lau.mod_link = None;
                 lau.typing_host = false;
+                lau.typing_setting = None;
             }
             Key::Backspace => {
                 if let Some(link) = &mut lau.mod_link {
@@ -1043,6 +1048,13 @@ fn drop_looks(lau: Res<Launcher>, mut targets: Query<(&Hovered, &mut BackgroundC
 
 fn send_mod_link(lau: &mut Launcher) {
     let game = lau.open.as_ref().and_then(|file| lau.roms.iter().find(|r| r.info.file == *file)).map(|r| (r.info.code.clone(), r.info.path.clone()));
+    if let Some((id, key)) = lau.typing_setting.take() {
+        if let (Some((code, _)), Some(value)) = (game, lau.mod_link.take()) {
+            crate::mod_packs::set_setting(&code, &id, &key, serde_json::Value::from(value));
+        }
+        lau.dirty = true;
+        return;
+    }
     if std::mem::take(&mut lau.typing_host) {
         if let (Some((code, _)), Some(address)) = (game, lau.mod_link.take()) {
             crate::mod_packs::set_host_address(&code, &address);
@@ -1822,7 +1834,7 @@ fn spawn_game(main: &mut ChildSpawnerCommands, lau: &Launcher, rom: &Rom, regist
         let beside = COVER + 20.0;
         let (top, rest): (Top, Rest) = match lau.tab {
             Tab::Play => play_tab(rom, registry),
-            Tab::Modding => modding_tab(rom, registry, lau.mod_link.clone(), lau.typing_host),
+            Tab::Modding => modding_tab(rom, registry, ModInput { link: lau.mod_link.clone(), typing_host: lau.typing_host, typing_setting: lau.typing_setting.clone(), binding: lau.binding.clone() }),
             Tab::Description => description_tab(lau, rom),
             Tab::Settings => settings_tab(lau, rom, registry),
         };
@@ -2048,15 +2060,16 @@ fn spawn_start_choice(r: &mut ChildSpawnerCommands, font: &Fonts, code: &str) {
     });
 }
 
-fn spawn_mod_packs(r: &mut ChildSpawnerCommands, font: &Fonts, code: &str, rom: &Path, link: Option<String>, typing_host: bool) {
+fn spawn_mod_packs(r: &mut ChildSpawnerCommands, font: &Fonts, code: &str, rom: &Path, input: &ModInput) {
     use crate::mod_packs;
     mod_packs::offer_base(code);
     spawn_start_choice(r, font, code);
-    let host_typed = if typing_host { link.clone() } else { None };
-    let link = if typing_host { None } else { link };
+    let typing_other = input.typing_host || input.typing_setting.is_some();
+    let host_typed = if input.typing_host { input.link.clone() } else { None };
+    let link = if typing_other { None } else { input.link.clone() };
     r.spawn((Node { height: px(2), margin: UiRect::vertical(px(10)), flex_shrink: 0.0, ..default() }, BackgroundColor(BORDER)));
     r.spawn(text(font, tr("Mods from elsewhere", "Mods venus d'ailleurs"), 18.0, TEXT));
-    r.spawn(text(font, tr("A .zip, .7z, .rar or .tar.gz file, a folder, or a link: drop it here, or use the buttons. A mod only holds game files: nothing is run on your computer.", "Un fichier .zip, .7z, .rar ou .tar.gz, un dossier ou un lien : deposez-le ici, ou utilisez les boutons. Un mod ne contient que des fichiers de jeu : rien n'est execute sur votre ordinateur."), 15.0, DIM));
+    r.spawn(text(font, tr("A .zip, .7z, .rar or .tar.gz file, a folder, or a link: drop it here, or use the buttons. Most mods only hold game files; a mod that runs code on your computer says so before you install it.", "Un fichier .zip, .7z, .rar ou .tar.gz, un dossier ou un lien : deposez-le ici, ou utilisez les boutons. La plupart des mods ne contiennent que des fichiers de jeu ; un mod qui execute du code sur votre ordinateur le dit avant l'installation."), 15.0, DIM));
     r.spawn(Node { flex_direction: FlexDirection::Row, flex_wrap: FlexWrap::Wrap, column_gap: px(8), row_gap: px(8), ..default() }).with_children(|row| {
         for (folder, label) in [(false, tr("Add a file", "Ajouter un fichier")), (true, tr("Add a folder", "Ajouter un dossier"))] {
             let (code, rom) = (code.to_string(), rom.to_path_buf());
@@ -2139,6 +2152,8 @@ fn spawn_mod_packs(r: &mut ChildSpawnerCommands, font: &Fonts, code: &str, rom: 
                         }
                         if let Some(reason) = &found.refused {
                             about.spawn(text(font, reason.clone(), 14.0, GOLD));
+                        } else if let Some(warning) = &found.warning {
+                            about.spawn(text(font, t!("{warning} Source: {}", "{warning} Source : {}", preview.source), 14.0, GOLD));
                         }
                     });
                     if fits {
@@ -2165,6 +2180,24 @@ fn spawn_mod_packs(r: &mut ChildSpawnerCommands, font: &Fonts, code: &str, rom: 
             row.spawn(text(font, format!("{} {}{by}", pack.name, pack.version), 15.0, TEXT));
             if !pack.description.is_empty() {
                 row.spawn(text(font, pack.description.clone(), 14.0, DIM));
+            }
+            if let Some(warning) = &pack.warning {
+                let from = if pack.source.is_empty() { tr("a file on this computer", "un fichier de cet ordinateur").to_string() } else { pack.source.clone() };
+                row.spawn(text(font, t!("{warning} Source: {from}", "{warning} Source : {from}"), 14.0, GOLD));
+            }
+            // Ce que le module en a fait à la dernière partie (status.json)
+            match &pack.status {
+                Some((state, _)) if state == "charge" => {
+                    row.spawn(text(font, tr("Loaded at the last game.", "Charge a la derniere partie."), 14.0, DIM));
+                }
+                Some((_, reason)) => {
+                    let reason = reason.clone().unwrap_or_default();
+                    row.spawn(text(font, t!("Not loaded at the last game: {reason}", "Pas charge a la derniere partie : {reason}"), 14.0, GOLD));
+                }
+                None => {}
+            }
+            if pack.has_settings {
+                spawn_mod_settings(row, font, code, &pack.id, input);
             }
             if pack.network {
                 let saved = mod_packs::host_address(code);
@@ -2220,6 +2253,130 @@ fn spawn_mod_packs(r: &mut ChildSpawnerCommands, font: &Fonts, code: &str, rom: 
     }
 }
 
+/// Ce que la page d'un mod est en train de saisir : un texte de réglage, ou une touche.
+#[derive(Clone, Default)]
+struct ModInput {
+    link: Option<String>,
+    typing_host: bool,
+    /// (mod, clé) du réglage texte en cours ; le texte est dans `link`.
+    typing_setting: Option<(String, String)>,
+    /// (mod, clé) du réglage dont on attend la touche.
+    binding: Option<(String, String)>,
+}
+
+/// Les réglages qu'un mod décrit dans son manifeste : la page se construit d'elle-même (`mod_packs::settings_of`).
+fn spawn_mod_settings(row: &mut ChildSpawnerCommands, font: &Fonts, code: &str, id: &str, input: &ModInput) {
+    use crate::mod_packs::{self, Setting};
+    let (settings, presets) = mod_packs::settings_of(code, id);
+    if settings.is_empty() {
+        return;
+    }
+    row.spawn(text(font, tr("Settings (used at the next launch):", "Reglages (pris au prochain lancement) :"), 14.0, DIM));
+    for (setting, value) in settings {
+        let Setting { key, name, kind, min, max, step, choices, .. } = setting;
+        row.spawn(Node { flex_direction: FlexDirection::Row, flex_wrap: FlexWrap::Wrap, column_gap: px(8), row_gap: px(4), align_items: AlignItems::Center, ..default() }).with_children(|line| {
+            line.spawn(text(font, name, 14.0, TEXT));
+            let set = |line: &mut ChildSpawnerCommands, label: String, on: bool, new: serde_json::Value| {
+                let (code, id, key) = (code.to_string(), id.to_string(), key.clone());
+                let (normal, hover) = if on { (ITEM_ON, ITEM_ON) } else { (ITEM, ITEM_HOVER) };
+                button(line, button_node(), normal, hover)
+                    .observe(move |_: On<Activate>, mut lau: ResMut<Launcher>| {
+                        crate::mod_packs::set_setting(&code, &id, &key, new.clone());
+                        lau.dirty = true;
+                    })
+                    .with_child(text(font, label, 14.0, TEXT));
+            };
+            match kind.as_str() {
+                "bool" => {
+                    let on = value.as_bool().unwrap_or(false);
+                    set(line, if on { tr("Yes", "Oui") } else { tr("No", "Non") }.to_string(), on, serde_json::Value::from(!on));
+                }
+                "choice" => {
+                    for choice in choices {
+                        let on = value.as_str() == Some(choice.as_str());
+                        set(line, choice.clone(), on, serde_json::Value::from(choice));
+                    }
+                }
+                "int" | "float" => {
+                    let int = kind == "int";
+                    let step = step.unwrap_or(if int { 1.0 } else { 0.1 });
+                    let now = value.as_f64().unwrap_or(0.0);
+                    let clamp = |v: f64| v.max(min.unwrap_or(f64::MIN)).min(max.unwrap_or(f64::MAX));
+                    let number = |v: f64| if int { serde_json::Value::from(v.round() as i64) } else { serde_json::Value::from((v * 1000.0).round() / 1000.0) };
+                    set(line, "-".to_string(), false, number(clamp(now - step)));
+                    line.spawn(text(font, if int { format!("{}", now.round() as i64) } else { format!("{now:.2}") }, 14.0, TEXT));
+                    set(line, "+".to_string(), false, number(clamp(now + step)));
+                }
+                "keybind" => {
+                    let waiting = input.binding.as_ref().is_some_and(|(m, k)| m == id && *k == key);
+                    let shown = if waiting {
+                        tr("Press a key... (Esc cancels)", "Appuyez sur une touche... (Echap annule)").to_string()
+                    } else {
+                        value.as_u64().map_or_else(|| "?".to_string(), |hid| crate::native_game::key_label(hid as u8))
+                    };
+                    let (id, key) = (id.to_string(), key.clone());
+                    let (normal, hover) = if waiting { (ITEM_ON, ITEM_ON) } else { (ITEM, ITEM_HOVER) };
+                    button(line, button_node(), normal, hover)
+                        .observe(move |_: On<Activate>, mut lau: ResMut<Launcher>| {
+                            lau.binding = Some((id.clone(), key.clone()));
+                            lau.dirty = true;
+                        })
+                        .with_child(text(font, shown, 14.0, TEXT));
+                }
+                _ => {
+                    // texte : tapé dans le champ de la page, comme l'adresse de l'hôte
+                    let typing = input.typing_setting.as_ref().is_some_and(|(m, k)| m == id && *k == key);
+                    let current = value.as_str().map(str::to_string).unwrap_or_else(|| if value.is_null() { String::new() } else { value.to_string() });
+                    let shown = if typing { format!("{}_", input.link.clone().unwrap_or_default()) } else if current.is_empty() { tr("(click to type)", "(cliquez pour taper)").to_string() } else { current.clone() };
+                    let (id, key) = (id.to_string(), key.clone());
+                    let (normal, hover) = if typing { (ITEM_ON, ITEM_ON) } else { (ITEM, ITEM_HOVER) };
+                    button(line, button_node(), normal, hover)
+                        .observe(move |_: On<Activate>, mut lau: ResMut<Launcher>| {
+                            if lau.mod_link.is_none() {
+                                lau.mod_link = Some(current.clone());
+                                lau.typing_setting = Some((id.clone(), key.clone()));
+                                lau.dirty = true;
+                            }
+                        })
+                        .with_child(text(font, shown, 14.0, TEXT));
+                }
+            }
+        });
+    }
+    if !presets.is_empty() {
+        row.spawn(Node { flex_direction: FlexDirection::Row, flex_wrap: FlexWrap::Wrap, column_gap: px(8), row_gap: px(4), align_items: AlignItems::Center, ..default() }).with_children(|line| {
+            line.spawn(text(font, tr("Presets:", "Prereglages :"), 14.0, DIM));
+            for preset in presets {
+                let (code, id) = (code.to_string(), id.to_string());
+                let label = preset.name.clone();
+                button(line, button_node(), ITEM, ITEM_HOVER)
+                    .observe(move |_: On<Activate>, mut lau: ResMut<Launcher>| {
+                        crate::mod_packs::apply_preset(&code, &id, &preset);
+                        lau.dirty = true;
+                    })
+                    .with_child(text(font, label, 14.0, TEXT));
+            }
+        });
+    }
+}
+
+/// Le choix d'une touche pour un réglage : la prochaine touche enfoncée, Échap annule.
+fn bind_mod_key(mut lau: ResMut<Launcher>, keys: Res<ButtonInput<KeyCode>>) {
+    let Some((id, key)) = lau.binding.clone() else { return };
+    if keys.just_pressed(KeyCode::Escape) {
+        lau.binding = None;
+        lau.dirty = true;
+        return;
+    }
+    let Some(hid) = crate::native_game::hid_pressed(&keys) else { return };
+    let code = lau.open.as_ref().and_then(|file| lau.roms.iter().find(|r| r.info.file == *file)).map(|r| r.info.code.clone());
+    if let Some(code) = code {
+        crate::mod_packs::set_setting(&code, &id, &key, serde_json::Value::from(hid));
+    }
+    lau.binding = None;
+    lau.dirty = true;
+}
+
 /// Refait la page d'un jeu quand le travail de l'outil de mod avance.
 fn poll_mods(mut lau: ResMut<Launcher>, mut seen: Local<u64>) {
     let now = crate::mods::revision();
@@ -2231,7 +2388,7 @@ fn poll_mods(mut lau: ResMut<Launcher>, mut seen: Local<u64>) {
     }
 }
 
-fn modding_tab(rom: &Rom, registry: &GameRegistry, link: Option<String>, typing_host: bool) -> (Top, Rest) {
+fn modding_tab(rom: &Rom, registry: &GameRegistry, input: ModInput) -> (Top, Rest) {
     let file = rom.info.file.clone();
     let (code, path) = (rom.info.code.clone(), rom.info.path.clone());
     let native = native_game(registry, &code);
@@ -2250,7 +2407,7 @@ fn modding_tab(rom: &Rom, registry: &GameRegistry, link: Option<String>, typing_
             r.spawn(text(font, tr("Assets: the game's 3D models and images, with their path in the rom.", "Assets : modeles 3D et images du jeu, avec leur chemin dans la rom."), 15.0, DIM));
             r.spawn(text(font, tr("Code: the game's sources, rebuilt and restarted every time you save.", "Code : les sources du jeu, recompilees et relancees a chaque enregistrement."), 15.0, DIM));
             spawn_mods(r, font, &code, &path, native.as_deref());
-            spawn_mod_packs(r, font, &code, &path, link, typing_host);
+            spawn_mod_packs(r, font, &code, &path, &input);
         }),
     )
 }

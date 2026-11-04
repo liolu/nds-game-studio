@@ -260,10 +260,38 @@ pub fn game_state(code: &str) -> Option<GameState> {
     index().games.get(code).map(|g| GameState { code: g.code, c: g.c, data: g.data, play: g.play.clone() })
 }
 
-/// Lu une fois : le launcher le consulte pour chaque jeu de la vue.
+/// Lu une fois : le launcher le consulte pour chaque jeu de la vue. L'index téléchargé (`refresh_index`) passe avant celui du
+/// launcher s'il est au moins aussi récent : un jeu ou une version du runtime arrive ainsi sans nouveau launcher.
 fn index() -> &'static Index {
     static PARSED: OnceLock<Index> = OnceLock::new();
-    PARSED.get_or_init(|| serde_json::from_str(INDEX).expect("native/games/index.json"))
+    PARSED.get_or_init(|| {
+        let built: Index = serde_json::from_str(INDEX).expect("native/games/index.json");
+        let downloaded = std::fs::read(downloaded_index()).ok().and_then(|bytes| serde_json::from_slice::<Index>(&bytes).ok());
+        match downloaded {
+            Some(index) if index.toolchain >= built.toolchain && !index.games.is_empty() => index,
+            _ => built,
+        }
+    })
+}
+
+fn downloaded_index() -> PathBuf {
+    crate::save::data_dir().join("native").join("index.json")
+}
+
+/// Télécharge l'index publié avec la boîte à outils, pour le prochain démarrage. Sans réseau, rien ne change.
+fn refresh_index() {
+    std::thread::spawn(|| {
+        let target = downloaded_index();
+        let temp = target.with_extension("json.new");
+        let _ = std::fs::create_dir_all(target.parent().unwrap_or(Path::new(".")));
+        let ok = download(&format!("{TOOLCHAIN_URL}/index.json"), &temp).is_ok()
+            && std::fs::read(&temp).ok().and_then(|bytes| serde_json::from_slice::<Index>(&bytes).ok()).is_some_and(|i| !i.games.is_empty());
+        if ok {
+            let _ = std::fs::rename(&temp, &target);
+        } else {
+            let _ = std::fs::remove_file(&temp);
+        }
+    });
 }
 
 /// Ce jeu a un module natif, mais pas sur ce système.
@@ -276,8 +304,18 @@ pub fn is_experimental(code: &str) -> bool {
     index().games.get(code).is_some_and(|g| g.status != "ok")
 }
 
+/// Le module généré : `<code>-<version>`, et l'empreinte des instructions que les mods actifs accrochent (`"instruction_hooks"`),
+/// car elles sont traduites dans le module. Changer de mods de ce genre en génère un autre ; les autres restent.
 fn generated_path(code: &str) -> PathBuf {
-    crate::save::data_dir().join("native").join(format!("{code}-{}{}", index().toolchain, std::env::consts::EXE_SUFFIX))
+    let hooks = crate::mod_packs::instruction_hooks(code);
+    let print = if hooks.is_empty() {
+        String::new()
+    } else {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(hooks.join(",").as_bytes());
+        format!("-h{}", digest.iter().take(4).map(|b| format!("{b:02x}")).collect::<String>())
+    };
+    crate::save::data_dir().join("native").join(format!("{code}-{}{print}{}", index().toolchain, std::env::consts::EXE_SUFFIX))
 }
 
 /// Le module à lancer s'il existe déjà.
@@ -452,7 +490,13 @@ pub(crate) fn download(url: &str, to: &Path) -> Result<(), String> {
 fn local_toolchain() -> Option<PathBuf> {
     let exe = std::env::current_exe().unwrap_or_default();
     let beside = exe.parent().unwrap_or(Path::new(".")).join("native-toolchain");
-    [std::env::var_os("NDSGS_TOOLCHAIN_DIR").map(PathBuf::from), Some(beside)].into_iter().flatten().find(|dir| toolchain_python(dir).exists())
+    // celle à côté de l'exécutable ne sert que si elle a la version de l'index (un index téléchargé peut en demander une plus récente)
+    let same_version = |dir: &PathBuf| {
+        let bundled = std::fs::read(dir.join("native").join("games").join("index.json")).ok().and_then(|bytes| serde_json::from_slice::<Index>(&bytes).ok());
+        bundled.is_none_or(|i| i.toolchain == index().toolchain)
+    };
+    let given = std::env::var_os("NDSGS_TOOLCHAIN_DIR").map(PathBuf::from).filter(|dir| toolchain_python(dir).exists());
+    given.or_else(|| Some(beside).filter(|dir| toolchain_python(dir).exists() && same_version(dir)))
 }
 
 /// Nom de l'archive de la boîte à outils : une par plateforme.
@@ -524,6 +568,11 @@ fn follow_output(output: impl Read, state: &Mutex<Generation>, log: &Mutex<Strin
     }
 }
 
+fn insn_hook_args(code: &str) -> Vec<String> {
+    let hooks = crate::mod_packs::instruction_hooks(code);
+    if hooks.is_empty() { Vec::new() } else { vec!["--insn-hooks".to_string(), hooks.join(",")] }
+}
+
 fn generate(code: &str, rom: &Path, state: &Mutex<Generation>) -> Result<PathBuf, String> {
     check_compiler()?;
     let tools = ensure_toolchain(state)?;
@@ -539,6 +588,7 @@ fn generate(code: &str, rom: &Path, state: &Mutex<Generation>) -> Result<PathBuf
         .arg(rom)
         .arg("--out")
         .arg(&out)
+        .args(insn_hook_args(code))
         .env("PYTHONPATH", tools.join("python"))
         .env("PYTHONDONTWRITEBYTECODE", "1");
     #[cfg(windows)]
@@ -576,6 +626,7 @@ fn generate(code: &str, rom: &Path, state: &Mutex<Generation>) -> Result<PathBuf
         return Err(tail.into_iter().rev().collect::<Vec<_>>().join(" / "));
     }
     let target = generated_path(code);
+    let _ = std::fs::remove_file(&target);
     std::fs::rename(&built, &target).map_err(|e| e.to_string())?;
     let _ = std::fs::remove_dir_all(&out);
     Ok(target)
@@ -596,6 +647,9 @@ impl Plugin for NativeGamesPlugin {
             if let Some(code) = module_code(&entry.path()) {
                 codes.insert(code);
             }
+        }
+        if CAN_GENERATE {
+            refresh_index();
         }
         for code in codes {
             let spec = format!("id = \"native-{code}\"\nname = \"{code}\"\ngame_code = \"{code}\"\n");
@@ -725,8 +779,16 @@ fn launch(commands: &mut Commands, images: &mut Assets<Image>, code: &str, rom: 
     };
     let mod_args = crate::mod_packs::native_args(code);
     let lang = if crate::i18n::lang() == crate::i18n::Lang::Fr { "fr" } else { "en" };
+    // Un mod qui touche à la sauvegarde a la sienne : celle du jeu sans mods reste intacte
+    let save = match crate::mod_packs::separate_save(code) {
+        Some(ids) => saves.join(format!("backup-{ids}.sav")),
+        None => saves.join("backup.sav"),
+    };
     let mut command = Command::new(module);
-    command.arg(rom).arg("--pipe").arg("--shm").arg(&name).arg("--save").arg(saves.join("backup.sav")).arg("--lang").arg(lang).args(mod_args).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(log);
+    command.arg(rom).arg("--pipe").arg("--shm").arg(&name).arg("--save").arg(save).arg("--lang").arg(lang).args(mod_args).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(log);
+    if let Some(plugins) = crate::mod_packs::write_plugins(code, rom) {
+        command.arg("--plugins").arg(plugins);
+    }
     if std::env::var_os("NDSGS_NATIVE_MUTE").is_some() {
         command.arg("--mute");
     }
@@ -827,60 +889,56 @@ fn cursor_and_notices(mut running: ResMut<Running>, motion: Res<AccumulatedMouse
     }
 }
 
-/// Code HID (page 7 des claviers USB) d'une touche, par sa place : `NDS_KEY_*` de `native/sdk/nds_mod.h`.
-fn hid_usage(key: KeyCode) -> Option<u8> {
+/// Touches du clavier : code HID (page 7 des claviers USB, `NDS_KEY_*` de `native/sdk/nds_mod.h`) et nom, celui de `KeyCode`
+/// (un manifeste écrit `"KeyC"`). Les touches sont physiques : `KeyQ` est le A d'un clavier AZERTY.
+const KEYS: [(KeyCode, u8, &str); 94] = {
     use KeyCode::*;
-    const LETTERS: [KeyCode; 26] = [KeyA, KeyB, KeyC, KeyD, KeyE, KeyF, KeyG, KeyH, KeyI, KeyJ, KeyK, KeyL, KeyM, KeyN, KeyO, KeyP, KeyQ, KeyR, KeyS, KeyT, KeyU, KeyV, KeyW, KeyX, KeyY, KeyZ];
-    const DIGITS: [KeyCode; 10] = [Digit1, Digit2, Digit3, Digit4, Digit5, Digit6, Digit7, Digit8, Digit9, Digit0];
-    const FUNCTIONS: [KeyCode; 12] = [F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12];
-    if let Some(i) = LETTERS.iter().position(|&k| k == key) {
-        return Some(0x04 + i as u8);
+    [
+        (KeyA, 0x04, "KeyA"), (KeyB, 0x05, "KeyB"), (KeyC, 0x06, "KeyC"), (KeyD, 0x07, "KeyD"), (KeyE, 0x08, "KeyE"), (KeyF, 0x09, "KeyF"),
+        (KeyG, 0x0A, "KeyG"), (KeyH, 0x0B, "KeyH"), (KeyI, 0x0C, "KeyI"), (KeyJ, 0x0D, "KeyJ"), (KeyK, 0x0E, "KeyK"), (KeyL, 0x0F, "KeyL"),
+        (KeyM, 0x10, "KeyM"), (KeyN, 0x11, "KeyN"), (KeyO, 0x12, "KeyO"), (KeyP, 0x13, "KeyP"), (KeyQ, 0x14, "KeyQ"), (KeyR, 0x15, "KeyR"),
+        (KeyS, 0x16, "KeyS"), (KeyT, 0x17, "KeyT"), (KeyU, 0x18, "KeyU"), (KeyV, 0x19, "KeyV"), (KeyW, 0x1A, "KeyW"), (KeyX, 0x1B, "KeyX"),
+        (KeyY, 0x1C, "KeyY"), (KeyZ, 0x1D, "KeyZ"),
+        (Digit1, 0x1E, "Digit1"), (Digit2, 0x1F, "Digit2"), (Digit3, 0x20, "Digit3"), (Digit4, 0x21, "Digit4"), (Digit5, 0x22, "Digit5"),
+        (Digit6, 0x23, "Digit6"), (Digit7, 0x24, "Digit7"), (Digit8, 0x25, "Digit8"), (Digit9, 0x26, "Digit9"), (Digit0, 0x27, "Digit0"),
+        (Enter, 0x28, "Enter"), (Escape, 0x29, "Escape"), (Backspace, 0x2A, "Backspace"), (Tab, 0x2B, "Tab"), (Space, 0x2C, "Space"),
+        (Minus, 0x2D, "Minus"), (Equal, 0x2E, "Equal"), (BracketLeft, 0x2F, "BracketLeft"), (BracketRight, 0x30, "BracketRight"),
+        (Backslash, 0x31, "Backslash"), (Semicolon, 0x33, "Semicolon"), (Quote, 0x34, "Quote"), (Backquote, 0x35, "Backquote"),
+        (Comma, 0x36, "Comma"), (Period, 0x37, "Period"), (Slash, 0x38, "Slash"), (CapsLock, 0x39, "CapsLock"),
+        (F1, 0x3A, "F1"), (F2, 0x3B, "F2"), (F3, 0x3C, "F3"), (F4, 0x3D, "F4"), (F5, 0x3E, "F5"), (F6, 0x3F, "F6"), (F7, 0x40, "F7"),
+        (F8, 0x41, "F8"), (F9, 0x42, "F9"), (F10, 0x43, "F10"), (F11, 0x44, "F11"), (F12, 0x45, "F12"),
+        (Insert, 0x49, "Insert"), (Home, 0x4A, "Home"), (PageUp, 0x4B, "PageUp"), (Delete, 0x4C, "Delete"), (End, 0x4D, "End"),
+        (PageDown, 0x4E, "PageDown"), (ArrowRight, 0x4F, "ArrowRight"), (ArrowLeft, 0x50, "ArrowLeft"), (ArrowDown, 0x51, "ArrowDown"),
+        (ArrowUp, 0x52, "ArrowUp"),
+        (Numpad1, 0x59, "Numpad1"), (Numpad2, 0x5A, "Numpad2"), (Numpad3, 0x5B, "Numpad3"), (Numpad4, 0x5C, "Numpad4"), (Numpad5, 0x5D, "Numpad5"),
+        (Numpad6, 0x5E, "Numpad6"), (Numpad7, 0x5F, "Numpad7"), (Numpad8, 0x60, "Numpad8"), (Numpad9, 0x61, "Numpad9"), (Numpad0, 0x62, "Numpad0"),
+        (IntlBackslash, 0x64, "IntlBackslash"),
+        (ControlLeft, 0xE0, "ControlLeft"), (ShiftLeft, 0xE1, "ShiftLeft"), (AltLeft, 0xE2, "AltLeft"), (SuperLeft, 0xE3, "SuperLeft"),
+        (ControlRight, 0xE4, "ControlRight"), (ShiftRight, 0xE5, "ShiftRight"), (AltRight, 0xE6, "AltRight"), (SuperRight, 0xE7, "SuperRight"),
+    ]
+};
+
+/// Code HID d'une touche, par sa place.
+fn hid_usage(key: KeyCode) -> Option<u8> {
+    KEYS.iter().find(|(k, _, _)| *k == key).map(|(_, hid, _)| *hid)
+}
+
+/// Code HID d'une touche nommée comme `KeyCode` (`"KeyC"`), pour les manifestes des mods.
+pub fn hid_of_name(name: &str) -> Option<u8> {
+    KEYS.iter().find(|(_, _, n)| *n == name).map(|(_, hid, _)| *hid)
+}
+
+/// Ce qu'on montre au joueur pour un code HID : la lettre ou le nom de la touche.
+pub fn key_label(hid: u8) -> String {
+    match KEYS.iter().find(|(_, h, _)| *h == hid) {
+        Some((_, _, name)) => name.strip_prefix("Key").or_else(|| name.strip_prefix("Digit")).unwrap_or(name).to_string(),
+        None => format!("#{hid}"),
     }
-    if let Some(i) = DIGITS.iter().position(|&k| k == key) {
-        return Some(0x1E + i as u8);
-    }
-    if let Some(i) = FUNCTIONS.iter().position(|&k| k == key) {
-        return Some(0x3A + i as u8);
-    }
-    Some(match key {
-        Enter => 0x28,
-        Escape => 0x29,
-        Backspace => 0x2A,
-        Tab => 0x2B,
-        Space => 0x2C,
-        Minus => 0x2D,
-        Equal => 0x2E,
-        BracketLeft => 0x2F,
-        BracketRight => 0x30,
-        Backslash => 0x31,
-        Semicolon => 0x33,
-        Quote => 0x34,
-        Backquote => 0x35,
-        Comma => 0x36,
-        Period => 0x37,
-        Slash => 0x38,
-        CapsLock => 0x39,
-        Insert => 0x49,
-        Home => 0x4A,
-        PageUp => 0x4B,
-        Delete => 0x4C,
-        End => 0x4D,
-        PageDown => 0x4E,
-        ArrowRight => 0x4F,
-        ArrowLeft => 0x50,
-        ArrowDown => 0x51,
-        ArrowUp => 0x52,
-        IntlBackslash => 0x64,
-        ControlLeft => 0xE0,
-        ShiftLeft => 0xE1,
-        AltLeft => 0xE2,
-        SuperLeft => 0xE3,
-        ControlRight => 0xE4,
-        ShiftRight => 0xE5,
-        AltRight => 0xE6,
-        SuperRight => 0xE7,
-        _ => return None,
-    })
+}
+
+/// La touche que le joueur vient d'enfoncer, en code HID (choix d'une touche dans les réglages d'un mod).
+pub fn hid_pressed(keys: &ButtonInput<KeyCode>) -> Option<u8> {
+    keys.get_just_pressed().find_map(|k| hid_usage(*k))
 }
 
 /// Le paquet 2 : les champs du paquet 1, puis la souris, la fenêtre et le clavier entier (`input_thread` de `present.c`).

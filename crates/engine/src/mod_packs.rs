@@ -14,8 +14,19 @@
 //! ```
 //!
 //! Dans le dossier d'un mod, un dossier par code de jeu (`AL7E/`) garde ce qui ne vaut que pour ce jeu : seul celui du jeu est installé. Un
-//! `native.json`, `{"features": ["interpolate"]}`, demande au runtime natif une fonction qu'il a déjà : un mod ne lui apporte toujours aucun code.
+//! `native.json`, `{"features": ["interpolate"]}`, demande au runtime natif une fonction qu'il a déjà.
 //! Le dépôt de base de l'app ([`BASE_REPOSITORY`]) est lu de la même façon, si l'option est active.
+//!
+//! Format 2 (ROADMAP-MODS.md) : un mod peut aussi apporter du code, une bibliothèque par machine (`"plugin"`) qui ne connaît que
+//! `native/sdk/nds_mod.h`. Le joueur est prévenu avant de l'installer. Une release peut porter `<id>-<version>-<machine>.zip` et `SHA256SUMS`.
+//! Au lancement, le launcher écrit `plugins.json` (ordre, réglages) ; le module charge les mods et dit dans `status.json` ce qu'il en a fait.
+//!
+//! ```json
+//! { "format": 2, "id": "camera-libre", "version": "2.0.0", "type": "native", "api": "1.0", "games": { "AL7E": ["<sha1 de la rom>"] },
+//!   "plugin": { "windows-x86": "lib/windows-x86/camera_libre.dll", "macos-arm64": "lib/macos-arm64/camera_libre.dylib" },
+//!   "settings": [ { "key": "toggle", "name": "Free camera", "type": "keybind", "default": "KeyC" } ],
+//!   "instruction_hooks": { "AL7E": ["0x020ace58"] }, "multiplayer": "safe", "save": "separate" }
+//! ```
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -69,9 +80,33 @@ struct Manifest {
     name_fr: String,
     #[serde(default)]
     description_fr: String,
-    /// Codes des jeux ; vide = tout jeu.
+    /// Codes des jeux ; vide = tout jeu. Format 2 : aussi un objet code → SHA-1 des roms.
     #[serde(default)]
-    games: Vec<String>,
+    games: Games,
+    #[serde(default)]
+    format: u32,
+    /// `data` (par défaut), `native`, `mixed`
+    #[serde(rename = "type", default)]
+    kind: String,
+    /// Version de `nds_mod.h`, `"1.0"`.
+    #[serde(default)]
+    api: String,
+    /// Machine → bibliothèque, chemin dans le dossier du mod.
+    #[serde(default)]
+    plugin: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    settings: Vec<Setting>,
+    #[serde(default)]
+    presets: Vec<Preset>,
+    /// Code du jeu → adresses d'instructions accrochées (le module est généré avec elles).
+    #[serde(default)]
+    instruction_hooks: std::collections::BTreeMap<String, Vec<String>>,
+    /// `safe` : sans effet sur la partie, pas comparé en multi.
+    #[serde(default)]
+    multiplayer: String,
+    /// `separate` : ce mod touche à la sauvegarde, elle est séparée.
+    #[serde(default)]
+    save: String,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -102,6 +137,11 @@ pub struct Pack {
     pub description: String,
     pub enabled: bool,
     pub source: String,
+    /// Ce qu'il fait sur l'ordinateur (mod de code), à montrer.
+    pub warning: Option<String>,
+    /// Ce que le module en a fait à la dernière partie : (état, raison).
+    pub status: Option<(String, Option<String>)>,
+    pub has_settings: bool,
 }
 
 impl Manifest {
@@ -140,9 +180,12 @@ pub fn list(code: &str) -> Vec<Pack> {
         .filter(|entry| packs_dir(&dir).join(&entry.id).is_dir())
         .map(|entry| {
             let manifest = std::fs::read(packs_dir(&dir).join(&entry.id).join(MANIFEST)).ok().and_then(|bytes| serde_json::from_slice::<Manifest>(&bytes).ok()).unwrap_or_default().translate();
+            let warning = warning(&manifest);
+            let status = if manifest.runs_code() { last_status(&dir, &entry.id) } else { None };
+            let has_settings = !manifest.settings.is_empty();
             let name = if manifest.name.is_empty() { entry.id.clone() } else { manifest.name };
             let network = pack_features(&packs_dir(&dir).join(&entry.id)).iter().any(|f| f == "network");
-            Pack { network, id: entry.id, name, version: manifest.version, author: manifest.author, description: manifest.description, enabled: entry.enabled, source: entry.source }
+            Pack { network, id: entry.id, name, version: manifest.version, author: manifest.author, description: manifest.description, enabled: entry.enabled, source: entry.source, warning, status, has_settings }
         })
         .collect()
 }
@@ -189,10 +232,10 @@ pub fn native_args(code: &str) -> Vec<OsString> {
     args
 }
 
-/// Un mod actif demande une fonction au runtime.
+/// Un mod actif demande une fonction au runtime, ou apporte du code (format 2).
 pub fn has_active_features(code: &str) -> bool {
     let dir = mods::mod_dir(code);
-    load_state(&dir).packs.iter().any(|p| p.enabled && !pack_features(&packs_dir(&dir).join(&p.id)).is_empty())
+    load_state(&dir).packs.iter().any(|p| p.enabled && (!pack_features(&packs_dir(&dir).join(&p.id)).is_empty() || pack_manifest(&dir, &p.id).runs_code()))
 }
 
 /// Les noms des mods actifs de ce jeu.
@@ -490,13 +533,15 @@ fn install_one(mod_dir: &Path, code: &str, top: &Path, id: &str) -> Result<u64, 
     let _ = std::fs::remove_dir_all(&new);
     std::fs::create_dir_all(&new).map_err(|e| e.to_string())?;
     let mut copied = 0;
+    let manifest = read_manifest(top, MANIFEST).unwrap_or_default();
     if is_structured(from) {
         for sub in [FILES, DROP_INS] {
             if from.join(sub).is_dir() {
                 copied += copy_tree(&from.join(sub), &new.join(sub), &|n| !n.starts_with(".git"))?;
             }
         }
-    } else {
+    } else if !manifest.runs_code() {
+        // un mod de code sans fichiers/ n'a pas de fichiers de jeu : ses bibliothèques et ses sources n'iraient pas dans la rom
         copied += copy_tree(from, &new.join(FILES), &not_meta)?;
     }
     if top.join(MANIFEST).is_file() {
@@ -505,6 +550,17 @@ fn install_one(mod_dir: &Path, code: &str, top: &Path, id: &str) -> Result<u64, 
     if from.join(NATIVE).is_file() {
         std::fs::copy(from.join(NATIVE), new.join(NATIVE)).map_err(|e| e.to_string())?;
         copied += 1;
+    }
+    // Mod de code : seule la bibliothèque de cette machine est gardée
+    if let Some(file) = manifest.plugin.get(PLATFORM).filter(|f| !f.contains("..")) {
+        let source = [top.join(file), from.join(file)].into_iter().find(|p| p.is_file()).ok_or_else(|| t!("{file} is missing from this mod.", "{file} manque dans ce mod."))?;
+        let target_file = new.join(file);
+        if let Some(parent) = target_file.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::copy(source, target_file).map_err(|e| e.to_string())?;
+        copied += 1;
+        clear_quarantine(&new);
     }
     if copied == 0 {
         let _ = std::fs::remove_dir_all(&new);
@@ -525,7 +581,10 @@ fn install_tree(mod_dir: &Path, root: &Path, code: &str, source: &str, fallback_
     let mut other_games = Vec::new();
     for folder in folders {
         let manifest: Manifest = serde_json::from_slice(&std::fs::read(folder.join(MANIFEST)).map_err(|e| e.to_string())?).map_err(|e| t!("{MANIFEST} cannot be read: {e}", "{MANIFEST} illisible : {e}"))?;
-        if manifest.games.is_empty() || manifest.games.iter().any(|g| g.eq_ignore_ascii_case(code)) {
+        if manifest.games.fits(code) {
+            if let Some(refused) = manifest.code_refusal() {
+                return Err(refused);
+            }
             found.push((folder, manifest));
         } else {
             other_games.push(if manifest.name.is_empty() { manifest.id } else { manifest.name });
@@ -720,6 +779,8 @@ pub struct Found {
     pub refused: Option<String>,
     /// La version installée.
     pub installed: Option<String>,
+    /// Ce qu'il fait sur l'ordinateur (mod de code).
+    pub warning: Option<String>,
     folder: PathBuf,
 }
 
@@ -787,22 +848,23 @@ fn scan(root: &Path, code: &str, mod_dir: &Path, plain_name: Option<&str>) -> Ve
     for folder in folders {
         if folder.join(MANIFEST).is_file() {
             let Some(manifest) = read_manifest(&folder, MANIFEST) else { continue };
-            let fits = manifest.games.is_empty() || manifest.games.iter().any(|g| g.eq_ignore_ascii_case(code));
-            let refused = (!fits).then(|| t!("For other games: {}", "Pour d'autres jeux : {}", manifest.games.join(", ")));
+            let fits = manifest.games.fits(code);
+            let refused = if fits { manifest.code_refusal() } else { Some(t!("For other games: {}", "Pour d'autres jeux : {}", manifest.games.codes().join(", "))) };
+            let warning = warning(&manifest);
             let id = clean_id(if manifest.id.is_empty() { &manifest.name } else { &manifest.id });
             let name = if manifest.name.is_empty() { id.clone() } else { manifest.name };
-            found.push(Found { installed: installed(&id), id, name, version: manifest.version, author: manifest.author, description: manifest.description, refused, folder });
+            found.push(Found { installed: installed(&id), id, name, version: manifest.version, author: manifest.author, description: manifest.description, refused, warning, folder });
         } else if let Some(manifest) = read_manifest(&folder, OPENRAC_MANIFEST) {
             let refused = Some(tr("Made for OpenRAC's port of Ratchet & Clank: it holds code for that game, not DS game files.", "Fait pour le portage de Ratchet & Clank d'OpenRAC : il contient du code pour ce jeu, pas des fichiers de jeu DS.").to_string());
             let name = if manifest.name.is_empty() { manifest.id.clone() } else { manifest.name };
-            found.push(Found { id: manifest.id, name, version: manifest.version, author: manifest.author, description: manifest.description, refused, installed: None, folder });
+            found.push(Found { id: manifest.id, name, version: manifest.version, author: manifest.author, description: manifest.description, refused, installed: None, warning: None, folder });
         }
     }
     if found.is_empty() {
         let structured = structured_root(root);
         if let Some(name) = plain_name.map(str::to_string).or_else(|| structured.is_some().then(|| stem_of(root))) {
             let id = clean_id(&name);
-            found.push(Found { installed: installed(&id), id, name, version: String::new(), author: String::new(), description: String::new(), refused: None, folder: structured.unwrap_or_else(|| root.to_path_buf()) });
+            found.push(Found { installed: installed(&id), id, name, version: String::new(), author: String::new(), description: String::new(), refused: None, warning: None, folder: structured.unwrap_or_else(|| root.to_path_buf()) });
         }
     }
     found.sort_by_key(|f| (f.refused.is_some(), f.name.to_lowercase()));
@@ -845,7 +907,8 @@ fn sha256_of(path: &Path) -> Result<String, String> {
 /// `<id>-<version>.zip` de la release, s'il est listé dans `SHA256SUMS` : téléchargé, contrôlé. Une somme fausse est un refus ; sans somme, c'est
 /// le dépôt qui sert, comme pour une release sans archive.
 fn from_release(preview: &Preview, found: &Found, temp: &Path) -> Result<Option<PathBuf>, String> {
-    let name = format!("{}-{}.zip", found.id, found.version);
+    let names = [format!("{}-{}-{PLATFORM}.zip", found.id, found.version), format!("{}-{}.zip", found.id, found.version)];
+    let Some(name) = names.into_iter().find(|n| preview.assets.iter().any(|a| a.name == *n)) else { return Ok(None) };
     let (Some(asset), Some(sums)) = (preview.assets.iter().find(|a| a.name == name), preview.assets.iter().find(|a| a.name == "SHA256SUMS")) else { return Ok(None) };
     std::fs::create_dir_all(temp).map_err(|e| e.to_string())?;
     let sums_file = temp.join("SHA256SUMS");
@@ -906,6 +969,304 @@ pub fn install_found(code: &str, rom: &Path, id: &str) {
         })();
         result.inspect_err(|e: &String| crate::activity::record(crate::activity::What::ModFailed { game: code.clone(), error: e.clone() }))
     });
+}
+
+// ------------------------------------------------------------------ mods de code (format 2, native/sdk/nds_mod.h)
+
+/// La machine des modules natifs, comme `PLATFORM` de `native/nitro-pc/mods.c` : sous Windows, le module reste en 32 bits.
+pub const PLATFORM: &str = if cfg!(target_os = "macos") {
+    if cfg!(target_arch = "aarch64") { "macos-arm64" } else { "macos-x86_64" }
+} else {
+    "windows-x86"
+};
+/// La version majeure de `nds_mod.h` que le runtime livré connaît.
+const API_MAJOR: u32 = 1;
+const PLUGINS: &str = "plugins.json";
+const STATUS: &str = "status.json";
+const SETTINGS: &str = "reglages.json";
+
+/// `"games"` : une liste de codes, ou un objet code → SHA-1 des roms (format 2).
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(untagged)]
+enum Games {
+    List(Vec<String>),
+    Roms(std::collections::BTreeMap<String, Vec<String>>),
+}
+
+impl Default for Games {
+    fn default() -> Self {
+        Games::List(Vec::new())
+    }
+}
+
+impl Games {
+    fn codes(&self) -> Vec<String> {
+        match self {
+            Games::List(list) => list.clone(),
+            Games::Roms(map) => map.keys().cloned().collect(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.codes().is_empty()
+    }
+
+    fn fits(&self, code: &str) -> bool {
+        self.is_empty() || self.codes().iter().any(|g| g.eq_ignore_ascii_case(code))
+    }
+
+    /// Les SHA-1 acceptées pour ce jeu ; vide = toute rom de ce code.
+    fn roms(&self, code: &str) -> Vec<String> {
+        match self {
+            Games::List(_) => Vec::new(),
+            Games::Roms(map) => map.iter().find(|(c, _)| c.eq_ignore_ascii_case(code)).map_or(Vec::new(), |(_, r)| r.iter().map(|s| s.to_lowercase()).collect()),
+        }
+    }
+}
+
+/// Un réglage décrit par le manifeste : la page du mod le construit seule.
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct Setting {
+    pub key: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    name_fr: String,
+    /// `bool`, `int`, `float`, `choice`, `string`, `keybind`
+    #[serde(rename = "type", default)]
+    pub kind: String,
+    #[serde(default)]
+    pub default: serde_json::Value,
+    #[serde(default)]
+    pub min: Option<f64>,
+    #[serde(default)]
+    pub max: Option<f64>,
+    #[serde(default)]
+    pub step: Option<f64>,
+    #[serde(default)]
+    pub choices: Vec<String>,
+}
+
+/// Des valeurs toutes prêtes pour plusieurs réglages.
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct Preset {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    name_fr: String,
+    #[serde(default)]
+    pub values: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+impl Manifest {
+    /// Un mod qui apporte du code : une bibliothèque native (ou, plus tard, des scripts).
+    fn runs_code(&self) -> bool {
+        self.kind == "native" || self.kind == "mixed" || !self.plugin.is_empty()
+    }
+
+    /// Pourquoi ce mod de code ne peut pas servir ici ; `None` s'il le peut.
+    fn code_refusal(&self) -> Option<String> {
+        if !self.runs_code() {
+            return None;
+        }
+        let major = self.api.split('.').next().and_then(|m| m.parse::<u32>().ok());
+        if major != Some(API_MAJOR) {
+            return Some(t!("Made for another version of the mod interface ({}): this launcher has {API_MAJOR}.x.", "Fait pour une autre version de l'interface des mods ({}) : ce launcher a la {API_MAJOR}.x.", if self.api.is_empty() { "?" } else { &self.api }));
+        }
+        if !self.plugin.contains_key(PLATFORM) {
+            return Some(t!("No version for this computer ({PLATFORM}).", "Pas de version pour cet ordinateur ({PLATFORM})."));
+        }
+        None
+    }
+}
+
+/// Ce qu'un mod fait sur l'ordinateur, montré avant de l'installer et sur sa ligne.
+fn warning(manifest: &Manifest) -> Option<String> {
+    manifest.runs_code().then(|| tr("Runs code on this computer: install it only from a source you trust.", "Execute du code sur cet ordinateur : ne l'installez que depuis une source de confiance.").to_string())
+}
+
+/// Les valeurs choisies par le joueur : `reglages.json`, id du mod → clé → valeur.
+type Values = std::collections::BTreeMap<String, std::collections::BTreeMap<String, serde_json::Value>>;
+
+fn load_values(mod_dir: &Path) -> Values {
+    std::fs::read(mod_dir.join(SETTINGS)).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default()
+}
+
+fn pack_manifest(mod_dir: &Path, id: &str) -> Manifest {
+    std::fs::read(packs_dir(mod_dir).join(id).join(MANIFEST)).ok().and_then(|bytes| serde_json::from_slice::<Manifest>(&bytes).ok()).unwrap_or_default()
+}
+
+/// Un touche choisie se garde par son code HID ; le manifeste peut la donner par son nom (`"KeyC"`).
+fn keybind_value(value: &serde_json::Value) -> serde_json::Value {
+    match value.as_str().and_then(crate::native_game::hid_of_name) {
+        Some(hid) => serde_json::Value::from(hid),
+        None => value.clone(),
+    }
+}
+
+/// Les réglages d'un mod, avec la valeur en cours (choisie, sinon celle du manifeste), et ses préréglages.
+pub fn settings_of(code: &str, id: &str) -> (Vec<(Setting, serde_json::Value)>, Vec<Preset>) {
+    let dir = mods::mod_dir(code);
+    let manifest = pack_manifest(&dir, id);
+    let chosen = load_values(&dir).remove(id).unwrap_or_default();
+    let french = lang() == Lang::Fr;
+    let settings = manifest
+        .settings
+        .into_iter()
+        .map(|mut s| {
+            let mut value = chosen.get(&s.key).cloned().unwrap_or_else(|| s.default.clone());
+            if s.kind == "keybind" {
+                value = keybind_value(&value);
+            }
+            if french && !s.name_fr.is_empty() {
+                s.name = std::mem::take(&mut s.name_fr);
+            }
+            if s.name.is_empty() {
+                s.name = s.key.clone();
+            }
+            (s, value)
+        })
+        .collect();
+    let presets = manifest
+        .presets
+        .into_iter()
+        .map(|mut p| {
+            if french && !p.name_fr.is_empty() {
+                p.name = std::mem::take(&mut p.name_fr);
+            }
+            p
+        })
+        .collect();
+    (settings, presets)
+}
+
+pub fn set_setting(code: &str, id: &str, key: &str, value: serde_json::Value) {
+    let dir = mods::mod_dir(code);
+    let mut values = load_values(&dir);
+    values.entry(id.to_string()).or_default().insert(key.to_string(), value);
+    if let Ok(text) = serde_json::to_vec_pretty(&values) {
+        let _ = std::fs::write(dir.join(SETTINGS), text);
+    }
+}
+
+/// Toutes les valeurs d'un préréglage d'un coup.
+pub fn apply_preset(code: &str, id: &str, preset: &Preset) {
+    for (key, value) in &preset.values {
+        set_setting(code, id, key, value.clone());
+    }
+}
+
+/// L'état d'un mod de code à la dernière partie, écrit par le module (`status.json`) : (état, raison).
+fn last_status(mod_dir: &Path, id: &str) -> Option<(String, Option<String>)> {
+    let value: serde_json::Value = serde_json::from_slice(&std::fs::read(mod_dir.join(STATUS)).ok()?).ok()?;
+    let entry = value.get("mods")?.as_array()?.iter().find(|m| m.get("id").and_then(|v| v.as_str()) == Some(id))?;
+    let state = entry.get("state")?.as_str()?.to_string();
+    Some((state, entry.get("reason").and_then(|v| v.as_str()).map(str::to_string)))
+}
+
+/// SHA-1 d'une rom, gardée tant que le fichier ne change pas : une rom peut faire 256 Mo.
+fn rom_sha1(rom: &Path) -> Option<String> {
+    use sha1::{Digest, Sha1};
+    static CACHE: Mutex<Vec<(PathBuf, u64, std::time::SystemTime, String)>> = Mutex::new(Vec::new());
+    let meta = std::fs::metadata(rom).ok()?;
+    let (size, time) = (meta.len(), meta.modified().ok()?);
+    if let Some(hit) = CACHE.lock().unwrap().iter().find(|(p, s, t, _)| p == rom && *s == size && *t == time) {
+        return Some(hit.3.clone());
+    }
+    let mut hasher = Sha1::new();
+    let mut file = std::fs::File::open(rom).ok()?;
+    std::io::copy(&mut file, &mut hasher).ok()?;
+    let hex: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    CACHE.lock().unwrap().push((rom.to_path_buf(), size, time, hex.clone()));
+    Some(hex)
+}
+
+/// Écrit `plugins.json` pour les mods de code actifs, dans l'ordre de la liste, et rend son chemin ; `None` sans mod de code.
+/// Le module vérifie l'interface, le jeu et la machine, charge les mods et écrit `status.json` à côté. Le launcher refuse lui-même
+/// ce qu'il est seul à savoir : la rom (SHA-1).
+pub fn write_plugins(code: &str, rom: &Path) -> Option<PathBuf> {
+    if !mods::this_run_has_mods(code) {
+        return None;
+    }
+    let dir = mods::mod_dir(code);
+    let values = load_values(&dir);
+    let mut entries = Vec::new();
+    for entry in load_state(&dir).packs.into_iter().filter(|p| p.enabled) {
+        let manifest = pack_manifest(&dir, &entry.id);
+        if !manifest.runs_code() {
+            continue;
+        }
+        let pack = packs_dir(&dir).join(&entry.id);
+        let plugin: serde_json::Map<String, serde_json::Value> = manifest.plugin.iter().map(|(platform, file)| (platform.clone(), serde_json::Value::from(pack.join(file).to_string_lossy().into_owned()))).collect();
+        let mut settings = serde_json::Map::new();
+        let (described, _) = settings_of(code, &entry.id);
+        for (setting, value) in described {
+            settings.insert(setting.key, value);
+        }
+        for (key, value) in values.get(&entry.id).into_iter().flatten() {
+            settings.entry(key.clone()).or_insert_with(|| value.clone());
+        }
+        let mut item = serde_json::json!({
+            "id": entry.id, "version": manifest.version, "api": manifest.api, "games": manifest.games.codes(),
+            "plugin": plugin, "settings": settings, "multiplayer": manifest.multiplayer,
+        });
+        let roms = manifest.games.roms(code);
+        if !roms.is_empty() && !rom_sha1(rom).is_some_and(|sha| roms.contains(&sha)) {
+            item["refused"] = serde_json::Value::from(tr("made for another version of this game (its rom is not one of those listed)", "fait pour une autre version de ce jeu (sa rom n'est pas une de celles listees)"));
+        }
+        entries.push(item);
+    }
+    if entries.is_empty() {
+        return None;
+    }
+    let path = dir.join(PLUGINS);
+    let text = serde_json::to_vec_pretty(&serde_json::json!({ "format": 1, "mods": entries })).ok()?;
+    std::fs::write(&path, text).ok()?;
+    // L'état de la partie précédente ne vaut plus
+    let _ = std::fs::remove_file(dir.join(STATUS));
+    Some(path)
+}
+
+/// Les instructions que les mods actifs accrochent dans ce jeu (`"instruction_hooks"`) : le module est généré avec elles.
+pub fn instruction_hooks(code: &str) -> Vec<String> {
+    if !mods::this_run_has_mods(code) {
+        return Vec::new();
+    }
+    let dir = mods::mod_dir(code);
+    let mut all: Vec<String> = load_state(&dir)
+        .packs
+        .into_iter()
+        .filter(|p| p.enabled)
+        .flat_map(|p| {
+            let manifest = pack_manifest(&dir, &p.id);
+            manifest.instruction_hooks.iter().find(|(c, _)| c.eq_ignore_ascii_case(code)).map_or(Vec::new(), |(_, list)| list.clone())
+        })
+        .filter_map(|a| u32::from_str_radix(a.trim().trim_start_matches("0x").trim_start_matches("0X"), 16).ok())
+        .map(|a| format!("0x{:08x}", a & !1))
+        .collect();
+    all.sort();
+    all.dedup();
+    all
+}
+
+/// Les mods actifs qui touchent à la sauvegarde (`"save": "separate"`) : elle est alors séparée, une par ensemble de mods.
+pub fn separate_save(code: &str) -> Option<String> {
+    if !mods::this_run_has_mods(code) {
+        return None;
+    }
+    let dir = mods::mod_dir(code);
+    let mut ids: Vec<String> = load_state(&dir).packs.into_iter().filter(|p| p.enabled && pack_manifest(&dir, &p.id).save == "separate").map(|p| p.id).collect();
+    ids.sort();
+    (!ids.is_empty()).then(|| ids.join("+"))
+}
+
+/// Sur Mac, une bibliothèque téléchargée peut porter la quarantaine : le module ne la chargerait pas.
+fn clear_quarantine(dir: &Path) {
+    if cfg!(target_os = "macos") {
+        let mut command = Command::new("xattr");
+        command.arg("-dr").arg("com.apple.quarantine").arg(dir);
+        let _ = command.output();
+    }
 }
 
 /// Les liens déjà utilisés pour ce jeu.
@@ -1078,6 +1439,48 @@ mod tests {
         assert!(!has_files(&pack));
         assert_eq!(pack_features(&pack), ["interpolate"]);
         assert!(!pack.join(FILES).join(NATIVE).exists());
+    }
+
+    #[test]
+    fn a_code_mod_keeps_only_this_computers_library() {
+        let (source, mods_dir) = (temp("code-s"), temp("code-m"));
+        let manifest = format!(r#"{{"format":2,"id":"cam","version":"2.0.0","type":"native","api":"1.0","games":{{"AL7E":["abc"]}},
+            "plugin":{{"{PLATFORM}":"lib/here/cam.dll","autre-machine":"lib/other/cam.so"}}}}"#);
+        write(source.join("nds-mod.json"), &manifest);
+        write(source.join("lib/here/cam.dll"), "dll");
+        write(source.join("lib/other/cam.so"), "so");
+        write(source.join("src/mod.c"), "c");
+        install_tree(&mods_dir, &source, "AL7E", "o/r", "r").unwrap();
+        let pack = mods_dir.join("paquets/cam");
+        assert!(pack.join("lib/here/cam.dll").is_file());
+        assert!(!pack.join("lib/other").exists() && !pack.join(FILES).exists(), "ni l'autre machine, ni les sources comme fichiers de jeu");
+        let m = read_manifest(&pack, MANIFEST).unwrap();
+        assert!(m.runs_code() && m.code_refusal().is_none() && m.games.fits("AL7E") && !m.games.fits("AJTP"));
+        assert_eq!(m.games.roms("al7e"), ["abc"]);
+        assert!(warning(&m).is_some());
+    }
+
+    #[test]
+    fn a_code_mod_says_why_it_cannot_run_here() {
+        let (source, mods_dir) = (temp("nocode-s"), temp("nocode-m"));
+        write(source.join("mac/nds-mod.json"), r#"{"format":2,"id":"mac","type":"native","api":"1.0","plugin":{"autre-machine":"x.dylib"}}"#);
+        write(source.join("v2/nds-mod.json"), &format!(r#"{{"format":2,"id":"v2","type":"native","api":"2.0","plugin":{{"{PLATFORM}":"x"}}}}"#));
+        write(source.join("data/nds-mod.json"), r#"{"id":"data","games":["AL7E"]}"#);
+        let found = scan(&source, "AL7E", &mods_dir, None);
+        let reason = |id: &str| found.iter().find(|f| f.id == id).unwrap().refused.clone();
+        assert!(reason("mac").unwrap().contains(PLATFORM));
+        assert!(reason("v2").unwrap().contains("2.0"));
+        assert!(reason("data").is_none() && found.iter().find(|f| f.id == "data").unwrap().warning.is_none());
+        let error = install_tree(&mods_dir, &source.join("mac"), "AL7E", "", "mac").unwrap_err();
+        assert!(error.contains(PLATFORM), "{error}");
+    }
+
+    #[test]
+    fn keybinds_can_be_named_in_the_manifest() {
+        assert_eq!(keybind_value(&serde_json::json!("KeyC")), serde_json::json!(6));
+        assert_eq!(keybind_value(&serde_json::json!(25)), serde_json::json!(25));
+        assert_eq!(crate::native_game::key_label(6), "C");
+        assert_eq!(crate::native_game::key_label(0x1E), "1");
     }
 
     #[test]

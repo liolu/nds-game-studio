@@ -52,7 +52,8 @@ NDS_MOD_EXPORT int nds_mod_load(const nds_api *a, nds_mod *mod) {
     const char *c = a->setting(mod, "couleur");
     if (c && c[0] == 'v') color = 0xFF00FF00u;
     for (const char *p = a->setting(mod, "planter"); p && *p >= '0' && *p <= '9'; p++) crash_at = crash_at * 10 + *p - '0';
-    a->log(mod, "charge pour %s (%s), interface %u.%u, reglage couleur = %s", a->game_code, a->platform, a->major, a->minor, c ? c : "absent");
+    const char *k = a->setting(mod, "touche");
+    a->log(mod, "charge pour %s (%s, %s), interface %u.%u, reglage couleur = %s, touche = %s", a->game_code, a->platform, a->language, a->major, a->minor, c ? c : "absent", k ? k : "absente");
     if (a->hook(mod, OS_HALT, (void *)on_halt, (void **)&halt_original)) return 1;
     if (a->hook_insn(mod, OS_HALT_INSN, on_insn, 0)) a->log(mod, "sans accroche a l'instruction");
     a->on_frame(mod, frame, 0);

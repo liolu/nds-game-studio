@@ -66,7 +66,7 @@ pub fn has_modded_rom(code: &str) -> bool {
     mod_dir(code).join(MODDED_ROM).is_file()
 }
 
-/// Ce jeu a de quoi démarrer avec des mods : une copie modifiée, ou des mods qui demandent des fonctions au runtime.
+/// Ce jeu a de quoi démarrer avec des mods : une copie modifiée, des mods qui demandent des fonctions au runtime, ou des mods de code.
 pub fn available(code: &str) -> bool {
     has_modded_rom(code) || crate::mod_packs::has_active_features(code)
 }
