@@ -1,0 +1,64 @@
+# SDK des mods natifs (native/sdk) : le mod modele est compile pour chaque machine a chaque changement ; une etiquette
+# sdk-v<version> publie nds-mod-sdk-<version>.zip (en-tetes, modele, workflow, guides), sous licence MIT.
+name: Mod SDK
+
+on:
+  push:
+    branches: [experimental]
+    tags: ['sdk-v*']
+    paths:
+      - 'native/sdk/**'
+      - '.github/workflows/sdk.yml'
+  pull_request:
+    paths:
+      - 'native/sdk/**'
+  workflow_dispatch:
+
+jobs:
+  template-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: WinLibs
+        shell: pwsh
+        run: |
+          $zip = "https://github.com/brechtsanders/winlibs_mingw/releases/download/16.2.0posix-14.0.0-ucrt-r1/winlibs-x86_64-posix-seh-gcc-16.2.0-mingw-w64ucrt-14.0.0-r1.zip"
+          Invoke-WebRequest $zip -OutFile "$env:RUNNER_TEMP/winlibs.zip"
+          Expand-Archive "$env:RUNNER_TEMP/winlibs.zip" -DestinationPath "$env:RUNNER_TEMP/winlibs"
+          "$env:RUNNER_TEMP/winlibs/mingw64/bin" | Out-File -Append -Encoding ascii $env:GITHUB_PATH
+      - name: Le modele, tel qu'un createur le recoit
+        shell: bash
+        run: |
+          python native/sdk/make_sdk.py --out sdk-out
+          cd sdk-out && unzip -q nds-mod-sdk-*.zip && cd nds-mod-sdk-*/template
+          ./build.sh windows-x86
+
+  template-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Le modele, Apple Silicon et Intel
+        run: |
+          python3 native/sdk/make_sdk.py --out sdk-out
+          cd sdk-out && unzip -q nds-mod-sdk-*.zip && cd nds-mod-sdk-*/template
+          ./build.sh macos-arm64
+          ./build.sh macos-x86_64
+          python3 sdk/package_mod.py --out dist
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/sdk-v')
+    needs: [template-windows, template-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Archive
+        run: |
+          version="${GITHUB_REF_NAME#sdk-v}"
+          test "$version" = "$(tr -d '[:space:]' < native/sdk/VERSION)" || { echo "native/sdk/VERSION ne dit pas $version"; exit 1; }
+          python3 native/sdk/make_sdk.py --out dist
+      - name: Publier
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "SDK des mods $GITHUB_REF_NAME" --notes "En-tetes, modele, workflow et guides pour faire un mod natif. Licence MIT."

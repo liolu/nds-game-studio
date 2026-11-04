@@ -1,0 +1,22 @@
+{
+ "format": 2,
+ "id": "my-mod",
+ "name": "My mod",
+ "name_fr": "Mon mod",
+ "version": "1.0.0",
+ "author": "",
+ "description": "Template mod: a key shows a small frame counter on the top screen.",
+ "description_fr": "Mod modele : une touche affiche un petit compteur d'images sur l'ecran du haut.",
+ "type": "native",
+ "api": "1.0",
+ "plugin": {
+  "windows-x86": "lib/windows-x86/my_mod.dll",
+  "macos-arm64": "lib/macos-arm64/my_mod.dylib",
+  "macos-x86_64": "lib/macos-x86_64/my_mod.dylib"
+ },
+ "settings": [
+  { "key": "toggle", "name": "Show or hide the counter", "name_fr": "Afficher ou cacher le compteur", "type": "keybind", "default": "F9" },
+  { "key": "color", "name": "Colour", "name_fr": "Couleur", "type": "choice", "choices": ["blue", "green"], "default": "blue" }
+ ],
+ "multiplayer": "safe"
+}

@@ -10,7 +10,7 @@ static const nds_api *api;
 static nds_mod *self;
 static nds_fn halt_original;
 static nds_u32 halts, insns, gx, polys, audio_frames, irqs, io_writes, rom_bytes;
-static nds_u32 color = 0xFFFF0000u;
+static nds_u32 color = NDS_RGB(0xFF, 0, 0);
 
 static nds_u64 on_halt(nds_u32 r0, nds_u32 r1, nds_u32 r2, nds_u32 r3, nds_u32 a0, nds_u32 a1, nds_u32 a2, nds_u32 a3,
                        nds_u32 a4, nds_u32 a5, nds_u32 a6, nds_u32 a7, nds_u32 a8, nds_u32 a9) {
@@ -50,7 +50,7 @@ NDS_MOD_EXPORT int nds_mod_load(const nds_api *a, nds_mod *mod) {
     api = a;
     self = mod;
     const char *c = a->setting(mod, "couleur");
-    if (c && c[0] == 'v') color = 0xFF00FF00u;
+    if (c && c[0] == 'v') color = NDS_RGB(0, 0xFF, 0);
     for (const char *p = a->setting(mod, "planter"); p && *p >= '0' && *p <= '9'; p++) crash_at = crash_at * 10 + *p - '0';
     const char *k = a->setting(mod, "touche");
     a->log(mod, "charge pour %s (%s, %s), interface %u.%u, reglage couleur = %s, touche = %s", a->game_code, a->platform, a->language, a->major, a->minor, c ? c : "absent", k ? k : "absente");

@@ -112,7 +112,8 @@ typedef struct nds_api {
     void (*on_gx)(nds_mod *mod, int (*fn)(void *user, nds_u32 cmd, nds_u32 *params, nds_u32 count), void *user);
     /* polygone (3 ou 4 sommets, modifiables) : renvoyer 1 l'enleve. attr, tex, pal : POLYGON_ATTR, TEXIMAGE_PARAM, PLTT_BASE */
     void (*on_polygon)(nds_mod *mod, int (*fn)(void *user, nds_vertex *v, int n, nds_u32 attr, nds_u32 tex, nds_u32 pal), void *user);
-    /* images finales des deux ecrans (0xAARRGGBB), w x h pixels, stride en pixels ; le mod peut y dessiner */
+    /* images finales des deux ecrans, w x h pixels, stride en pixels ; le mod peut y dessiner. Un pixel = octets R, G, B, A en
+     * memoire, soit 0xAABBGGRR en nds_u32 (NDS_RGB) */
     void (*on_present)(nds_mod *mod, void (*fn)(void *user, nds_u32 *top, nds_u32 *bottom, int w, int h, int stride), void *user);
     /* son mixe, stereo 16 bits, 32768 Hz, modifiable */
     void (*on_audio)(nds_mod *mod, void (*fn)(void *user, nds_s16 *stereo, nds_u32 frames), void *user);
@@ -139,6 +140,9 @@ typedef struct nds_api {
      * qu'un mod passe avant tous les autres, ou appelle le jeu tel quel. 0 si ds_addr n'est pas une fonction traduite. */
     nds_fn (*game_function)(nds_u32 ds_addr);
 } nds_api;
+
+/* un pixel de on_present : octets R, G, B, A */
+#define NDS_RGB(r, g, b) (0xFF000000u | ((nds_u32)(b) << 16) | ((nds_u32)(g) << 8) | (nds_u32)(r))
 
 /* le champ existe dans la table de ce runtime */
 #define NDS_API_HAS(api, field) ((api)->size >= (nds_u32)((char *)&((nds_api *)0)->field - (char *)0) + sizeof((api)->field))

@@ -1,0 +1,70 @@
+# Compile le mod pour chaque machine, puis, a chaque etiquette v<version>, publie une release que le launcher de Nds Game Studio
+# installe par le lien du depot : <id>-<version>-<machine>.zip et SHA256SUMS. Aucune rom n'est necessaire.
+name: Release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Le GCC de l'image n'a pas -m32 : WinLibs, comme le runtime des jeux
+      - name: WinLibs
+        shell: pwsh
+        run: |
+          $zip = "https://github.com/brechtsanders/winlibs_mingw/releases/download/16.2.0posix-14.0.0-ucrt-r1/winlibs-x86_64-posix-seh-gcc-16.2.0-mingw-w64ucrt-14.0.0-r1.zip"
+          Invoke-WebRequest $zip -OutFile "$env:RUNNER_TEMP/winlibs.zip"
+          Expand-Archive "$env:RUNNER_TEMP/winlibs.zip" -DestinationPath "$env:RUNNER_TEMP/winlibs"
+          "$env:RUNNER_TEMP/winlibs/mingw64/bin" | Out-File -Append -Encoding ascii $env:GITHUB_PATH
+      - name: Compiler
+        shell: bash
+        run: ./build.sh windows-x86
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lib-windows-x86
+          path: lib/windows-x86
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compiler (Apple Silicon et Intel)
+        run: |
+          ./build.sh macos-arm64
+          ./build.sh macos-x86_64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lib-macos
+          path: lib/macos-*
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: lib-windows-x86
+          path: lib/windows-x86
+      - uses: actions/download-artifact@v4
+        with:
+          name: lib-macos
+          path: lib
+      - name: Archives et SHA256SUMS
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          test "$version" = "$(python3 -c "import json; print(json.load(open('nds-mod.json'))['version'])")" || { echo "nds-mod.json ne dit pas la version $version"; exit 1; }
+          python3 sdk/package_mod.py --out dist
+      - name: Publier
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME"

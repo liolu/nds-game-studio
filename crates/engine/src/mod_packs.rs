@@ -1205,9 +1205,13 @@ pub fn write_plugins(code: &str, rom: &Path) -> Option<PathBuf> {
             settings.entry(key.clone()).or_insert_with(|| value.clone());
         }
         let mut item = serde_json::json!({
-            "id": entry.id, "version": manifest.version, "api": manifest.api, "games": manifest.games.codes(),
+            "id": entry.id, "version": manifest.version, "api": manifest.api,
             "plugin": plugin, "settings": settings, "multiplayer": manifest.multiplayer,
         });
+        // sans "games", le mod vaut pour tous les jeux : le module ne doit pas lire une liste vide comme « aucun »
+        if !manifest.games.is_empty() {
+            item["games"] = serde_json::Value::from(manifest.games.codes());
+        }
         let roms = manifest.games.roms(code);
         if !roms.is_empty() && !rom_sha1(rom).is_some_and(|sha| roms.contains(&sha)) {
             item["refused"] = serde_json::Value::from(tr("made for another version of this game (its rom is not one of those listed)", "fait pour une autre version de ce jeu (sa rom n'est pas une de celles listees)"));

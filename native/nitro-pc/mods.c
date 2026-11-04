@@ -493,7 +493,7 @@ static int parse_version(const char *s, u32 *major, u32 *minor) {
 
 /* "games" : liste de codes, ou objet code -> SHA-1 des roms (verifies par le launcher) ; absent = tous les jeux */
 static int game_listed(const Json *games) {
-    if (!games) return 1;
+    if (!games || !games->child) return 1; /* liste vide aussi : tous les jeux */
     for (Json *g = games->child; g; g = g->next) {
         const char *code = games->type == 'o' ? g->key : g->text;
         if (code && str_eq(code, game_code)) return 1;
