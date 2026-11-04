@@ -6,6 +6,10 @@
    "code": 10.38,
    "data": 0.0,
    "play": "playable",
+   "runtime": {
+    "repo": "liolu/harvest-moon-ds-decomp",
+    "version": 1
+   },
    "status": "ok"
   },
   "ABHE": {
@@ -62,6 +66,10 @@
    "code": 52.47,
    "data": 100.0,
    "play": "playable",
+   "runtime": {
+    "repo": "liolu/heroes-of-mana-decomp",
+    "version": 1
+   },
    "status": "ok"
   },
   "AJTP": {
