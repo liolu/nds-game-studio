@@ -1,0 +1,64 @@
+# Index des jeux natifs (native/games/index.json) : publie seul dans la release native-toolchain, que le launcher relit a
+# chaque demarrage. Une mise a jour du runtime d'un jeu (etiquette runtime-v<n> dans son depot, puis "version" ici) n'a
+# besoin que de ce fichier : ni nouveau launcher (experimental.yml ignore native/), ni nouvelle boite a outils.
+# Avant de publier, tout ce que l'index annonce doit deja exister : sinon le launcher proposerait un telechargement en 404.
+name: Native index
+
+on:
+  push:
+    branches: [experimental]
+    paths:
+      - 'native/games/index.json'
+      - '.github/workflows/native-index.yml'
+  workflow_dispatch:
+
+# Deux index pousses vite : le plus recent gagne
+concurrency:
+  group: native-index
+  cancel-in-progress: true
+
+jobs:
+  index:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Ce que l'index annonce existe
+        run: |
+          python3 - <<'PY'
+          import json, subprocess, sys
+          index = json.load(open("native/games/index.json", encoding="utf8"))
+
+          def assets(repo, tag):
+              r = subprocess.run(["gh", "release", "view", tag, "-R", repo, "--json", "assets", "--jq", ".assets[].name"],
+                                 capture_output=True, text=True)
+              return set(r.stdout.split()) if r.returncode == 0 else None
+
+          missing = []
+          box = assets("${{ github.repository }}", "native-toolchain") or set()
+          for name in ("native-toolchain-%d.zip" % index["toolchain"], "native-common-%d.zip" % index["common"],
+                       "nds-luau-host-%d-windows-x86_64.zip" % index["luau_host"]):
+              if name not in box:
+                  missing.append("native-toolchain/" + name)
+          for code, game in sorted(index["games"].items()):
+              runtime = game.get("runtime")
+              if not runtime:
+                  continue
+              tag = "runtime-v%d" % runtime["version"]
+              have = assets(runtime["repo"], tag)
+              for name in ("native-runtime-%d.zip" % runtime["version"], "SHA256SUMS"):
+                  if have is None or name not in have:
+                      missing.append("%s (%s) %s/%s" % (code, runtime["repo"], tag, name))
+          if missing:
+              print("Pas encore publie, l'index attend :")
+              print("\n".join("  " + m for m in missing))
+              sys.exit(1)
+          print("tout est publie")
+          PY
+
+      - name: Publier index.json
+        run: gh release upload native-toolchain native/games/index.json --clobber

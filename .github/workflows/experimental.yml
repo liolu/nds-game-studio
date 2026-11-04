@@ -9,6 +9,9 @@ on:
     branches: [experimental]
     paths-ignore:
       - '**.md'
+      # Le launcher ne prend de native/ que la copie de secours de l'index : il lit celui que publie native-index.yml.
+      # Une mise a jour de runtime ou de l'index ne fait donc pas de nouveau launcher.
+      - 'native/**'
   workflow_dispatch:
 
 # Si deux push arrivent vite, seul le plus recent est publie.

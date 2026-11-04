@@ -9,6 +9,8 @@ on:
     branches: [experimental, macos-native]
     paths:
       - 'native/**'
+      # l'index seul (une mise a jour de runtime d'un jeu) : native-index.yml le publie sans refaire les boites
+      - '!native/games/index.json'
       - '.github/workflows/native-toolchain.yml'
   workflow_dispatch:
 

@@ -7,7 +7,8 @@ celui d'un jeu, et le reporte si on le demande. Rien n'est jamais impose : chaqu
   python native/tools/runtime_sync.py <depot du jeu> <code> --apply --bump  # et passe native/VERSION a la suivante
 
 Ensuite, dans le depot du jeu : commit, etiquette runtime-v<VERSION> ; sa CI publie l'archive. Puis la version va dans
-native/games/index.json du studio ("runtime": {"repo": ..., "version": n}), qui se publie avec la boite a outils.
+native/games/index.json du studio ("runtime": {"repo": ..., "version": n}) : pousse sur experimental, seul
+index.json est publie (native-index.yml, apres avoir verifie que la release existe), sans nouveau launcher ni boite a outils.
 Le depot du jeu passe par son verrou build/pipeline.lock s'il en a un : le Studio de decompilation y travaille.
 """
 import argparse
