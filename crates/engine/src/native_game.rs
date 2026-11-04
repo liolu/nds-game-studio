@@ -237,6 +237,9 @@ struct Index {
     /// Version de la boîte commune (GCC, Python, Capstone) des jeux qui ont leur propre runtime.
     #[serde(default)]
     common: u32,
+    /// Version de l'hôte Luau des mods en script (`nds-luau-host-<v>-<machine>.zip`).
+    #[serde(default)]
+    luau_host: u32,
     games: std::collections::BTreeMap<String, IndexGame>,
 }
 
@@ -317,6 +320,16 @@ fn refresh_index() {
             }
         }
     });
+}
+
+pub fn luau_host_version() -> u32 {
+    index().luau_host.max(1)
+}
+
+/// L'archive de l'hôte Luau pour cette machine, dans la release de la boîte à outils.
+pub fn luau_host_url(platform: &str) -> String {
+    let base = std::env::var("NDSGS_TOOLCHAIN_URL").unwrap_or_else(|_| TOOLCHAIN_URL.to_string());
+    format!("{base}/nds-luau-host-{}-{platform}.zip", luau_host_version())
 }
 
 /// Ce jeu a un module natif, mais pas sur ce système.
@@ -726,6 +739,11 @@ fn follow_output(output: impl Read, state: &Mutex<Generation>, log: &Mutex<Strin
     }
 }
 
+/// Sous Windows, le module est en 64 bits (étape 6) : la mémoire du DS est dans une fenêtre, comme sur Mac.
+fn arch_args() -> Vec<String> {
+    if cfg!(windows) { vec!["--arch".to_string(), "x86_64".to_string()] } else { Vec::new() }
+}
+
 fn insn_hook_args(code: &str) -> Vec<String> {
     let hooks = crate::mod_packs::instruction_hooks(code);
     if hooks.is_empty() { Vec::new() } else { vec!["--insn-hooks".to_string(), hooks.join(",")] }
@@ -755,6 +773,7 @@ fn generate(code: &str, rom: &Path, runtime: Option<u32>, state: &Mutex<Generati
         .arg("--out")
         .arg(&out)
         .args(insn_hook_args(code))
+        .args(arch_args())
         .env("PYTHONPATH", tools.join("python"))
         .env("NDSGS_COMPILER_BIN", tools.join("mingw64").join("bin"))
         .env("PYTHONDONTWRITEBYTECODE", "1");

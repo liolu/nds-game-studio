@@ -51,6 +51,29 @@ IMPORT unsigned WINAPI waveOutWrite(void *, void *, unsigned);
 void *os_lib_open(const char *path) { return LoadLibraryA(path); }
 void *os_lib_sym(void *lib, const char *name) { return GetProcAddress(lib, name); }
 
+/* ------------------------------------------------------------------ bornes de la pile (NT_TIB du fil : StackBase, StackLimit) */
+static uptr *thread_tib(void) {
+    uptr *tib;
+#if defined(__x86_64__)
+    __asm__ volatile("movq %%gs:0x30, %0" : "=r"(tib));
+#else
+    __asm__ volatile("movl %%fs:0x18, %0" : "=r"(tib));
+#endif
+    return tib;
+}
+
+void os_stack_bounds(uptr *lo, uptr *hi) {
+    uptr *tib = thread_tib();
+    *hi = tib[1];
+    *lo = tib[2];
+}
+
+void os_set_stack_bounds(uptr lo, uptr hi) {
+    uptr *tib = thread_tib();
+    tib[1] = hi;
+    tib[2] = lo;
+}
+
 /* ------------------------------------------------------------------ memoire */
 #if !NDS_IDENTITY
 /* 64 bits : la memoire DS est dans une fenetre reservee (comme sur Mac, os_posix.c) ; os_mem_alloc y engage les zones */
@@ -279,6 +302,8 @@ static OsFaultFn fault_fn;
 
 static long WINAPI on_exception(ExcPointers *e) {
     ExcRecord *r = e->rec;
+    /* exceptions C++ (GCC, MSVC) et messages de debogage : celles des mods et de l'hote Luau, que leurs propres gestionnaires attrapent */
+    if (r->code == 0x20474343u || r->code == 0xE06D7363u || r->code == 0x40010006u || r->code == 0x4001000Au || r->code == 0x406D1388u) return EXC_NEXT;
     OsFault f;
     f.kind = r->code == EXC_ACCESS ? OS_FAULT_ACCESS : r->code == EXC_STEP ? OS_FAULT_STEP : OS_FAULT_OTHER;
     f.code = r->code;

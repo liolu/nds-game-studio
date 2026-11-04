@@ -146,9 +146,13 @@ Le launcher ne sait rien des mods : il envoie tout ce que fait le joueur, et c'e
 - `--lang fr|en` : la langue des messages du runtime et `api->language` des mods.
 - **Multi** : à la connexion, l'hôte envoie son empreinte (`MSG_MODS` de `net.c`) : la version du runtime (`nds_runtime_version`, empreinte de ses sources) et les mods chargés, sauf ceux qui déclarent `"multiplayer": "safe"`. L'invité refuse si elle diffère, sinon il renvoie la sienne. L'hôte refuse tout invité dont l'empreinte n'est pas la même. Le joueur voit un message, et le journal donne les deux empreintes.
 
-## Windows 64 bits (essai)
+## Windows 64 bits
 
-`native_build.py --arch x86_64` sous Windows : la mémoire DS passe dans une fenêtre de 4 Go, comme sur Mac (`os_mem_window` de `os_win32.c`), et `context.c` suit l'ABI Windows x64. Sur Tom et Jerry et Rayman, les images sont les mêmes qu'en 32 bits sur 6000 images. Le module est plus gros (+37 % sur Tom et Jerry, +33 % sur Lego) et pas plus lent. Un mod 64 bits peut se servir de la bibliothèque C (UCRT). Le launcher lance toujours le 32 bits.
+Depuis l'étape 6 de ROADMAP-MODS.md, le launcher génère les modules Windows en 64 bits (`native_build.py --arch x86_64`) : la mémoire DS est dans une fenêtre de 4 Go, comme sur Mac (`os_mem_window` de `os_win32.c`), et `context.c` suit l'ABI Windows x64. Les images sont les mêmes qu'en 32 bits. Les mods natifs Windows sont donc des DLL 64 bits (`windows-x86_64`), avec ou sans la bibliothèque C. À chaque changement de fil, le runtime donne à Windows les bornes de la pile du fil du jeu (`os_set_stack_bounds`) : les exceptions C++ d'un mod ou de l'hôte Luau s'y déroulent. Le gestionnaire d'exceptions du runtime laisse passer les exceptions C++. Sans `--arch`, `native_build.py` fait encore un module 32 bits.
+
+## Mods en script (Luau)
+
+`luau-host/` : l'hôte des mods en script, une bibliothèque chargée comme un mod natif (`nds_luau.dll`, Luau 0.700 sous licence MIT, VM et compilateur seulement). Le launcher la donne comme bibliothèque de chaque mod `"type": "script"`, avec le chemin du script (`__script`) et ses permissions (`__permissions`). Elle crée un état Luau par mod, en lecture seule (`luaL_sandbox`), avec la table `nds` (guides du SDK, `scripts.md`). Aucun budget de temps : seul un rappel bloqué 10 s est arrêté, et le mod retiré (`status.json`). `luau-host/package.sh` en fait l'archive `nds-luau-host-<v>-<machine>.zip`, publiée par la CI avec la boîte à outils. Le launcher la télécharge à l'installation du premier mod en script (`NDSGS_LUAU_HOST` donne une bibliothèque locale pour les essais).
 
 ## Image
 

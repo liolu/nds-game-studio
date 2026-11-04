@@ -587,6 +587,7 @@ void nds_start(void) {
     /* grande pile, allouee apres la memoire DS pour ne pas la gener */
     enum { MAIN_STACK = 16 << 20 };
     u8 *stack = stack_alloc(MAIN_STACK);
+    os_set_stack_bounds((uptr)stack, (uptr)(stack + MAIN_STACK));
     nds_run_on_stack(stack + MAIN_STACK - 64, run_game);
     nds_fatal("le jeu s'est termine");
 }

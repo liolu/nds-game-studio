@@ -148,7 +148,8 @@ def main():
         version = next((gcc / "libexec/gcc/x86_64-w64-mingw32").iterdir()).name
         cc1 = gcc / "libexec/gcc/x86_64-w64-mingw32" / version / "cc1.exe"
         z.write(cc1, "mingw64/libexec/gcc/x86_64-w64-mingw32/%s/cc1.exe" % version)
-        for f in sorted((gcc / "x86_64-w64-mingw32/lib/ldscripts").glob("i386pe.*")):
+        # i386pe : modules 32 bits (paquets d'avant) ; i386pep : modules 64 bits, depuis l'etape 6 de ROADMAP-MODS.md
+        for f in sorted((gcc / "x86_64-w64-mingw32/lib/ldscripts").glob("i386pe*")):
             z.write(f, "mingw64/x86_64-w64-mingw32/lib/ldscripts/" + f.name)
         root = Path(a.python)
         for f in sorted(root.rglob("*")):

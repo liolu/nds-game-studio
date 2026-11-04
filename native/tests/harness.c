@@ -55,6 +55,10 @@ void nds_fatal(const char *fmt, ...) {
         else check_eq(1, 1, #expr, __LINE__); \
     } while (0)
 
+/* ce que context.c prend a la couche systeme : les bornes de pile ne servent qu'aux exceptions, sans objet ici */
+void os_stack_bounds(uptr *lo, uptr *hi) { *lo = *hi = 0; }
+void os_set_stack_bounds(uptr lo, uptr hi) { (void)lo; (void)hi; }
+
 /* ce que context.c prend a core.c */
 void nds_log(const char *fmt, ...) {
     va_list ap;

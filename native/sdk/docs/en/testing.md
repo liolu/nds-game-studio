@@ -6,10 +6,10 @@ Modding tab of the game → **Add a folder** → your mod's folder (with `nds-mo
 
 ## From the command line, without the launcher
 
-The launcher keeps the game's generated module in its data folder: `%APPDATA%\Nds Game Studio\native\` on Windows, `~/Library/Application Support/Nds Game Studio/native/` on Mac (`AL7E-r1.exe` for instance). Run it with your rom:
+The launcher keeps the game's generated module in its data folder: `%APPDATA%\Nds Game Studio\native\` on Windows, `~/Library/Application Support/Nds Game Studio/native/` on Mac (`AL7E-r2.exe` for instance). Run it with your rom:
 
 ```bash
-AL7E-r1.exe "rom.nds" --plugin lib/windows-x86/my_mod.dll --mute --frames 1200 --dump shots --every 300
+AL7E-r2.exe "rom.nds" --plugin lib/windows-x86_64/my_mod.dll --mute --frames 1200 --dump shots --every 300
 ```
 
 - `--plugin a.dll,b.dll`: libraries loaded without a manifest (settings are absent). `--plugins list.json`: a list like the launcher writes, with settings; `status.json` is written next to it.

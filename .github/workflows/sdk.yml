@@ -31,7 +31,7 @@ jobs:
         run: |
           python native/sdk/make_sdk.py --out sdk-out
           cd sdk-out && unzip -q nds-mod-sdk-*.zip && cd nds-mod-sdk-*/template
-          ./build.sh windows-x86
+          ./build.sh windows-x86_64
 
   template-macos:
     runs-on: macos-latest

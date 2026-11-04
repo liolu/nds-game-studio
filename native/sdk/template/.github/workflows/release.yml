@@ -14,7 +14,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      # Le GCC de l'image n'a pas -m32 : WinLibs, comme le runtime des jeux
+      # WinLibs, comme le runtime des jeux
       - name: WinLibs
         shell: pwsh
         run: |
@@ -24,11 +24,11 @@ jobs:
           "$env:RUNNER_TEMP/winlibs/mingw64/bin" | Out-File -Append -Encoding ascii $env:GITHUB_PATH
       - name: Compiler
         shell: bash
-        run: ./build.sh windows-x86
+        run: ./build.sh windows-x86_64
       - uses: actions/upload-artifact@v4
         with:
-          name: lib-windows-x86
-          path: lib/windows-x86
+          name: lib-windows-x86_64
+          path: lib/windows-x86_64
 
   macos:
     runs-on: macos-latest
@@ -55,8 +55,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: lib-windows-x86
-          path: lib/windows-x86
+          name: lib-windows-x86_64
+          path: lib/windows-x86_64
       - uses: actions/download-artifact@v4
         with:
           name: lib-macos

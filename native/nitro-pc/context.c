@@ -61,6 +61,8 @@ _Static_assert(__builtin_offsetof(Slot, sp) == SLOT_SP && __builtin_offsetof(Slo
 
 enum { SLOTS = 256 }; /* les fils, et les fonctions du jeu avec un catch en cours */
 static Slot slots[SLOTS];
+/* bornes de la pile de chaque fil, pour le systeme (os_set_stack_bounds) : donnees a sa creation, ou relevees a sa premiere sauvegarde */
+static struct { uptr lo, hi; } bounds[SLOTS];
 uptr nds_last_load_sp; /* pile du dernier contexte charge, pour le journal d'un plantage */
 
 static Slot *slot_of(u32 ctx) {
@@ -75,6 +77,7 @@ static Slot *slot_of(u32 ctx) {
 /* appelees par l'assembleur, avant de sauver ou de charger les registres */
 Slot *nds_save_slot(u32 ctx) {
     Slot *s = slot_of(ctx);
+    if (!bounds[s - slots].hi) os_stack_bounds(&bounds[s - slots].lo, &bounds[s - slots].hi);
     s->cpsr = nds_cpsr;
     s->fresh = 0;
     return s;
@@ -85,6 +88,7 @@ Slot *nds_load_slot(u32 ctx) {
     nds_cpsr = s->cpsr;
     if (!s->sp) nds_fatal("contexte sans sauvegarde %x", ctx);
     nds_last_load_sp = s->sp;
+    if (bounds[s - slots].hi) os_set_stack_bounds(bounds[s - slots].lo, bounds[s - slots].hi);
     return s;
 }
 
@@ -187,6 +191,8 @@ void nds_ctx_init(u32 ctx, u8 *stack, u32 size, void (*entry)(u32), u32 func) {
     Slot *s = slot_of(ctx);
     u8 *top = (u8 *)(((uptr)(stack + size) - 64) & ~(uptr)15);
     nds_zero((u8 *)s + 4, sizeof(Slot) - 4); /* garde ctx, a la tete des trois versions */
+    bounds[s - slots].lo = (uptr)stack;
+    bounds[s - slots].hi = (uptr)(stack + size);
 #if defined(__i386__)
     u32 *t = (u32 *)top;
     t[1] = ctx; /* argument de entry */
@@ -235,7 +241,10 @@ void nds_eh_leave(u32 key) {
     for (int i = 0; i < SLOTS; i++)
         if (eh_frames[i].key == key) eh_frames[i].key = 0;
     for (int i = 0; i < SLOTS; i++)
-        if (slots[i].ctx == key) slots[i].ctx = 0;
+        if (slots[i].ctx == key) {
+            slots[i].ctx = 0;
+            bounds[i].lo = bounds[i].hi = 0;
+        }
 }
 
 extern u64 OS_LoadContext();

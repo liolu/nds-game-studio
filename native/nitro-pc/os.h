@@ -64,6 +64,12 @@ OsEvent os_event_create(void);
 void os_event_set(OsEvent e);
 void os_event_wait(OsEvent e); /* sans delai */
 
+/* Bornes de la pile du fil appelant telles que le systeme les connait. Les fils du jeu tournent sur leurs propres piles : le runtime
+ * les donne au systeme a chaque changement, sinon le deroulement d'une exception (C++ d'un mod, erreur d'un script Luau) les refuse.
+ * Sans objet hors de Windows (rien a faire). */
+void os_stack_bounds(uptr *lo, uptr *hi);
+void os_set_stack_bounds(uptr lo, uptr hi);
+
 /* Profil (--prof) : poignee du fil appelant, utilisable depuis un autre fil, puis echantillon du fil suspendu. */
 void *os_thread_self(void);
 int os_thread_sample(void *thread, uptr *ip, uptr *sp);

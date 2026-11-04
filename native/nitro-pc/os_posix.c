@@ -126,6 +126,9 @@ static int write_all(int fd, const void *data, u32 size) {
     return 0;
 }
 
+void os_stack_bounds(uptr *lo, uptr *hi) { *lo = *hi = 0; }
+void os_set_stack_bounds(uptr lo, uptr hi) {}
+
 void *os_lib_open(const char *path) { return dlopen(path, RTLD_NOW | RTLD_LOCAL); }
 void *os_lib_sym(void *lib, const char *name) { return dlsym(lib, name); }
 

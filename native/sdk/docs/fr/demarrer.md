@@ -17,7 +17,7 @@ Les joueurs l'installent avec le lien de votre dépôt, depuis l'onglet **Moding
 | `"format": 2`, `"type": "native"` | Un mod qui apporte du code |
 | `"api": "1.0"` | La version de `nds_mod.h` pour laquelle il est fait. Un runtime d'une autre version majeure le refuse, en disant pourquoi |
 | `"games"` | Codes des jeux (`["AL7E"]`), ou code → SHA-1 des roms essayées (`{"AL7E": ["7c1a..."]}`). Absent : tous les jeux. Les adresses changent d'une version d'un jeu à l'autre : listez les roms dès que vous en utilisez |
-| `"plugin"` | Ordinateur → bibliothèque : `windows-x86`, `macos-arm64`, `macos-x86_64` |
+| `"plugin"` | Ordinateur → bibliothèque : `windows-x86_64`, `macos-arm64`, `macos-x86_64` |
 | `"settings"` | Ce que le joueur peut changer dans le launcher : `bool`, `int`, `float` (`min`, `max`, `step`), `choice` (`choices`), `string`, `keybind` (touche par défaut par son nom : `"KeyC"`, `"F9"`). `api->setting(mod, clé)` donne la valeur en texte ; une touche est son code HID (`NDS_KEY_*`) |
 | `"presets"` | Des valeurs pour plusieurs réglages d'un coup : `{"name": "...", "values": {...}}` |
 | `"instruction_hooks"` | `{"AL7E": ["0x020cea88"]}` : les instructions que le mod accroche avec `api->hook_insn`. Le launcher regénère le jeu avec elles |
@@ -40,12 +40,12 @@ NDS_MOD_EXPORT int nds_mod_load(const nds_api *api, nds_mod *mod) {
 - **Mémoire** : toujours par `api->read32`, `api->write32` (et 8, 16 bits) ou `api->memory(adresse)`. Jamais `*(u32 *)0x02100000` : sur un ordinateur 64 bits, la mémoire du DS n'est pas à son adresse DS.
 - **Entrées** : `api->input(&in)` donne les boutons du DS, le stylet, la souris et tout le clavier ; `api->take_input` retire les touches au jeu, `api->capture_mouse` retient le curseur (F7 le rend toujours au joueur), `api->notice` affiche un message.
 - **Fils** : `on_present` tourne dans le fil de dessin et `on_audio` dans celui du son ; tout le reste dans le fil du jeu.
-- **Windows sans bibliothèque C** : le module Windows 32 bits n'en a pas. Écrivez du C simple (ni `printf`, ni `malloc`, ni `sin`) : `sdk/nds_util.h` a sinus, cosinus, arc tangente et la lecture des réglages. Sur Mac, la bibliothèque C est là.
+- **Bibliothèque C** : `build.sh` compile les mods Windows sans elle (`-nostdlib`), ils n'ont donc besoin de rien d'autre ; `sdk/nds_util.h` a sinus, cosinus, arc tangente et la lecture des réglages. Pour vous en servir (`printf`, `malloc`, C++), retirez `-nostdlib` et définissez `NDS_NO_ENTRY`. Sur Mac, elle est toujours là.
 
 ## 3. Compiler et essayer
 
 ```bash
-./build.sh windows-x86      # Windows : gcc de WinLibs (https://winlibs.com, la version 64 bits, elle compile en -m32) dans le PATH
+./build.sh windows-x86_64   # Windows : gcc de WinLibs (https://winlibs.com) dans le PATH
 ./build.sh macos-arm64      # Mac
 ```
 
@@ -62,4 +62,4 @@ git push --tags
 
 `.github/workflows/release.yml` compile pour les trois ordinateurs et publie `<id>-1.0.0-<ordinateur>.zip` avec `SHA256SUMS`. Les joueurs collent le lien de votre dépôt dans l'onglet Moding. Avant l'installation, le launcher affiche « Exécute du code sur cet ordinateur » et la source.
 
-Ensuite : [trouver une adresse](trouver-une-adresse.md), [essayer](essayer.md).
+Sans aucun compilateur : [mods en script](scripts.md). Ensuite : [trouver une adresse](trouver-une-adresse.md), [essayer](essayer.md).

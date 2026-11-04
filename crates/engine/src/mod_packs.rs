@@ -107,6 +107,12 @@ struct Manifest {
     /// `separate` : ce mod touche à la sauvegarde, elle est séparée.
     #[serde(default)]
     save: String,
+    /// Mod en script (`"type": "script"`) : son fichier Luau, dans le dossier du mod.
+    #[serde(default)]
+    script: String,
+    /// Ce qu'un script demande au-delà du bac à sable : `files`, `network`, `system`. Le joueur l'accepte à l'installation.
+    #[serde(default)]
+    permissions: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -549,6 +555,17 @@ fn install_one(mod_dir: &Path, code: &str, top: &Path, id: &str) -> Result<u64, 
         std::fs::copy(from.join(NATIVE), new.join(NATIVE)).map_err(|e| e.to_string())?;
         copied += 1;
     }
+    if manifest.is_script() {
+        let scripts = [top.join(SCRIPTS), from.join(SCRIPTS)].into_iter().find(|p| p.is_dir());
+        match scripts {
+            Some(dir) => copied += copy_tree(&dir, &new.join(SCRIPTS), &|n| !n.starts_with(".git"))?,
+            None => return Err(t!("{SCRIPTS}/ is missing from this script mod.", "{SCRIPTS}/ manque dans ce mod en script.")),
+        }
+        if !new.join(manifest.script_path()).is_file() {
+            return Err(t!("{} is missing from this mod.", "{} manque dans ce mod.", manifest.script_path()));
+        }
+        ensure_luau_host()?;
+    }
     // Mod de code : seule la bibliothèque de cette machine est gardée
     if let Some(file) = manifest.plugin.get(PLATFORM).filter(|f| !f.contains("..")) {
         let source = [top.join(file), from.join(file)].into_iter().find(|p| p.is_file()).ok_or_else(|| t!("{file} is missing from this mod.", "{file} manque dans ce mod."))?;
@@ -971,12 +988,16 @@ pub fn install_found(code: &str, rom: &Path, id: &str) {
 
 // ------------------------------------------------------------------ mods de code (format 2, native/sdk/nds_mod.h)
 
-/// La machine des modules natifs, comme `PLATFORM` de `native/nitro-pc/mods.c` : sous Windows, le module reste en 32 bits.
+/// La machine des modules natifs, comme `PLATFORM` de `native/nitro-pc/mods.c` : sous Windows, le module est en 64 bits
+/// depuis l'étape 6 (l'hôte Luau a besoin de la bibliothèque C++, que le 32 bits n'a pas).
 pub const PLATFORM: &str = if cfg!(target_os = "macos") {
     if cfg!(target_arch = "aarch64") { "macos-arm64" } else { "macos-x86_64" }
 } else {
-    "windows-x86"
+    "windows-x86_64"
 };
+/// Le script d'un mod en script, s'il n'en nomme pas.
+const DEFAULT_SCRIPT: &str = "scripts/main.luau";
+const SCRIPTS: &str = "scripts";
 /// La version majeure de `nds_mod.h` que le runtime livré connaît.
 const API_MAJOR: u32 = 1;
 const PLUGINS: &str = "plugins.json";
@@ -1059,7 +1080,16 @@ pub struct Preset {
 impl Manifest {
     /// Un mod qui apporte du code : une bibliothèque native (ou, plus tard, des scripts).
     fn runs_code(&self) -> bool {
-        self.kind == "native" || self.kind == "mixed" || !self.plugin.is_empty()
+        self.kind == "native" || self.kind == "mixed" || !self.plugin.is_empty() || self.is_script()
+    }
+
+    /// Un mod en script : l'hôte Luau le fait tourner, rien n'est compilé, il s'installe depuis un simple dépôt.
+    fn is_script(&self) -> bool {
+        self.kind == "script"
+    }
+
+    fn script_path(&self) -> &str {
+        if self.script.is_empty() { DEFAULT_SCRIPT } else { &self.script }
     }
 
     /// Pourquoi ce mod de code ne peut pas servir ici ; `None` s'il le peut.
@@ -1071,7 +1101,7 @@ impl Manifest {
         if major != Some(API_MAJOR) {
             return Some(t!("Made for another version of the mod interface ({}): this launcher has {API_MAJOR}.x.", "Fait pour une autre version de l'interface des mods ({}) : ce launcher a la {API_MAJOR}.x.", if self.api.is_empty() { "?" } else { &self.api }));
         }
-        if !self.plugin.contains_key(PLATFORM) {
+        if !self.is_script() && !self.plugin.contains_key(PLATFORM) {
             return Some(t!("No version for this computer ({PLATFORM}).", "Pas de version pour cet ordinateur ({PLATFORM})."));
         }
         None
@@ -1080,7 +1110,40 @@ impl Manifest {
 
 /// Ce qu'un mod fait sur l'ordinateur, montré avant de l'installer et sur sa ligne.
 fn warning(manifest: &Manifest) -> Option<String> {
+    if manifest.is_script() {
+        if manifest.permissions.is_empty() {
+            return Some(tr("Runs scripts (sandboxed): no access to your files or the network.", "Scripts dans un bac a sable : aucun acces a vos fichiers ni au reseau.").to_string());
+        }
+        let asked = manifest.permissions.join(", ");
+        return Some(t!("Runs scripts, and asks for more than the sandbox: {asked}. Installing it accepts this: only from a source you trust.", "Scripts qui demandent plus que le bac a sable : {asked}. L'installer l'accepte : seulement depuis une source de confiance."));
+    }
     manifest.runs_code().then(|| tr("Runs code on this computer: install it only from a source you trust.", "Execute du code sur cet ordinateur : ne l'installez que depuis une source de confiance.").to_string())
+}
+
+/// L'hôte Luau des mods en script : téléchargé à l'installation du premier d'entre eux (release `native-toolchain`), une fois.
+/// `NDSGS_LUAU_HOST` donne une bibliothèque locale (essais).
+fn luau_host_file() -> PathBuf {
+    if let Some(local) = std::env::var_os("NDSGS_LUAU_HOST") {
+        return PathBuf::from(local);
+    }
+    let name = if cfg!(windows) { "nds_luau.dll" } else { "nds_luau.dylib" };
+    crate::save::data_dir().join("luau-host").join(crate::native_game::luau_host_version().to_string()).join(name)
+}
+
+fn ensure_luau_host() -> Result<PathBuf, String> {
+    let file = luau_host_file();
+    if file.is_file() {
+        return Ok(file);
+    }
+    let dir = file.parent().unwrap_or(Path::new(".")).to_path_buf();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    mods::say(tr("Downloading the script host (only once)...", "Telechargement de l'hote des scripts (une seule fois)...").to_string());
+    let archive = dir.join("hote.zip");
+    crate::native_game::download(&crate::native_game::luau_host_url(PLATFORM), &archive)?;
+    unzip(&archive, &dir)?;
+    let _ = std::fs::remove_file(&archive);
+    clear_quarantine(&dir);
+    if file.is_file() { Ok(file) } else { Err(tr("the script host archive is incomplete", "l'archive de l'hote des scripts est incomplete").to_string()) }
 }
 
 /// Les valeurs choisies par le joueur : `reglages.json`, id du mod → clé → valeur.
@@ -1195,8 +1258,14 @@ pub fn write_plugins(code: &str, rom: &Path) -> Option<PathBuf> {
             continue;
         }
         let pack = packs_dir(&dir).join(&entry.id);
-        let plugin: serde_json::Map<String, serde_json::Value> = manifest.plugin.iter().map(|(platform, file)| (platform.clone(), serde_json::Value::from(pack.join(file).to_string_lossy().into_owned()))).collect();
+        let mut plugin: serde_json::Map<String, serde_json::Value> = manifest.plugin.iter().map(|(platform, file)| (platform.clone(), serde_json::Value::from(pack.join(file).to_string_lossy().into_owned()))).collect();
         let mut settings = serde_json::Map::new();
+        if manifest.is_script() {
+            // l'hôte Luau est la bibliothèque du mod ; il lit son script et ses permissions dans ces deux réglages
+            plugin.insert(PLATFORM.to_string(), serde_json::Value::from(luau_host_file().to_string_lossy().into_owned()));
+            settings.insert("__script".to_string(), serde_json::Value::from(pack.join(manifest.script_path()).to_string_lossy().into_owned()));
+            settings.insert("__permissions".to_string(), serde_json::Value::from(manifest.permissions.join(",")));
+        }
         let (described, _) = settings_of(code, &entry.id);
         for (setting, value) in described {
             settings.insert(setting.key, value);
@@ -1475,6 +1544,28 @@ mod tests {
         assert!(reason("data").is_none() && found.iter().find(|f| f.id == "data").unwrap().warning.is_none());
         let error = install_tree(&mods_dir, &source.join("mac"), "AL7E", "", "mac").unwrap_err();
         assert!(error.contains(PLATFORM), "{error}");
+    }
+
+    #[test]
+    fn a_script_mod_installs_from_a_plain_repository() {
+        let (source, mods_dir, host) = (temp("script-s"), temp("script-m"), temp("script-h"));
+        write(host.join("nds_luau.dll"), "hote");
+        // SAFETY: seul ce test lit NDSGS_LUAU_HOST
+        unsafe { std::env::set_var("NDSGS_LUAU_HOST", host.join("nds_luau.dll")) };
+        write(source.join("nds-mod.json"), r#"{"format":2,"id":"intro","type":"script","api":"1.0","script":"scripts/main.luau"}"#);
+        write(source.join("scripts/main.luau"), "nds.log('ok')");
+        write(source.join("README.md"), "r");
+        install_tree(&mods_dir, &source, "AL7E", "o/r", "r").unwrap();
+        let pack = mods_dir.join("paquets/intro");
+        assert!(pack.join("scripts/main.luau").is_file() && !pack.join(FILES).exists(), "le script, pas des fichiers de jeu");
+        let m = read_manifest(&pack, MANIFEST).unwrap();
+        assert!(m.is_script() && m.code_refusal().is_none(), "pas de bibliotheque a fournir");
+        assert!(warning(&m).unwrap().to_lowercase().contains("sandbox") || warning(&m).unwrap().contains("bac a sable"));
+        write(source.join("nds-mod.json"), r#"{"format":2,"id":"intro","type":"script","api":"1.0","permissions":["files"]}"#);
+        let asked = read_manifest(&source, MANIFEST).unwrap();
+        assert!(warning(&asked).unwrap().contains("files"), "les permissions sont dites avant l'installation");
+        write(source.join("vide/nds-mod.json"), r#"{"format":2,"id":"vide","type":"script","api":"1.0"}"#);
+        assert!(install_tree(&mods_dir, &source.join("vide"), "AL7E", "", "vide").is_err(), "sans son script, refuse");
     }
 
     #[test]

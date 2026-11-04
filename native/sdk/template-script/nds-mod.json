@@ -1,0 +1,15 @@
+{
+ "format": 2,
+ "id": "skip-intro-script",
+ "name": "Skip intro (script)",
+ "name_fr": "Passer l'intro (script)",
+ "version": "1.0.0",
+ "author": "Nds Game Studio",
+ "description": "Template script mod: Lego Star Wars II starts straight on its menu. No compiler and no release: the repository is the mod.",
+ "description_fr": "Mod modele en script : Lego Star Wars II demarre directement sur son menu. Ni compilateur ni release : le depot est le mod.",
+ "type": "script",
+ "api": "1.0",
+ "script": "scripts/main.luau",
+ "games": { "AL7E": ["7c1afa070797945ba5a2577c7ddfded5cf2fc443"] },
+ "multiplayer": "safe"
+}

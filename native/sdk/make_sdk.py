@@ -36,7 +36,7 @@ def main():
     with zipfile.ZipFile(archive, "w") as z:
         for name in TOP:
             add(z, HERE / name, root + name)
-        for folder in ("docs", "template"):
+        for folder in ("docs", "template", "template-script"):
             for f in sorted((HERE / folder).rglob("*")):
                 if f.is_file():
                     add(z, f, root + f.relative_to(HERE).as_posix())
