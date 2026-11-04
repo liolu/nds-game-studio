@@ -22,8 +22,8 @@ La colonne « Essai » vient d'un relevé sous Windows ; la colonne « macOS » 
 | fairy-tail-madoushi | BH6J | 68 | ok | tourne, image 0, rien a l'ecran | pas essaye |
 | farm-frenzy | BFZE | 0 | ok | tourne, image 0, rien a l'ecran | pas essaye |
 | harry-potter-and-the-deathly-hallows-par | B7HE | 4 | ok | plante : acces memoire invalide 0 (ecriture) eip=0 esp=20fff864 arm=0, rien a l'ecran | pas essaye |
-| harvest-moon-ds | ABCE | 0 | ok | tourne, image 1140, rien a l'ecran | pas essaye |
-| heroes-of-mana | AHEP | 124 | ok | tourne, image 1080, rien a l'ecran | pas essaye |
+| harvest-moon-ds | ABCE | 0 | ok | essaye jusqu'en jeu par le launcher : intro, nom, ferme, sauvegarde (Diary) ; noms SDK dans patches.json | pas essaye |
+| heroes-of-mana | AHEP | 124 | ok | essaye jusqu'en jeu par le launcher : chapitre 1, bataille, lasso ; overlays multi, stack_args 32, video d'intro sautee | pas essaye |
 | how-to-train-your-dragon | BHDP | 0 | ok | plante : instruction non traduite func_020ce780 @20ce790, rien a l'ecran | pas essaye |
 | iron-man-2 | B2IE | 2 | ok | plante : instruction non traduite func_0216a3bc @216a3cc, rien a l'ecran | pas essaye |
 | lego-star-wars-ii-the-original-trilogy | AL7E | 0 | ok | tourne, image 1080, affiche | demarre sans fenetre jusqu'a l'ecran titre (arm64 et x86_64) ; ecran du launcher : pas verifie |

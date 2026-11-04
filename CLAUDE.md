@@ -41,6 +41,14 @@ Chaque jeu peut partager un format avec d'autres et en differer sur un detail. R
 3. Une image ne se croit qu'a l'oeil : un decodeur qui accepte un fichier ne prouve rien, sur 60 jeux presque toutes ses images etaient du bruit, et un texte de secours n'est pas une reussite. Les propositions pas encore vues restent dans `game_params_a_voir.tsv` et passent dans la table une fois vues justes.
 4. Apres un changement de la table, augmenter `INDEX_VERSION` (`asset_scan.rs`).
 
+## Runtime natif : un runtime par jeu
+
+Chaque jeu a son runtime dans son propre depot (`native/`, etiquette `runtime-v<n>`, `native/tools/runtime_sync.py`). Le `native/` du studio n'est que la source commune. Regles :
+
+1. Un changement fait pour un jeu ne change jamais un autre jeu : dans le runtime, tout nouveau comportement est desactive par defaut et s'active par une valeur de ce jeu dans `native/games/patches.json` (`values` : `nds_old_sdk`, `nds_stack_margin`, `nds_stack_reuse`, `nds_long_args`...) ; dans le traducteur, par une cle de ce jeu (`overlays`, `shared_regs`, `stack_args`, `gates`). Sans la cle, le code genere et le module des autres jeux restent identiques.
+2. Les autres jeux ne se reessaient pas sans raison et leurs depots ne se resynchronisent pas sans demande : chaque jeu choisit quand il suit le studio.
+3. Un jeu passe a son propre runtime par son depot (`runtime_sync.py --apply`, commit, `runtime-v1`), puis son entree `"runtime"` dans `native/games/index.json`. Rien n'est publie sans accord.
+
 ## Branches et versions
 
 - `experimental` = branche de travail (par defaut). Chaque push publie la pre-release `experimental`.

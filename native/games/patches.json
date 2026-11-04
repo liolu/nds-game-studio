@@ -47,5 +47,58 @@
   },
   "eh_end_catch": "0x020b39ec",
   "overlays": true
+ },
+ "ABCE": {
+  "names": {
+   "0x021401ec": "OS_SelectThread",
+   "0x02140430": "OS_InitContext",
+   "0x02140494": "OS_SaveContext",
+   "0x021404e0": "OS_LoadContext",
+   "0x02144eb4": "TP_Init",
+   "0x02144f30": "TP_GetUserInfo",
+   "0x02145084": "TP_RequestAutoSamplingStartAsync",
+   "0x02145380": "TP_GetCalibratedPoint",
+   "0x021454a0": "TP_WaitBusy",
+   "0x0214494c": "FSi_ReadRomCallback"
+  },
+  "data": {
+   "OSi_ThreadInfo": "0x022c6ed4",
+   "OSi_IrqThreadQueue": "0x027e0000"
+  },
+  "hooks": {
+   "0x02141270": "nds_hook_game_halt"
+  },
+  "values": {
+   "nds_long_args": "1"
+  }
+ },
+ "AHEP": {
+  "hooks": {
+   "0x0200fddc": "nds_hook_game_halt"
+  },
+  "names": {
+   "0x02013704": "FSi_ReadRomCallback",
+   "0x0201509c": "TP_GetUserInfo",
+   "0x02015374": "TP_RequestAutoSamplingStartAsync",
+   "0x020157a4": "TP_GetCalibratedPoint",
+   "0x02015258": "hle_tp_set_callback",
+   "0x020155a8": "hle_tp_latest_index"
+  },
+  "overlays": "multi",
+  "shared_regs": [
+   [
+    "0x01ff8380",
+    "0x01ffd6dc"
+   ]
+  ],
+  "gates": {
+   "0x020e3870": "nds_gate_skip"
+  },
+  "stack_args": 32,
+  "values": {
+   "nds_long_args": "1",
+   "nds_stack_margin": "512",
+   "nds_stack_reuse": "1"
+  }
  }
 }

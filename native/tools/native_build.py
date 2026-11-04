@@ -107,9 +107,14 @@ class Game:
         self.relocs = {}
         self.units = []  # (fichier source, [(start, end)])
         self.overlays = []  # (numero, debut du code, fin du code)
+        # "overlays": "multi" (patches.json) : chaque overlay garde ses fonctions et ses relocs, meme a la meme adresse qu'un autre
+        self.main_addrs = set()
+        self.ov_functions = {}  # numero -> {adresse: (nom, taille, thumb)}
+        self.ov_relocs = {}  # numero -> {depuis: (sorte, vers)}
         modules = [cfg] + [p for p in (cfg / "itcm", cfg / "dtcm") if p.exists()]
         modules += sorted(p for p in (cfg / "overlays").glob("*") if p.is_dir()) if (cfg / "overlays").exists() else []
         for m in modules:
+            ov = int(m.name[2:]) if m.parent.name == "overlays" else None
             for line in (m / "symbols.txt").read_text(errors="replace").splitlines():
                 s = SYM.match(line)
                 if not s:
@@ -117,14 +122,21 @@ class Game:
                 name, kind, detail, addr = s.group(1), s.group(2), s.group(3) or "", int(s.group(4), 16)
                 if kind == "function":
                     size = re.search(r"size=0x([0-9a-f]+)", detail)
+                    entry = (name, int(size.group(1), 16) if size else 0, "thumb" in detail)
                     if addr not in self.functions:
-                        self.functions[addr] = (name, int(size.group(1), 16) if size else 0, "thumb" in detail)
+                        self.functions[addr] = entry
+                    if ov is None:
+                        self.main_addrs.add(addr)
+                    else:
+                        self.ov_functions.setdefault(ov, {})[addr] = entry
                 elif kind in ("data", "bss"):
                     self.data.setdefault(name, addr)
             for line in (m / "relocs.txt").read_text(errors="replace").splitlines():
                 r = re.match(r"from:0x([0-9a-f]+) kind:(\w+) to:0x([0-9a-f]+)", line)
                 if r:
                     self.relocs[int(r.group(1), 16)] = (r.group(2), int(r.group(3), 16))
+                    if ov is not None:
+                        self.ov_relocs.setdefault(ov, {})[int(r.group(1), 16)] = (r.group(2), int(r.group(3), 16))
             self.read_delinks(m / "delinks.txt")
             if m.parent.name == "overlays":
                 self.overlays += [(int(m.name[2:]), s, e) for s, e in overlay_code(m / "delinks.txt")]
@@ -186,7 +198,7 @@ def game_patches(code):
 
 
 # Toujours definies : les autres jeux gardent 0, et le runtime sait que la fonction n'existe pas pour eux
-PATCH_VALUES = ["nds_net_screens", "nds_net_menu_screen", "nds_old_sdk"]
+PATCH_VALUES = ["nds_net_screens", "nds_net_menu_screen", "nds_old_sdk", "nds_stack_margin", "nds_stack_reuse", "nds_long_args"]
 
 
 def has_asm(text):
@@ -211,6 +223,141 @@ def nm_defined(objs, jobs):
         return o, [(l.split()[1], l.split()[2]) for l in res.splitlines() if len(l.split()) == 3]
     with ThreadPoolExecutor(jobs) as e:
         return dict(e.map(one, objs))
+
+
+# ------------------------------------------------------------------ overlays qui se chevauchent ("overlays": "multi")
+# Chaque overlay est traduit avec ses propres noms (ovNNN_...). Une adresse ou plusieurs overlays ont une fonction recoit un
+# aiguillage (ovsel_<adresse>) : il regarde quels octets sont charges a cette adresse et appelle la traduction de cet overlay.
+
+def overlay_plan(game):
+    covers = {}
+    for num, start, end in game.overlays:
+        covers.setdefault(num, []).append((start, end))
+    owners = {}
+    for num in sorted(game.ov_functions):
+        if num not in game.overlay_images:
+            continue
+        for addr in game.ov_functions[num]:
+            owners.setdefault(addr, []).append(num)
+    ov_name = {(num, addr): "ov%03d_%s" % (num, f[0]) for num, funcs in game.ov_functions.items() for addr, f in funcs.items()}
+    glob = {addr: ov_name[(nums[0], addr)] if len(nums) == 1 else "ovsel_%08x" % addr for addr, nums in owners.items()}
+    return covers, owners, ov_name, glob
+
+
+def main_memory(game):
+    def mem(addr, n):
+        for base, raw in game.image.values():
+            if base <= addr < base + len(raw):
+                return raw[addr - base : addr - base + n]
+        return None
+    return mem
+
+
+def overlay_memory(num, base, raw, main_mem):
+    def mem(addr, n):
+        if base <= addr < base + len(raw):
+            return raw[addr - base : addr - base + n]
+        return main_mem(addr, n)
+    return mem
+
+
+def lift_multi(lifter, game, names, to_lift, plan):
+    """Traduit le module principal puis chaque overlay, chacun avec ses noms, sa memoire et ses sous-routines."""
+    covers, owners, ov_name, glob = plan
+    main_mem = main_memory(game)
+    main_syms = dict(lifter.symbols)
+    for addr, g in glob.items():
+        main_syms.setdefault(addr, g)
+    ctxs = {None: (main_syms, main_mem, dict(lifter.sizes), {}, "",
+                   {frm for frm, (kind, to) in game.relocs.items() if kind == "load" and (to & ~1) in main_syms})}
+    for num, funcs in sorted(game.ov_functions.items()):
+        if num not in game.overlay_images:
+            continue
+        ranges = covers.get(num, [])
+        syms = {a: n for a, n in main_syms.items() if not any(s <= a < e for s, e in ranges)}
+        syms.update({a: ov_name[(num, a)] for a in funcs})
+        cp = {frm for frm, (kind, to) in game.ov_relocs.get(num, {}).items() if kind == "load" and (to & ~1) in syms}
+        base, raw = game.overlay_images[num]
+        ctxs[num] = (syms, overlay_memory(num, base, raw, main_mem), {a: f[1] for a, f in funcs.items()}, {}, "ov%03d_" % num, cp)
+
+    def enter(ctx):
+        lifter.symbols, lifter.memory, lifter.sizes, lifter.new_subs, lifter.sub_prefix, lifter.code_ptr = ctxs[ctx]
+
+    for _ in range(4):
+        before = len(lifter.flag_funcs) + len(lifter.gosub_funcs)
+        lifter.unhandled = []
+        done = set()
+        queue = [(None, f, names[f], game.functions[f][2]) for f in to_lift]
+        queue += [(num, a, ov_name[(num, a)], f[2]) for num, funcs in sorted(game.ov_functions.items()) if num in ctxs for a, f in funcs.items()]
+        bodies = []
+        cur = -1
+        while queue:
+            ctx, addr, name, thumb = queue.pop()
+            if (ctx, addr) in done:
+                continue
+            done.add((ctx, addr))
+            if ctx != cur:
+                enter(ctx)
+                cur = ctx
+            bodies.append(lifter.lift(name, addr, thumb))
+            for sub_addr, sub_name in list(lifter.new_subs.items()):
+                if (ctx, sub_addr) not in done:
+                    queue.append((ctx, sub_addr, sub_name, thumb))
+        # un appelant d'aiguillage qui lit les drapeaux : chaque candidat doit les rendre
+        for addr, nums in owners.items():
+            if len(nums) > 1 and glob[addr] in lifter.flag_funcs:
+                lifter.flag_funcs.update(ov_name[(n, addr)] for n in nums)
+        if len(lifter.flag_funcs) + len(lifter.gosub_funcs) == before:
+            break
+    enter(None)
+    return bodies, done
+
+
+OV_PICK = """
+/* aiguillage des overlays (native_build.ovsel_code) : k = {n, debut de chaque candidat, puis par candidat : m, (decalage, mot) * m} */
+static int ov_match_(u32 a, const u32 *p) { u32 m = p[0], j; for (j = 0; j < m; j++) if (*(volatile u32 *)DS(a + p[1 + 2 * j]) != p[2 + 2 * j]) return 0; return 1; }
+static void *ov_pick_(u32 a, const u32 *k, void *const *f, u32 *last) {
+    u32 n = k[0], i = *last;
+    if (ov_match_(a, k + k[1 + i])) return f[i];
+    for (i = 0; i < n; i++) if (ov_match_(a, k + k[1 + i])) { *last = i; return f[i]; }
+    nds_unhandled("aucun overlay charge ici", a);
+    return f[0];
+}
+"""
+
+
+def ovsel_code(game, plan):
+    covers, owners, ov_name, glob = plan
+    args = ", ".join(["u32 r0", "u32 r1", "u32 r2", "u32 r3"] + ["u32 a%d" % i for i in range(arm2c.STACK_ARGS)])
+    fwd = ", ".join(["r0", "r1", "r2", "r3"] + ["a%d" % i for i in range(arm2c.STACK_ARGS)])
+    out = [OV_PICK]
+    for addr in sorted(a for a, nums in owners.items() if len(nums) > 1):
+        nums = owners[addr]
+        words = {}
+        for num in nums:
+            base, raw = game.overlay_images[num]
+            size = max(game.ov_functions[num][addr][1], 4)
+            b = raw[addr - base : addr - base + size]
+            words[num] = [int.from_bytes(b[i : i + 4], "little") for i in range(0, len(b) - 3, 4)] or [0]
+        idx, body = [], []
+        for num in nums:
+            offs = {0}
+            for other in nums:
+                if other != num:
+                    for i, (x, y) in enumerate(zip(words[num], words[other])):
+                        if x != y:
+                            offs.add(i)
+                            break
+            idx.append(1 + len(nums) + len(body))
+            body.append(len(offs))
+            for i in sorted(offs):
+                body += [i * 4, words[num][i]]
+        k = [len(nums)] + idx + body
+        out += ["extern u64 %s();" % ov_name[(n, addr)] for n in nums]
+        out.append("static const u32 ovk_%08x[] = {%s};" % (addr, ",".join("0x%xu" % v for v in k)))
+        out.append("static void *const ovf_%08x[] = {%s};" % (addr, ", ".join("(void *)%s" % ov_name[(n, addr)] for n in nums)))
+        out.append("u64 ovsel_%08x(%s) { static u32 last_; return ((u64 (*)())ov_pick_(0x%08xu, ovk_%08x, ovf_%08x, &last_))(%s); }" % (addr, args, addr, addr, addr, fwd))
+    return "\n".join(out) + "\n"
 
 
 def main():
@@ -279,12 +426,26 @@ def main():
         game = Game(root, version)
     force = set(filter(None, a.lift.split(",")))
     patches = game_patches(code)
+    if "stack_args" in patches:
+        arm2c.set_stack_args(int(patches["stack_args"]))
     for addr, name in patches.get("names", {}).items():
         addr = int(addr, 16)
         game.functions[addr] = (name, *game.functions[addr][1:])
     game.data.update({name: int(addr, 16) for name, addr in patches.get("data", {}).items()})
     if not patches.get("overlays"):
         game.overlays = []
+    multi = patches.get("overlays") == "multi"
+    if multi:
+        # overlays qui se chevauchent : le module principal ne garde que ses fonctions, chaque overlay est traduit a part
+        game.functions = {addr: game.functions[addr] for addr in game.main_addrs}
+    # "shared_regs" : les cibles des tables de sauts de l'assembleur ecrit a la main deviennent des points d'entree
+    for lo, hi in patches.get("shared_regs", []):
+        lo, hi = int(lo, 16), int(hi, 16)
+        for at in range(lo, hi, 4):
+            raw = game.memory(at, 4)
+            v = int.from_bytes(raw, "little") if raw and len(raw) == 4 else 0
+            if lo <= v < hi and not v & 3 and v not in game.functions:
+                game.functions[v] = ("func_%08x" % v, 0, False)
 
     # 1. runtime : ce qu'il definit remplace le jeu
     rt_srcs = runtime_sources()
@@ -369,13 +530,19 @@ def main():
     lifter.gates = {int(addr, 16): fn for addr, fn in patches.get("gates", {}).items()}
     if "eh_end_catch" in patches:
         lifter.eh_end_catch = int(patches["eh_end_catch"], 16)
-    # plusieurs passes : les fonctions qui renvoient des drapeaux se decouvrent chez leurs appelants
-    for _ in range(4):
+    # assembleur ecrit a la main qui se passe des registres d'une fonction a l'autre : [[debut, fin], ...]
+    lifter.shared_ranges = [(int(lo, 16), int(hi, 16)) for lo, hi in patches.get("shared_regs", [])]
+    plan = overlay_plan(game) if multi else None
+    protos = set()
+    if multi:
+        bodies, done = lift_multi(lifter, game, names, to_lift, plan)
+    else:
+      # plusieurs passes : les fonctions qui renvoient des drapeaux se decouvrent chez leurs appelants
+      for _ in range(4):
         before = len(lifter.flag_funcs) + len(lifter.gosub_funcs)
         lifter.unhandled = []
         done = set()
         queue = [(f, names[f], game.functions[f][2]) for f in to_lift]
-        protos = set()
         bodies = []
         while queue:
             addr, name, thumb = queue.pop()
@@ -390,10 +557,14 @@ def main():
             break
     print("fonctions a retour par drapeaux :", " ".join(sorted(lifter.flag_funcs))[:600])
     # les pointeurs de code sont des adresses DS (nds_call_target) : seuls les appels directs nomment une fonction
-    for n in set(re.findall(r"CALLF\((\w+)\)", "\n".join(bodies))):
+    for n in set(re.findall(r"CALL[FX]\((\w+)\)", "\n".join(bodies))):
         if not n.startswith("nds_"):
             protos.add(n)
     lift_c = ("#define NDS_EH 1\n" if lifter.eh_end_catch is not None else "") + arm2c.PRELUDE + "\n".join("extern u64 %s();" % p for p in sorted(protos)) + "\n\n" + "\n".join(bodies) + "\n" + lifter.hook_table()
+    if lifter.shared_ranges:
+        lift_c = lift_c.replace(arm2c.PRELUDE, arm2c.PRELUDE + arm2c.xr_shared_macro(lifter.shared_ranges) + arm2c.XR_PRELUDE, 1)
+    if multi:
+        lift_c += ovsel_code(game, plan)
     lift_path = out / "lift" / "lifted.c"
     if not lift_path.exists() or lift_path.read_text() != lift_c:
         lift_path.write_text(lift_c)
@@ -414,7 +585,8 @@ def main():
     defined = {s[UNDERSCORE:]: t for syms in defs.values() for t, s in syms}
     defined.update({s: "T" for s in rt_defs})
     fn_names = {n for n in names.values() if n in defined}
-    table = sorted((addr, n) for addr, n in list(names.items()) + [(k, v) for k, v in lifter.new_subs.items()] if n in defined or n in lifter.new_subs.values())
+    ov_entries = list(plan[3].items()) if multi else []  # adresse d'overlay -> sa fonction, ou son aiguillage (ovsel_)
+    table = sorted((addr, n) for addr, n in list(names.items()) + ov_entries + [(k, v) for k, v in lifter.new_subs.items()] if n in defined or n in lifter.new_subs.values())
     gen = ["typedef unsigned int u32;"]
     for _, n in table:
         gen.append("extern char %s[];" % n)

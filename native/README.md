@@ -171,8 +171,25 @@ Limites : les ombres (mode 3 des polygones) ne sont pas dessinées. Un objet que
 - `cargo run --release -p nds-engine --example native_check -- <code> <rom> <capture.png> <s> [enter@s] [touch@s]` :
   passe par le vrai moteur, sans focus (`NDSGS_NATIVE_MUTE=1`, `NDSGS_NATIVE_DIR`).
 
-Essayé jusqu'au jeu : Tom et Jerry Tales (AJTP), Rayman Raving Rabbids (AR5E), Lego Star Wars II (AL7E), Pokémon Dash (APDE) sur Windows ;
+Essayé jusqu'au jeu : Tom et Jerry Tales (AJTP), Rayman Raving Rabbids (AR5E), Lego Star Wars II (AL7E), Pokémon Dash (APDE), Harvest Moon DS (ABCE), Heroes of Mana (AHEP) sur Windows ;
 sur Mac, seulement AL7E, sans fenêtre.
+
+## Overlays qui se chevauchent : `"overlays": "multi"`
+
+Beaucoup de jeux chargent tour à tour plusieurs overlays à la même adresse (Heroes of Mana : 102 overlays à 0x020d0160). Avec `"overlays": "multi"` dans `games/patches.json`, réservé aux jeux qui le demandent :
+
+- chaque overlay est traduit à part, avec sa mémoire, ses relocs et ses noms (`ov005_func_...`, sous-routines `ov005_sub_...`) ;
+- une adresse où un seul overlay a une fonction garde un appel direct ;
+- une adresse où plusieurs overlays ont une fonction reçoit un aiguillage `ovsel_<adresse>` (fin de `lifted.c`). Il compare quelques mots de la mémoire à ceux de chaque candidat (le premier, puis ceux qui les distinguent), garde le dernier choisi et appelle sa traduction. Les appels directs et les pointeurs (`nds_call_target`) passent par lui.
+
+Rien ne change dans le runtime : le jeu charge ses overlays lui-même depuis la rom, et l'aiguillage lit ce qui est en mémoire. La recette garde les fonctions de chaque overlay (`ov_functions`, `ov_loads`).
+
+## Autres options par jeu (`games/patches.json`)
+
+- `"stack_args": 32` : mots de pile passés à chaque appel (10 par défaut). Pour un jeu qui passe de grosses structures par valeur : `CalcModelMatrix` de Heroes of Mana écrit jusqu'à 23 mots au-dessus de son cadre.
+- `"shared_regs": [["0x...", "0x..."]]` : de l'assembleur écrit à la main qui se passe r2-r12 et la pile d'une fonction à l'autre, et saute dans des tables vers des étiquettes. Dans ces plages, les fonctions reçoivent et rendent leurs registres par `nds_xr` (`XR_PRELUDE` de `arm2c.py`), partagent le cadre de pile de la première appelée, et chaque mot de la plage qui pointe dans la plage devient un point d'entrée. Essayé sur le décodeur vidéo VX de Heroes of Mana (ITCM) : il va plus loin mais lit encore hors de son flux. Gardé pour reprendre la lecture des vidéos.
+- `"names"` vers `hle_tp_set_callback` et `hle_tp_latest_index` : le rappel de l'échantillonnage automatique du stylet (`TP_SetCallback`) est appelé à chaque image, avec la commande 0x10. Heroes of Mana en a besoin pour le lasso des batailles.
+- `"gates": {"0x...": "nds_gate_skip"}` : la fonction du jeu ne s'exécute pas. Heroes of Mana : `MovieMoveGo` (ov110), les vidéos sont sautées.
 
 ## Jeux au SDK ancien : Pokémon Dash
 

@@ -5,8 +5,8 @@
    "c": 10.02,
    "code": 10.38,
    "data": 0.0,
-   "play": "stuck",
-   "status": "experimental"
+   "play": "playable",
+   "status": "ok"
   },
   "ABHE": {
    "c": 22.72,
@@ -58,11 +58,11 @@
    "status": "experimental"
   },
   "AHEP": {
-   "c": 478.44,
-   "code": 45.44,
-   "data": 95.22,
-   "play": "stuck",
-   "status": "experimental"
+   "c": 587.35,
+   "code": 52.47,
+   "data": 100.0,
+   "play": "playable",
+   "status": "ok"
   },
   "AJTP": {
    "c": 51.01,
@@ -437,5 +437,5 @@
   }
  },
  "luau_host": 1,
- "toolchain": 15
+ "toolchain": 16
 }
