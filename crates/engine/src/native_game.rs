@@ -463,8 +463,10 @@ pub struct Generation {
     result: Option<Result<PathBuf, String>>,
 }
 
-/// Lignes de la préparation gardées pour le launcher.
+/// Lignes de la préparation montrées dans le panneau d'activité.
 const KEPT_LINES: usize = 5;
+/// Lignes gardées pour le journal de l'onglet Jouer.
+const LOG_LINES: usize = 300;
 
 /// La préparation en cours : ce que le launcher montre pendant qu'elle tourne.
 pub struct CurrentJob {
@@ -478,8 +480,16 @@ pub fn current_job() -> Option<CurrentJob> {
     let jobs = JOBS.lock().unwrap();
     jobs.as_ref()?.iter().find_map(|(code, job)| {
         let state = job.lock().unwrap();
-        state.result.is_none().then(|| CurrentJob { code: code.clone(), message: state.message.clone(), lines: state.lines.clone(), seconds: state.started.map_or(0, |s| s.elapsed().as_secs()) })
+        let tail = state.lines.iter().rev().take(KEPT_LINES).rev().filter(|l| **l != state.message).cloned().collect();
+        state.result.is_none().then(|| CurrentJob { code: code.clone(), message: state.message.clone(), lines: tail, seconds: state.started.map_or(0, |s| s.elapsed().as_secs()) })
     })
+}
+
+/// Le journal de la préparation de ce jeu dans cette session : pendant qu'elle tourne, et après un échec pour voir pourquoi.
+pub fn job_log(code: &str) -> Option<Vec<String>> {
+    let jobs = JOBS.lock().unwrap();
+    let state = jobs.as_ref()?.get(code)?.lock().unwrap();
+    (!matches!(state.result, Some(Ok(_)))).then(|| state.lines.clone())
 }
 
 /// Où en sont les jeux installés : prêts, à préparer, en erreur.
@@ -584,7 +594,14 @@ struct Generating {
 }
 
 fn say(state: &Mutex<Generation>, message: String) {
-    state.lock().unwrap().message = message;
+    let mut state = state.lock().unwrap();
+    // Les étapes (téléchargements, vérifications) vont aussi dans le journal, entre les lignes du programme
+    if !message.is_empty() && state.lines.last() != Some(&message) {
+        state.lines.push(message.clone());
+        let extra = state.lines.len().saturating_sub(LOG_LINES);
+        state.lines.drain(..extra);
+    }
+    state.message = message;
 }
 
 /// Télécharge un fichier d'une release du projet.
@@ -733,7 +750,7 @@ fn follow_output(output: impl Read, state: &Mutex<Generation>, log: &Mutex<Strin
         if !line.is_empty() {
             let mut state = state.lock().unwrap();
             state.lines.push(line);
-            let extra = state.lines.len().saturating_sub(KEPT_LINES);
+            let extra = state.lines.len().saturating_sub(LOG_LINES);
             state.lines.drain(..extra);
         }
     }

@@ -297,6 +297,10 @@ struct ActivityPanel;
 #[derive(Component)]
 struct ActivityNow;
 
+/// Le journal de la préparation d'un jeu, en bas de l'onglet Jouer : refait par `prep_log`.
+#[derive(Component)]
+struct PrepLog(String);
+
 #[derive(Component)]
 struct ActivityDecomp;
 
@@ -311,7 +315,7 @@ impl Plugin for LauncherPlugin {
             .add_systems(Startup, setup)
             .add_systems(OnEnter(StudioState::Menu), spawn_launcher.before(crate::studio::auto_start))
             .add_systems(Update, (take_drops, poll_picker, poll_copies, poll_disk, back_key, drag_game, type_folder_name, type_mod_link, bind_mod_key, type_search, type_tag, leave_search, expire_confirm, log_clicks, rebuild, show_status).chain().run_if(in_state(StudioState::Menu)))
-            .add_systems(Update, (activity_visibility, activity_now, activity_decomp, activity_history, note_update, poll_mods).run_if(in_state(StudioState::Menu)))
+            .add_systems(Update, (activity_visibility, activity_now, activity_decomp, activity_history, note_update, poll_mods, prep_log).run_if(in_state(StudioState::Menu)))
             .add_systems(Update, (wheel, (looks, drop_looks).chain(), view_choice_looks, lang_choice_looks, base_mods_looks, version_text, redo_on_language))
             .init_resource::<UpdateOffer>()
             .add_systems(Update, (poll_covers, poll_meta, cover_choice_looks, prepare_games, update_banner.run_if(in_state(StudioState::Menu))));
@@ -1876,6 +1880,7 @@ fn play_tab(rom: &Rom, registry: &GameRegistry) -> (Top, Rest) {
     let experimental = native.is_some() && crate::native_game::is_experimental(&rom.info.code);
     let code = rom.info.code.clone();
     let code_for_state = code.clone();
+    let code_for_log = code.clone();
     let state = crate::native_game::preparation(&code);
     let path = rom.info.path.clone();
     let original = path.clone();
@@ -1982,8 +1987,47 @@ fn play_tab(rom: &Rom, registry: &GameRegistry) -> (Top, Rest) {
             }
             t.spawn(text(font, summary, 14.0, DIM));
         }),
-        Box::new(|_, _| {}),
+        Box::new(move |r, font| {
+            // Pendant la préparation, et après un échec : ce que font le téléchargement et la génération, ligne par ligne
+            if crate::native_game::job_log(&code_for_log).is_some() {
+                r.spawn(text(font, tr("Preparation log", "Journal de la preparation"), 15.0, TEXT));
+                r.spawn((
+                    Node { flex_grow: 1.0, min_height: px(160), flex_direction: FlexDirection::Column, justify_content: JustifyContent::FlexEnd, overflow: Overflow::clip(), padding: UiRect::all(px(10)), border: UiRect::all(px(1)), border_radius: BorderRadius::all(px(6)), ..default() },
+                    BorderColor::all(BORDER),
+                    BackgroundColor(BG),
+                    PrepLog(code_for_log.clone()),
+                ));
+            }
+        }),
     )
+}
+
+/// Lignes du journal montrées : le cadre garde les dernières en bas, les plus anciennes sortent par le haut.
+const PREP_LOG_SHOWN: usize = 80;
+
+/// Remplit le journal de l'onglet Jouer avec les dernières lignes de la préparation, deux fois par seconde.
+fn prep_log(mut commands: Commands, lau: Res<Launcher>, time: Res<Time<Real>>, mut next: Local<f64>, mut shown: Local<Option<(Entity, Vec<String>)>>, boxes: Query<(Entity, &PrepLog)>, children: Query<&Children>) {
+    if time.elapsed_secs_f64() < *next {
+        return;
+    }
+    *next = time.elapsed_secs_f64() + 0.5;
+    let Some((entity, PrepLog(code))) = boxes.iter().next() else {
+        *shown = None;
+        return;
+    };
+    let lines = crate::native_game::job_log(code).unwrap_or_default();
+    let lines: Vec<String> = lines[lines.len().saturating_sub(PREP_LOG_SHOWN)..].to_vec();
+    if shown.as_ref().is_some_and(|(e, l)| *e == entity && *l == lines) {
+        return;
+    }
+    clear_children(&mut commands, entity, &children);
+    let font = lau.font.clone();
+    commands.entity(entity).with_children(|c| {
+        for line in &lines {
+            c.spawn(text(&font, line.clone(), 12.0, DIM));
+        }
+    });
+    *shown = Some((entity, lines));
 }
 
 /// L'option « outils de mod » : à télécharger, puis exporter, modifier, appliquer, et revenir aux originaux quand on veut.
