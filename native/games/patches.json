@@ -70,7 +70,9 @@
   },
   "values": {
    "nds_long_args": "1"
-  }
+  },
+  "arm_stack": true,
+  "lift_parts": 4
  },
  "AHEP": {
   "hooks": {
@@ -94,11 +96,12 @@
   "gates": {
    "0x020e3870": "nds_gate_skip"
   },
-  "stack_args": 32,
   "values": {
    "nds_long_args": "1",
    "nds_stack_margin": "512",
    "nds_stack_reuse": "1"
-  }
+  },
+  "lift_parts": 8,
+  "arm_stack": true
  }
 }

@@ -49,6 +49,16 @@ Chaque jeu a son runtime dans son propre depot (`native/`, etiquette `runtime-v<
 2. Les autres jeux ne se reessaient pas sans raison et leurs depots ne se resynchronisent pas sans demande : chaque jeu choisit quand il suit le studio.
 3. Un jeu passe a son propre runtime par son depot (`runtime_sync.py --apply`, commit, `runtime-v1`), puis son entree `"runtime"` dans `native/games/index.json`. Rien n'est publie sans accord.
 
+### Methode pour porter un jeu et faire son runtime
+
+1. Noms du SDK que le runtime remplace (fils `OS_SelectThread`/`OS_*Context`, `OSi_ThreadInfo`, `OSi_IrqThreadQueue`, `TP_*`, `FSi_ReadRomCallback`...) : ceux qui manquent au projet se retrouvent par octets masques et par voisinage avec les jeux qui les nomment, puis se verifient au desassemblage ; ils vont dans `names`/`data` du jeu dans `patches.json`.
+2. Toujours, pour un nouveau jeu : `"arm_stack": true` (appels legers, vraie pile ARM : gcc compile 6 a 8 fois plus vite) et `"lift_parts"` (4 a 8 morceaux compiles en parallele). Objectif : preparation en 1 a 2 minutes par le launcher (`native_build.py --recipe ... --rom ... --arch x86_64`, mesuree) ; au-dela, chercher ce qui coute avant de publier.
+3. Overlays qui se chevauchent : `"overlays": "multi"`. Une video ou un code que le runtime ne sait pas encore faire : `gates` vers `nds_gate_skip`, et le noter. Assembleur qui se passe des registres : `shared_regs`.
+4. Essais sans fenetre (`run_game.sh`, `--keys`, `--dump`, `--peek` avant `--keys`), puis notification a l'utilisateur pour qu'il joue dans le launcher (`decomp\JOUER HM HOM.cmd` comme modele) pendant qu'on lit `runtime.log` et qu'on corrige.
+5. Verifier qu'un jeu sans les nouvelles cles garde un `lifted.c` identique (Tom et Jerry), tests sans rom (`native/tests/runtime_check.py`, `arm2c_test.py`), `TOOLCHAIN` + 1.
+6. Runtime du jeu : `runtime_sync.py <depot> <code> --apply [--bump]` dans un worktree du depot du jeu, exclure `native/` de pre-commit, PR, fusion sur accord, etiquette `runtime-v<n>` sur la fusion, attendre la release, puis l'entree `"runtime"` de l'index et le push du studio (l'index attend que la boite `native-toolchain-<TOOLCHAIN>` soit publiee : relancer « Native index » apres « Native toolchain »).
+7. Le launcher ne lit l'index qu'au demarrage : apres une publication, le relancer.
+
 ## Branches et versions
 
 - `experimental` = branche de travail (par defaut). Chaque push publie la pre-release `experimental`.
