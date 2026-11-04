@@ -8,7 +8,7 @@
    "play": "playable",
    "runtime": {
     "repo": "liolu/harvest-moon-ds-decomp",
-    "version": 1
+    "version": 2
    },
    "status": "ok"
   },
@@ -68,7 +68,7 @@
    "play": "playable",
    "runtime": {
     "repo": "liolu/heroes-of-mana-decomp",
-    "version": 1
+    "version": 2
    },
    "status": "ok"
   },
