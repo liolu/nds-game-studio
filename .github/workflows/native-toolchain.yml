@@ -51,6 +51,10 @@ jobs:
           "$env:RUNNER_TEMP/winlibs/mingw64/bin" | Out-File -Append -Encoding ascii $env:GITHUB_PATH
           python -m pip install capstone==5.0.7
 
+      - name: Runtime compile en 64 bits (les modules des joueurs)
+        shell: pwsh
+        run: python native/tests/runtime_check.py --arch x86_64
+
       - name: Runtime compile en -m32
         shell: pwsh
         run: python native/tests/runtime_check.py

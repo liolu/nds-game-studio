@@ -21,7 +21,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      # Le GCC de l'image n'a pas -m32 : WinLibs, comme la boite commune du launcher
+      # WinLibs, comme la boite commune du launcher
       - name: WinLibs
         shell: pwsh
         run: |
@@ -30,9 +30,11 @@ jobs:
           Expand-Archive "$env:RUNNER_TEMP/winlibs.zip" -DestinationPath "$env:RUNNER_TEMP/winlibs"
           "$env:RUNNER_TEMP/winlibs/mingw64/bin" | Out-File -Append -Encoding ascii $env:GITHUB_PATH
           python -m pip install capstone==5.0.7
-      - name: Runtime compile en -m32
+      - name: Runtime compile en 64 bits (les modules des joueurs)
+        run: python native/tests/runtime_check.py --arch x86_64
+      - name: Runtime compile en 32 bits
         run: python native/tests/runtime_check.py
-      - name: Traducteur, accroches et fils verts (harnais)
+      - name: Traducteur, accroches et fils verts (harnais, 32 bits)
         run: python native/tests/arm2c_test.py
 
   runtime-macos:
