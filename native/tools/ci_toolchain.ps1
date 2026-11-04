@@ -1,5 +1,5 @@
 # Assemble la boite a outils des jeux natifs sur une machine de CI Windows.
-param([Parameter(Mandatory)][string]$Out)
+param([Parameter(Mandatory)][string]$Out, [string]$Common = "")
 $ErrorActionPreference = "Stop"
 $work = Join-Path $env:RUNNER_TEMP "native-toolchain"
 New-Item -ItemType Directory -Force -Path $work | Out-Null
@@ -10,3 +10,5 @@ Invoke-WebRequest "https://www.python.org/ftp/python/3.13.1/python-3.13.1-embed-
 Expand-Archive "$work/python.zip" -DestinationPath "$work/python"
 python -m pip install --target "$work/pkg" capstone==5.0.7
 python "$PSScriptRoot/make_toolchain.py" --gcc "$work/winlibs/mingw64" --python "$work/python" --capstone "$work/pkg/capstone" --out $Out
+# la boite commune : GCC, Python et Capstone seulement (jeux qui ont leur propre runtime)
+if ($Common) { python "$PSScriptRoot/make_toolchain.py" --gcc "$work/winlibs/mingw64" --python "$work/python" --capstone "$work/pkg/capstone" --out $Common --common }

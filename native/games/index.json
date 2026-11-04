@@ -1,4 +1,5 @@
 {
+ "common": 1,
  "games": {
   "ABCE": {
    "c": 10.02,
@@ -82,6 +83,10 @@
    "code": 55.69,
    "data": 93.1,
    "play": "playable",
+   "runtime": {
+    "repo": "liolu/lego-star-wars-ii-the-original-trilogy-decomp",
+    "version": 1
+   },
    "status": "ok"
   },
   "AMGP": {

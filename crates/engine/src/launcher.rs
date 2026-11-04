@@ -468,24 +468,24 @@ fn reload_roms(lau: &mut Launcher, images: &mut Assets<Image>) {
     lau.dirty = true;
 }
 
-/// Prépare les jeux en tâche de fond, et rafraîchit la page du jeu ouvert quand son état change.
-fn prepare_games(mut lau: ResMut<Launcher>, state: Res<State<StudioState>>, time: Res<Time>, mut next: Local<f32>, mut shown: Local<String>) {
+/// Rafraîchit la page du jeu ouvert quand son état change. Rien n'est préparé tout seul (ROADMAP-MODS.md, étape 3 bis) : un module
+/// ne se génère que si le joueur clique sur « Préparer », « Jouer » ou sur une mise à jour, jamais au démarrage du launcher.
+fn prepare_games(mut lau: ResMut<Launcher>, time: Res<Time>, mut next: Local<f32>, mut shown: Local<String>) {
     if time.elapsed_secs() < *next {
         return;
     }
     *next = time.elapsed_secs() + 1.0;
-    // Pas de compilation pendant qu'on joue
-    if *state.get() == StudioState::Menu {
-        crate::native_game::prepare_next(lau.roms.iter().map(|r| (r.info.code.as_str(), r.info.path.as_path())), lau.prepare_all);
-    }
     let Some(open) = lau.open.clone() else { return };
     let Some(rom) = lau.roms.iter().find(|r| r.info.file == open) else { return };
-    let now = match crate::native_game::preparation(&rom.info.code) {
+    let mut now = match crate::native_game::preparation(&rom.info.code) {
         crate::native_game::Preparation::Ready => "pret".to_string(),
         crate::native_game::Preparation::Running(m) => m,
         crate::native_game::Preparation::Failed(e) => e,
         crate::native_game::Preparation::NotStarted => String::new(),
     };
+    // une mise à jour qui se prépare, ou qu'un index frais vient d'annoncer
+    now.push_str(&crate::native_game::job_message(&rom.info.code).unwrap_or_default());
+    now.push_str(&format!("{:?}", crate::native_game::runtime_update(&rom.info.code)));
     if *shown != now {
         *shown = now;
         lau.dirty = true;
@@ -1916,6 +1916,28 @@ fn play_tab(rom: &Rom, registry: &GameRegistry) -> (Top, Rest) {
                     let rom = if crate::mods::has_modded_rom(&code_for_state) { crate::mods::modded_rom(&code_for_state) } else { original.clone() };
                     play_version_button(t, font, tr("Play with mods", "Jouer avec les mods"), id, rom, true);
                 }
+            }
+            // Mise à jour du runtime de ce jeu : proposée, jamais imposée ; la version installée reste jouable
+            if let Some(message) = crate::native_game::job_message(&code_for_state).filter(|_| matches!(state, Preparation::Ready)) {
+                t.spawn(text(font, t!("{message} You can keep playing the installed version.", "{message} Vous pouvez continuer a jouer a la version installee."), 15.0, DIM));
+            } else if let Some((installed, latest)) = crate::native_game::runtime_update(&code_for_state) {
+                t.spawn(text(font, t!("Update available for this game: runtime version {latest} (installed: {installed}). Installing it prepares the game again (about two minutes).", "Mise a jour disponible pour ce jeu : runtime version {latest} (installee : {installed}). L'installer prepare a nouveau le jeu (environ deux minutes)."), 15.0, GOLD));
+                t.spawn(Node { flex_direction: FlexDirection::Row, column_gap: px(8), ..default() }).with_children(|row| {
+                    let (code, path) = (code_for_state.clone(), original.clone());
+                    button(row, button_node(), PLAY, PLAY_HOVER)
+                        .observe(move |_: On<Activate>, mut lau: ResMut<Launcher>| {
+                            crate::native_game::update_runtime(&code, &path);
+                            lau.dirty = true;
+                        })
+                        .with_child(text(font, tr("Install the update", "Installer la mise a jour"), 15.0, TEXT));
+                    let code = code_for_state.clone();
+                    button(row, button_node(), ITEM, ITEM_HOVER)
+                        .observe(move |_: On<Activate>, mut lau: ResMut<Launcher>| {
+                            crate::native_game::ignore_update(&code);
+                            lau.dirty = true;
+                        })
+                        .with_child(text(font, tr("Don't offer it again", "Ne plus la proposer"), 15.0, TEXT));
+                });
             }
             match &state {
                 Preparation::Running(message) if !message.is_empty() => {

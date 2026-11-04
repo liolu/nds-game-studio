@@ -6,7 +6,8 @@
                             --capstone <capstone-5.0.7-...whl ou dossier du paquet> --out x.zip
 
 Contenu : traducteur, runtime nitro-pc, recettes, Python et Capstone ; sous Windows aussi GCC (seulement ce qui compile
-en 32 bits sans bibliotheques). Pas une instruction de jeu. GCC et binutils sont sous GPL : voir NOTICE.txt dans l'archive.
+en 32 bits sans bibliotheques). --common : seulement GCC, Python et Capstone, la boite commune des jeux qui ont leur
+propre runtime (release runtime-v<n> du depot du jeu, ROADMAP-MODS.md etape 3 bis). Pas une instruction de jeu. GCC et binutils sont sous GPL : voir NOTICE.txt dans l'archive.
 macOS (native/MACOS.md 3.8) : pas de compilateur, le SDK d'Apple ne se redistribue pas ; le joueur a les Command Line
 Tools. Python est python-build-standalone (install_only), Capstone la roue de la meme plateforme.
 """
@@ -94,7 +95,8 @@ def macos(a):
             sys.exit("python (bin/python3) ou capstone (lib/libcapstone.dylib) introuvable : %s, %s" % (a.python, a.capstone))
         with zipfile.ZipFile(a.out, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
             z.writestr("NOTICE.txt", NOTICE_MACOS)
-            add_sources(z)
+            if not a.common:
+                add_sources(z)
             for f in sorted(py.rglob("*")):
                 rel = f.relative_to(py).as_posix()
                 if f.is_file() and keep_python(rel):
@@ -128,6 +130,7 @@ def main():
     ap.add_argument("--python", required=True)
     ap.add_argument("--capstone", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--common", action="store_true", help="sans traducteur, runtime ni recettes")
     a = ap.parse_args()
     if a.platform != "windows":
         macos(a)
@@ -138,7 +141,8 @@ def main():
     gcc = Path(a.gcc)
     with zipfile.ZipFile(a.out, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
         z.writestr("NOTICE.txt", NOTICE)
-        add_sources(z)
+        if not a.common:
+            add_sources(z)
         for name in TOOLS + DLLS:
             z.write(gcc / "bin" / name, "mingw64/bin/" + name)
         version = next((gcc / "libexec/gcc/x86_64-w64-mingw32").iterdir()).name

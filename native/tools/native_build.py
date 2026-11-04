@@ -30,10 +30,11 @@ RUNTIME = HERE.parent / "nitro-pc"
 WIN32 = sys.platform == "win32"
 DARWIN = sys.platform == "darwin"
 WINLIBS = r"C:\Users\thomr\AppData\Local\Microsoft\WinGet\Packages\BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe\mingw64\bin"
-# La boite a outils du launcher donne son compilateur ; sinon celui installe sur ce PC
+# La boite a outils du launcher donne son compilateur (NDSGS_COMPILER_BIN : la boite commune, quand le runtime vient du depot
+# du jeu) ; sinon celui installe sur ce PC
 TOOLCHAIN_BIN = HERE.parent.parent / "mingw64" / "bin"
-for bin_dir in (str(TOOLCHAIN_BIN), WINLIBS) if WIN32 else ():
-    if os.path.isdir(bin_dir):
+for bin_dir in (os.environ.get("NDSGS_COMPILER_BIN", ""), str(TOOLCHAIN_BIN), WINLIBS) if WIN32 else ():
+    if bin_dir and os.path.isdir(bin_dir):
         os.environ["PATH"] = bin_dir + os.pathsep + os.environ["PATH"]
         break
 # Couche systeme du runtime (nitro-pc/os.h) : les sources propres a chaque plateforme, les autres sont communes

@@ -31,6 +31,11 @@ echo "$PBS_SHA256  $WORK/python.tar.gz" | shasum -a 256 -c -
 # la roue de la plateforme visee, pas celle du Python de la machine
 python3 -m pip download "capstone==$CAPSTONE" --only-binary=:all: --platform "$WHEEL_PLATFORM" --no-deps -d "$WORK/wheel"
 python3 "$HERE/make_toolchain.py" --platform "$PLATFORM" --python "$WORK/python.tar.gz" --capstone "$WORK/wheel/capstone-$CAPSTONE-py3-none-$WHEEL_PLATFORM.whl" --out "$OUT"
+# la boite commune (3e argument) : Python et Capstone seulement, pour les jeux qui ont leur propre runtime
+if [ -n "${3:-}" ]; then
+  COMMON="$(cd "$(dirname "$3")" && pwd)/$(basename "$3")"
+  python3 "$HERE/make_toolchain.py" --platform "$PLATFORM" --python "$WORK/python.tar.gz" --capstone "$WORK/wheel/capstone-$CAPSTONE-py3-none-$WHEEL_PLATFORM.whl" --out "$COMMON" --common
+fi
 
 # Controle : l'archive decompressee lance son Python et charge Capstone, avec le meme environnement que le launcher
 CHECK="$WORK/check"

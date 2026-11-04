@@ -28,10 +28,15 @@ jusqu'à son écran titre) ; voir la colonne macOS de [GAMES.md](GAMES.md).
 
 ## Chez le joueur : le launcher génère le module
 
-Les outils sont livrés avec le studio (`native-toolchain` à côté de l'exécutable, 100 Mo). Dès qu'il voit une rom, le
-launcher prépare son module en tâche de fond, un jeu à la fois et jamais pendant une partie : il vérifie le SHA-1 de la
-rom, traduit, compile (de 30 s à 1 min 30 selon le jeu) et garde le résultat dans `native/<code>-<n>.exe` du dossier des
-données (sans `.exe` sur Mac). Le bouton Jouer s'active quand c'est prêt. Les jeux expérimentaux ne se préparent que sur demande (bouton Préparer).
+Rien ne se prépare tout seul : un module ne se génère que lorsque le joueur clique sur Préparer, Jouer ou une mise à jour, jamais au démarrage du launcher. Le démarrage ne télécharge que l'index des jeux (`index.json` de la release `native-toolchain`). La génération vérifie le SHA-1 de la rom, traduit et compile (de 30 s à 2 min selon le jeu), puis garde le résultat dans `native/` du dossier des données (sans `.exe` sur Mac). Chaque jeu est indépendant : préparer, mettre à jour ou casser l'un ne touche pas aux autres.
+
+**Un runtime par jeu** (ROADMAP-MODS.md, étape 3 bis). Un jeu dont l'index donne `"runtime": {"repo": "...", "version": n}` prend son runtime dans la release `runtime-v<n>` de son dépôt (`native-runtime-<n>.zip`, contrôlé par `SHA256SUMS`, 170 Ko). Le compilateur et Python viennent de la boîte commune (`native-common-<c>.zip`, 35 Mo), téléchargée une fois au premier jeu joué. Son module s'appelle `<code>-r<n>`. La version installée est notée dans `native/<code>.json`. Quand l'index en annonce une plus récente, la page du jeu la propose (« Installer la mise à jour », « Ne plus la proposer »), sans jamais l'imposer. L'ancien module reste sur le disque jusqu'à ce que le nouveau ait tourné dix secondes ; s'il s'arrête avant, le launcher revient à l'ancienne version et le dit.
+
+Dans le dépôt d'un jeu, `native/` (licence MIT, `RUNTIME-LICENSE.txt`) se remplit avec `tools/runtime_sync.py`, qui montre l'écart avec le studio et ne reporte que si on le demande. Sa CI (`tools/runtime-ci.yml`, copiée en `.github/workflows/native-runtime.yml`) vérifie le runtime sans rom, puis publie l'archive à l'étiquette `runtime-v<n>` (`tools/runtime_package.py`). Les jeux sans `"runtime"` gardent la boîte à outils commune (`native-toolchain`, module `<code>-<TOOLCHAIN>`).
+
+Le paquet Windows n'emporte plus la boîte à outils : elle se télécharge au premier jeu joué. Une boîte à côté de l'exécutable (paquets d'avant) ne sert que si sa version est celle de l'index.
+
+Pour les essais : `NDSGS_NATIVE_INDEX` (adresse de l'index), `NDSGS_TOOLCHAIN_URL` (release de la boîte commune), `NDSGS_GITHUB_DOWNLOAD` (à la place de `https://github.com` pour les releases des jeux).
 
 Sans ce dossier (compilation locale), la boîte est téléchargée une fois (release `native-toolchain`).
 Sur Mac, le launcher vérifie d'abord `xcrun --find clang` et, s'il manque, explique `xcode-select --install`

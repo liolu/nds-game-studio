@@ -231,13 +231,16 @@ fn module_code(path: &Path) -> Option<String> {
 const INDEX: &str = include_str!("../../../native/games/index.json");
 const TOOLCHAIN_URL: &str = "https://github.com/liolu/nds-game-studio/releases/download/native-toolchain";
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Clone)]
 struct Index {
     toolchain: u32,
+    /// Version de la boîte commune (GCC, Python, Capstone) des jeux qui ont leur propre runtime.
+    #[serde(default)]
+    common: u32,
     games: std::collections::BTreeMap<String, IndexGame>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Clone)]
 struct IndexGame {
     status: String,
     #[serde(default)]
@@ -245,6 +248,16 @@ struct IndexGame {
     code: Option<f32>,
     c: Option<f32>,
     data: Option<f32>,
+    /// Le runtime de ce jeu vient de son dépôt (release `runtime-v<version>`) ; sans, de la boîte à outils commune.
+    #[serde(default)]
+    runtime: Option<GameRuntime>,
+}
+
+#[derive(serde::Deserialize, Clone, Debug, PartialEq)]
+struct GameRuntime {
+    /// `propriétaire/dépôt` sur GitHub.
+    repo: String,
+    version: u32,
 }
 
 /// État d'un jeu : montré sur sa page. Pourcentages du code identique à l'original, du code écrit en C
@@ -274,22 +287,34 @@ fn index() -> &'static Index {
     })
 }
 
+/// L'index lu au démarrage de cette session, s'il a pu l'être : les mises à jour qu'il annonce se proposent tout de suite.
+static FRESH: Mutex<Option<Index>> = Mutex::new(None);
+
 fn downloaded_index() -> PathBuf {
     crate::save::data_dir().join("native").join("index.json")
 }
 
-/// Télécharge l'index publié avec la boîte à outils, pour le prochain démarrage. Sans réseau, rien ne change.
+/// L'adresse de l'index : `NDSGS_NATIVE_INDEX` pour un essai.
+fn index_url() -> String {
+    std::env::var("NDSGS_NATIVE_INDEX").unwrap_or_else(|_| format!("{TOOLCHAIN_URL}/index.json"))
+}
+
+/// Télécharge l'index publié avec la boîte à outils : gardé pour le prochain démarrage, et lu tout de suite pour proposer les
+/// mises à jour des runtimes. Sans réseau, rien ne change. C'est le seul téléchargement du démarrage.
 fn refresh_index() {
     std::thread::spawn(|| {
         let target = downloaded_index();
         let temp = target.with_extension("json.new");
         let _ = std::fs::create_dir_all(target.parent().unwrap_or(Path::new(".")));
-        let ok = download(&format!("{TOOLCHAIN_URL}/index.json"), &temp).is_ok()
-            && std::fs::read(&temp).ok().and_then(|bytes| serde_json::from_slice::<Index>(&bytes).ok()).is_some_and(|i| !i.games.is_empty());
-        if ok {
-            let _ = std::fs::rename(&temp, &target);
-        } else {
-            let _ = std::fs::remove_file(&temp);
+        let parsed = download(&index_url(), &temp).ok().and_then(|()| serde_json::from_slice::<Index>(&std::fs::read(&temp).ok()?).ok()).filter(|i| !i.games.is_empty());
+        match parsed {
+            Some(index) => {
+                let _ = std::fs::rename(&temp, &target);
+                *FRESH.lock().unwrap() = Some(index);
+            }
+            None => {
+                let _ = std::fs::remove_file(&temp);
+            }
         }
     });
 }
@@ -304,18 +329,110 @@ pub fn is_experimental(code: &str) -> bool {
     index().games.get(code).is_some_and(|g| g.status != "ok")
 }
 
-/// Le module généré : `<code>-<version>`, et l'empreinte des instructions que les mods actifs accrochent (`"instruction_hooks"`),
-/// car elles sont traduites dans le module. Changer de mods de ce genre en génère un autre ; les autres restent.
-fn generated_path(code: &str) -> PathBuf {
+// ------------------------------------------------------------------ runtime propre à un jeu (ROADMAP-MODS.md, étape 3 bis)
+
+fn runtime_of(code: &str) -> Option<GameRuntime> {
+    index().games.get(code)?.runtime.clone()
+}
+
+/// La dernière version publiée du runtime de ce jeu : celle de l'index lu au démarrage, sinon celle du dernier index gardé.
+fn latest_runtime(code: &str) -> Option<u32> {
+    let fresh = FRESH.lock().unwrap().as_ref().and_then(|i| Some(i.games.get(code)?.runtime.as_ref()?.version));
+    fresh.or_else(|| runtime_of(code).map(|r| r.version))
+}
+
+/// La version du runtime installée pour un jeu (`native/<code>.json`) : celle qu'on joue tant qu'on n'accepte pas une mise à jour.
+#[derive(serde::Serialize, serde::Deserialize, Default, Clone, Debug, PartialEq)]
+struct Installed {
+    version: u32,
+    /// La version d'avant, gardée jusqu'à ce que celle-ci ait démarré : on y revient si elle ne démarre pas.
+    #[serde(default)]
+    previous: Option<u32>,
+    #[serde(default)]
+    confirmed: bool,
+    /// « Ne plus proposer » : cette version n'est plus proposée.
+    #[serde(default)]
+    ignore: Option<u32>,
+}
+
+fn installed_path(code: &str) -> PathBuf {
+    crate::save::data_dir().join("native").join(format!("{code}.json"))
+}
+
+fn load_installed(code: &str) -> Option<Installed> {
+    serde_json::from_slice(&std::fs::read(installed_path(code)).ok()?).ok()
+}
+
+fn save_installed(code: &str, installed: &Installed) {
+    if let Ok(text) = serde_json::to_vec_pretty(installed) {
+        let _ = std::fs::create_dir_all(installed_path(code).parent().unwrap_or(Path::new(".")));
+        let _ = std::fs::write(installed_path(code), text);
+    }
+}
+
+/// La version du runtime qu'on joue : l'installée si son module est là, sinon la dernière (premier lancement). `None` : ce jeu
+/// n'a pas de runtime propre, il prend la boîte à outils commune.
+fn module_version(code: &str) -> Option<u32> {
+    runtime_of(code)?;
+    match load_installed(code) {
+        Some(i) if generated_path_for(code, Some(i.version)).exists() => Some(i.version),
+        _ => latest_runtime(code),
+    }
+}
+
+/// Une mise à jour du runtime à proposer pour ce jeu : (installée, dernière). Jamais imposée.
+pub fn runtime_update(code: &str) -> Option<(u32, u32)> {
+    let installed = load_installed(code)?;
+    let latest = latest_runtime(code)?;
+    (generated_path_for(code, Some(installed.version)).exists() && latest > installed.version && installed.ignore != Some(latest)).then_some((installed.version, latest))
+}
+
+/// Le joueur accepte la mise à jour : le nouveau runtime est téléchargé et le module généré ; l'ancien reste jusque-là.
+pub fn update_runtime(code: &str, rom: &Path) {
+    if let Some(latest) = latest_runtime(code) {
+        start_job(code, rom, Some(latest), true);
+    }
+}
+
+/// « Ne plus proposer » cette version.
+pub fn ignore_update(code: &str) {
+    if let (Some(mut installed), Some(latest)) = (load_installed(code), latest_runtime(code)) {
+        installed.ignore = Some(latest);
+        save_installed(code, &installed);
+    }
+}
+
+/// La génération en cours pour ce jeu, s'il y en a une : son message.
+pub fn job_message(code: &str) -> Option<String> {
+    let jobs = JOBS.lock().unwrap();
+    let job = jobs.as_ref()?.get(code)?;
+    let state = job.lock().unwrap();
+    state.result.is_none().then(|| state.message.clone())
+}
+
+/// L'empreinte des instructions que les mods actifs accrochent (`"instruction_hooks"`) : elles sont traduites dans le module.
+fn hooks_print(code: &str) -> String {
     let hooks = crate::mod_packs::instruction_hooks(code);
-    let print = if hooks.is_empty() {
-        String::new()
-    } else {
-        use sha2::{Digest, Sha256};
-        let digest = Sha256::digest(hooks.join(",").as_bytes());
-        format!("-h{}", digest.iter().take(4).map(|b| format!("{b:02x}")).collect::<String>())
+    if hooks.is_empty() {
+        return String::new();
+    }
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(hooks.join(",").as_bytes());
+    format!("-h{}", digest.iter().take(4).map(|b| format!("{b:02x}")).collect::<String>())
+}
+
+/// Le module généré : `<code>-r<version du runtime du jeu>`, ou `<code>-<boîte à outils>` pour un jeu sans runtime propre, puis
+/// l'empreinte des accroches d'instructions. Changer de version ou de mods de ce genre en génère un autre ; les autres restent.
+fn generated_path_for(code: &str, runtime: Option<u32>) -> PathBuf {
+    let version = match runtime {
+        Some(v) => format!("r{v}"),
+        None => index().toolchain.to_string(),
     };
-    crate::save::data_dir().join("native").join(format!("{code}-{}{print}{}", index().toolchain, std::env::consts::EXE_SUFFIX))
+    crate::save::data_dir().join("native").join(format!("{code}-{version}{}{}", hooks_print(code), std::env::consts::EXE_SUFFIX))
+}
+
+fn generated_path(code: &str) -> PathBuf {
+    generated_path_for(code, module_version(code))
 }
 
 /// Le module à lancer s'il existe déjà.
@@ -352,7 +469,7 @@ pub fn current_job() -> Option<CurrentJob> {
     })
 }
 
-/// Où en sont les jeux installés : prêts, en attente de leur tour, en erreur.
+/// Où en sont les jeux installés : prêts, à préparer, en erreur.
 #[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Overview {
     pub ready: usize,
@@ -398,12 +515,14 @@ pub fn preparation(code: &str) -> Preparation {
     }
 }
 
-/// Lance la génération de ce jeu, ou renvoie celle en cours. Une génération ratée est relancée.
-fn start_job(code: &str, rom: &Path) -> Arc<Mutex<Generation>> {
+/// Lance la génération de ce jeu, ou renvoie celle en cours. Une génération ratée est relancée ; `again` en refait une finie
+/// (mise à jour du runtime).
+fn start_job(code: &str, rom: &Path, runtime: Option<u32>, again: bool) -> Arc<Mutex<Generation>> {
     let mut jobs = JOBS.lock().unwrap();
     let map = jobs.get_or_insert_with(Default::default);
     if let Some(job) = map.get(code) {
-        if !matches!(job.lock().unwrap().result, Some(Err(_))) {
+        let result = &job.lock().unwrap().result;
+        if result.is_none() || (!again && matches!(result, Some(Ok(_)))) {
             return job.clone();
         }
     }
@@ -412,7 +531,7 @@ fn start_job(code: &str, rom: &Path) -> Arc<Mutex<Generation>> {
     let (thread_state, code, rom) = (state.clone(), code.to_string(), rom.to_path_buf());
     std::thread::spawn(move || {
         let started = std::time::Instant::now();
-        let result = generate(&code, &rom, &thread_state);
+        let result = generate(&code, &rom, runtime, &thread_state);
         match &result {
             Ok(_) => activity::record(What::Ready { game: code.clone(), seconds: started.elapsed().as_secs() }),
             Err(e) => {
@@ -425,9 +544,9 @@ fn start_job(code: &str, rom: &Path) -> Arc<Mutex<Generation>> {
     state
 }
 
-/// Le joueur demande ce jeu.
+/// Le joueur demande ce jeu : seul « Préparer » ou « Jouer » génère un module, jamais le démarrage du launcher.
 pub fn prepare(code: &str, rom: &Path) {
-    start_job(code, rom);
+    start_job(code, rom, module_version(code), false);
 }
 
 /// Oublie le module de ce jeu : il sera refait. Sans effet tant que sa génération tourne.
@@ -440,25 +559,6 @@ pub fn forget(code: &str) {
         map.remove(code);
     }
     let _ = std::fs::remove_file(generated_path(code));
-}
-
-/// Prépare le prochain jeu sans module : un seul à la fois, pour laisser le PC tranquille. Sans `all`, seulement ceux
-/// qui marchent ; les expérimentaux attendent qu'on les demande.
-pub fn prepare_next<'a>(roms: impl Iterator<Item = (&'a str, &'a Path)>, all: bool) {
-    if !CAN_GENERATE {
-        return;
-    }
-    let running = JOBS.lock().unwrap().as_ref().is_some_and(|j| j.values().any(|job| job.lock().unwrap().result.is_none()));
-    if running {
-        return;
-    }
-    let games = &index().games;
-    for (code, rom) in roms {
-        if games.get(code).is_some_and(|g| all || g.status == "ok") && matches!(preparation(code), Preparation::NotStarted) {
-            start_job(code, rom);
-            return;
-        }
-    }
 }
 
 /// Jeu lancé sans module (ligne de commande) : son écran attend la génération.
@@ -486,7 +586,7 @@ pub(crate) fn download(url: &str, to: &Path) -> Result<(), String> {
 }
 
 /// Le dossier de la boîte à outils si elle est déjà là : celui donné par `NDSGS_TOOLCHAIN_DIR` (essai d'une boîte
-/// faite depuis le dépôt), ou `native-toolchain` à côté de l'exécutable.
+/// faite depuis le dépôt), ou `native-toolchain` à côté de l'exécutable (les paquets d'avant l'étape 3 bis).
 fn local_toolchain() -> Option<PathBuf> {
     let exe = std::env::current_exe().unwrap_or_default();
     let beside = exe.parent().unwrap_or(Path::new(".")).join("native-toolchain");
@@ -499,16 +599,49 @@ fn local_toolchain() -> Option<PathBuf> {
     given.or_else(|| Some(beside).filter(|dir| toolchain_python(dir).exists() && same_version(dir)))
 }
 
-/// Nom de l'archive de la boîte à outils : une par plateforme.
-fn toolchain_asset(version: u32) -> String {
+/// Nom d'une archive de la release `native-toolchain` : une par plateforme.
+fn platform_asset(stem: &str, version: u32) -> String {
     if cfg!(target_os = "macos") {
-        format!("native-toolchain-{version}-macos-{MACOS_ARCH}.zip")
+        format!("{stem}-{version}-macos-{MACOS_ARCH}.zip")
     } else {
-        format!("native-toolchain-{version}.zip")
+        format!("{stem}-{version}.zip")
     }
 }
 
-/// Télécharge et décompresse la boîte à outils si elle n'est pas là ; renvoie son dossier.
+/// Télécharge (ou copie, `local`) une archive, la contrôle avec `sha256` s'il y en a une, et la décompresse dans `dir`, une fois.
+fn install_archive(dir: &Path, url: &str, local: Option<std::ffi::OsString>, sha256: Option<&str>, state: &Mutex<Generation>, downloading: String) -> Result<(), String> {
+    let ready = dir.join("installed");
+    if ready.exists() {
+        return Ok(());
+    }
+    let _ = std::fs::remove_dir_all(dir);
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let archive = dir.join("archive.zip");
+    match local {
+        Some(local) => {
+            std::fs::copy(local, &archive).map_err(|e| e.to_string())?;
+        }
+        None => {
+            say(state, downloading);
+            download(url, &archive)?;
+        }
+    }
+    if let Some(expected) = sha256 {
+        use sha2::{Digest, Sha256};
+        let got: String = Sha256::digest(std::fs::read(&archive).map_err(|e| e.to_string())?).iter().map(|b| format!("{b:02x}")).collect();
+        if got != expected {
+            let _ = std::fs::remove_dir_all(dir);
+            return Err(t!("{url} does not match SHA256SUMS: refused.", "{url} ne correspond pas a SHA256SUMS : refuse."));
+        }
+    }
+    say(state, tr("Installing the tools...", "Installation des outils...").to_string());
+    let file = std::fs::File::open(&archive).map_err(|e| e.to_string())?;
+    zip::ZipArchive::new(file).and_then(|mut z| z.extract(dir)).map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_file(&archive);
+    std::fs::write(ready, "").map_err(|e| e.to_string())
+}
+
+/// Télécharge et décompresse la boîte à outils si elle n'est pas là ; renvoie son dossier. Pour les jeux sans runtime propre.
 fn ensure_toolchain(state: &Mutex<Generation>) -> Result<PathBuf, String> {
     if let Some(dir) = local_toolchain() {
         return Ok(dir);
@@ -516,24 +649,49 @@ fn ensure_toolchain(state: &Mutex<Generation>) -> Result<PathBuf, String> {
     let version = index().toolchain;
     let folder = if cfg!(target_os = "macos") { format!("{version}-macos-{MACOS_ARCH}") } else { version.to_string() };
     let dir = crate::save::data_dir().join("native-toolchain").join(folder);
-    let ready = dir.join("installed");
-    if ready.exists() {
+    let url = format!("{TOOLCHAIN_URL}/{}", platform_asset("native-toolchain", version));
+    install_archive(&dir, &url, std::env::var_os("NDSGS_TOOLCHAIN_ZIP"), None, state, tr("Downloading the tools (only once)...", "Telechargement des outils (une seule fois)...").to_string())?;
+    Ok(dir)
+}
+
+/// La boîte commune (GCC, Python, Capstone), téléchargée au premier jeu joué qui a son propre runtime. Une boîte à outils
+/// complète déjà là (paquets d'avant, essais) a tout ce qu'il faut.
+fn ensure_common(state: &Mutex<Generation>) -> Result<PathBuf, String> {
+    if let Some(dir) = local_toolchain() {
         return Ok(dir);
     }
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let archive = dir.join("toolchain.zip");
-    if let Some(local) = std::env::var_os("NDSGS_TOOLCHAIN_ZIP") {
-        std::fs::copy(local, &archive).map_err(|e| e.to_string())?;
-    } else {
-        say(state, tr("Downloading the tools (only once)...", "Telechargement des outils (une seule fois)...").to_string());
-        download(&format!("{TOOLCHAIN_URL}/{}", toolchain_asset(version)), &archive)?;
+    let version = index().common;
+    let folder = if cfg!(target_os = "macos") { format!("{version}-macos-{MACOS_ARCH}") } else { version.to_string() };
+    let dir = crate::save::data_dir().join("native-common").join(folder);
+    let base = std::env::var("NDSGS_TOOLCHAIN_URL").unwrap_or_else(|_| TOOLCHAIN_URL.to_string());
+    let url = format!("{base}/{}", platform_asset("native-common", version));
+    install_archive(&dir, &url, None, None, state, tr("Downloading the tools (only once)...", "Telechargement des outils (une seule fois)...").to_string())?;
+    Ok(dir)
+}
+
+/// Le runtime de ce jeu, version `version` : release `runtime-v<version>` de son dépôt, contrôlée par `SHA256SUMS`. Une seule
+/// version par dossier : une mise à jour ne touche ni aux autres versions, ni aux autres jeux.
+fn ensure_runtime(code: &str, repo: &str, version: u32, state: &Mutex<Generation>) -> Result<PathBuf, String> {
+    let dir = crate::save::data_dir().join("native-runtime").join(format!("{code}-r{version}"));
+    if dir.join("installed").exists() {
+        return Ok(dir);
     }
-    say(state, tr("Installing the tools...", "Installation des outils...").to_string());
-    let file = std::fs::File::open(&archive).map_err(|e| e.to_string())?;
-    zip::ZipArchive::new(file).and_then(|mut z| z.extract(&dir)).map_err(|e| e.to_string())?;
-    let _ = std::fs::remove_file(&archive);
-    std::fs::write(ready, "").map_err(|e| e.to_string())?;
+    let base = std::env::var("NDSGS_GITHUB_DOWNLOAD").unwrap_or_else(|_| "https://github.com".to_string());
+    let release = format!("{base}/{repo}/releases/download/runtime-v{version}");
+    let name = format!("native-runtime-{version}.zip");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let sums = dir.join("SHA256SUMS");
+    say(state, t!("Downloading this game's runtime (version {version})...", "Telechargement du runtime de ce jeu (version {version})..."));
+    download(&format!("{release}/SHA256SUMS"), &sums)?;
+    let text = std::fs::read_to_string(&sums).map_err(|e| e.to_string())?;
+    let expected = text
+        .lines()
+        .find_map(|line| {
+            let (hash, file) = line.split_once(char::is_whitespace)?;
+            (file.trim().trim_start_matches('*') == name).then(|| hash.to_lowercase())
+        })
+        .ok_or_else(|| t!("SHA256SUMS of runtime-v{version} does not list {name}.", "SHA256SUMS de runtime-v{version} ne donne pas {name}."))?;
+    install_archive(&dir, &format!("{release}/{name}"), None, Some(&expected), state, t!("Downloading this game's runtime (version {version})...", "Telechargement du runtime de ce jeu (version {version})..."))?;
     Ok(dir)
 }
 
@@ -573,23 +731,32 @@ fn insn_hook_args(code: &str) -> Vec<String> {
     if hooks.is_empty() { Vec::new() } else { vec!["--insn-hooks".to_string(), hooks.join(",")] }
 }
 
-fn generate(code: &str, rom: &Path, state: &Mutex<Generation>) -> Result<PathBuf, String> {
+/// Génère le module de ce jeu. `runtime` : la version du runtime propre au jeu (`None` : la boîte à outils commune).
+fn generate(code: &str, rom: &Path, runtime: Option<u32>, state: &Mutex<Generation>) -> Result<PathBuf, String> {
     check_compiler()?;
-    let tools = ensure_toolchain(state)?;
+    // Les outils (Python, compilateur) et le traducteur avec son runtime : ensemble dans la boîte commune, ou séparés
+    let (tools, sources) = match (runtime, runtime_of(code)) {
+        (Some(version), Some(game)) => (ensure_common(state)?, ensure_runtime(code, &game.repo, version, state)?),
+        _ => {
+            let tools = ensure_toolchain(state)?;
+            (tools.clone(), tools)
+        }
+    };
     say(state, tr("Preparing the game from your rom (about a minute, only once)...", "Preparation du jeu depuis votre rom (environ une minute, une seule fois)...").to_string());
     let out = crate::save::data_dir().join("native").join(format!("build-{code}"));
     let mut command = Command::new(toolchain_python(&tools));
     command
         .arg("-u")
-        .arg(tools.join("native").join("tools").join("native_build.py"))
+        .arg(sources.join("native").join("tools").join("native_build.py"))
         .arg("--recipe")
-        .arg(tools.join("native").join("games").join(format!("{code}.json.gz")))
+        .arg(sources.join("native").join("games").join(format!("{code}.json.gz")))
         .arg("--rom")
         .arg(rom)
         .arg("--out")
         .arg(&out)
         .args(insn_hook_args(code))
         .env("PYTHONPATH", tools.join("python"))
+        .env("NDSGS_COMPILER_BIN", tools.join("mingw64").join("bin"))
         .env("PYTHONDONTWRITEBYTECODE", "1");
     #[cfg(windows)]
     {
@@ -625,11 +792,47 @@ fn generate(code: &str, rom: &Path, state: &Mutex<Generation>) -> Result<PathBuf
         error!("generation de {code} :\n{log}");
         return Err(tail.into_iter().rev().collect::<Vec<_>>().join(" / "));
     }
-    let target = generated_path(code);
+    let target = generated_path_for(code, runtime);
     let _ = std::fs::remove_file(&target);
     std::fs::rename(&built, &target).map_err(|e| e.to_string())?;
     let _ = std::fs::remove_dir_all(&out);
+    if let Some(version) = runtime.filter(|_| runtime_of(code).is_some()) {
+        // La nouvelle version devient celle du jeu ; l'ancienne reste jusqu'à ce que la nouvelle ait démarré
+        let before = load_installed(code).filter(|i| i.version != version && generated_path_for(code, Some(i.version)).exists());
+        let ignore = before.as_ref().and_then(|i| i.ignore);
+        let previous = before.map(|i| i.version);
+        save_installed(code, &Installed { version, previous, confirmed: previous.is_none(), ignore });
+    }
     Ok(target)
+}
+
+/// Une partie avec une version du runtime pas encore confirmée : après quelques secondes de jeu, elle l'est et l'ancien module
+/// part ; si le module s'arrête avant, on revient à l'ancienne version, et on le dit.
+fn trial_of(code: &str) -> Option<Installed> {
+    load_installed(code).filter(|i| !i.confirmed && i.previous.is_some())
+}
+
+const TRIAL_SECONDS: u64 = 10;
+
+fn confirm_trial(code: &str) {
+    if let Some(mut installed) = trial_of(code) {
+        if let Some(old) = installed.previous.take() {
+            let _ = std::fs::remove_file(generated_path_for(code, Some(old)));
+            let _ = std::fs::remove_dir_all(crate::save::data_dir().join("native-runtime").join(format!("{code}-r{old}")));
+        }
+        installed.confirmed = true;
+        save_installed(code, &installed);
+    }
+}
+
+/// Rend la version d'avant ; renvoie (nouvelle, ancienne) si c'en était une à l'essai.
+fn revert_trial(code: &str) -> Option<(u32, u32)> {
+    let installed = trial_of(code)?;
+    let old = installed.previous?;
+    let _ = std::fs::remove_file(generated_path_for(code, Some(installed.version)));
+    let _ = std::fs::remove_dir_all(crate::save::data_dir().join("native-runtime").join(format!("{code}-r{}", installed.version)));
+    save_installed(code, &Installed { version: old, previous: None, confirmed: true, ignore: Some(installed.version) });
+    Some((installed.version, old))
 }
 
 pub struct NativeGamesPlugin;
@@ -687,6 +890,9 @@ struct Running {
     mouse: (i16, i16),
     wheel: i32,
     notice_seq: u32,
+    /// Une nouvelle version du runtime à l'essai : confirmée après quelques secondes, rendue si le module s'arrête avant.
+    trial: bool,
+    started: std::time::Instant,
 }
 
 #[derive(Component)]
@@ -738,7 +944,7 @@ fn start_module(
         launch(&mut commands, &mut images, &code, &rom.0, &module);
         return;
     }
-    let state = start_job(&code, &rom.0);
+    let state = start_job(&code, &rom.0, module_version(&code), false);
     let label = commands.spawn((Text2d::new(""), TextFont::from_font_size(10.0), TextLayout::new(Justify::Center, LineBreak::WordBoundary), bevy::text::TextBounds::new_horizontal(230.0), Engine::Main.layers(), in_game())).id();
     commands.insert_resource(Generating { code, rom: rom.0.clone(), state, label });
 }
@@ -815,19 +1021,29 @@ fn launch(commands: &mut Commands, images: &mut Assets<Image>, code: &str, rom: 
         commands.spawn((Sprite { image: image.clone(), custom_size: Some(size), ..default() }, NativeScreen, engine.layers(), in_game()));
     }
     let stdin = child.stdin.take();
-    commands.insert_resource(Running { code: code.to_string(), child, stdin, frames, seq: 0, top, bottom, sent: Vec::new(), wanted: false, released: false, held: false, mouse: (0, 0), wheel: 0, notice_seq: 0 });
+    commands.insert_resource(Running { code: code.to_string(), child, stdin, frames, seq: 0, top, bottom, sent: Vec::new(), wanted: false, released: false, held: false, mouse: (0, 0), wheel: 0, notice_seq: 0, trial: trial_of(code).is_some(), started: std::time::Instant::now() });
 }
 
-fn show_frames(mut commands: Commands, mut running: ResMut<Running>, mut images: ResMut<Assets<Image>>, mut sprites: Query<&mut Sprite, With<NativeScreen>>) {
+fn show_frames(mut commands: Commands, mut running: ResMut<Running>, mut images: ResMut<Assets<Image>>, mut sprites: Query<&mut Sprite, With<NativeScreen>>, mut toasts: MessageWriter<ShowToast>) {
     if let Ok(Some(status)) = running.child.try_wait() {
         if status.success() {
             info!("jeu natif termine");
         } else {
             error!("le jeu natif s'est arrete : {status}");
             activity::record(What::GameStopped { game: running.code.clone(), error: status.to_string() });
+            // Une nouvelle version du runtime qui ne démarre pas : retour à l'ancienne, gardée pour ça
+            if running.trial && running.started.elapsed().as_secs() < TRIAL_SECONDS {
+                if let Some((new, old)) = revert_trial(&running.code) {
+                    toasts.write(ShowToast(t!("Runtime version {new} did not start ({status}): back to version {old}.", "La version {new} du runtime n'a pas demarre ({status}) : retour a la version {old}.")));
+                }
+            }
         }
         commands.set_state(StudioState::Menu);
         return;
+    }
+    if running.trial && running.started.elapsed().as_secs() >= TRIAL_SECONDS {
+        running.trial = false;
+        confirm_trial(&running.code);
     }
     let Header { seq, width, height, front, .. } = running.frames.header();
     let (width, height) = (width as usize, height as usize);

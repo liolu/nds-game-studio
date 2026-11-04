@@ -20,6 +20,8 @@ GAMES = HERE.parent / "games"
 PLAYABLE = {"AJTP", "AR5E", "AL7E", "APDE"}
 # A augmenter quand le runtime, le traducteur ou les recettes changent : le launcher retelecharge et regenere.
 TOOLCHAIN = 14
+# Boite commune (GCC, Python, Capstone) des jeux qui ont leur propre runtime : a augmenter quand elle change.
+COMMON = 1
 
 
 def game_state(project, version, game):
@@ -98,7 +100,12 @@ def main():
             continue
         index[code] = {"status": "ok" if code in PLAYABLE else "experimental", "play": playability(code, runs), **game_state(project, version, game)}
         print(code, project.name, (GAMES / (code + ".json.gz")).stat().st_size // 1024, "Ko")
-    (GAMES / "index.json").write_text(json.dumps({"toolchain": TOOLCHAIN, "games": index}, indent=1, sort_keys=True) + "\n", encoding="utf8", newline="\n")
+    # "runtime" (depot et version du runtime d'un jeu, release runtime-v<n>) se garde : il ne vient pas des projets
+    old = json.loads((GAMES / "index.json").read_text(encoding="utf8")) if (GAMES / "index.json").exists() else {}
+    for code, entry in old.get("games", {}).items():
+        if code in index and "runtime" in entry:
+            index[code]["runtime"] = entry["runtime"]
+    (GAMES / "index.json").write_text(json.dumps({"toolchain": TOOLCHAIN, "common": COMMON, "games": index}, indent=1, sort_keys=True) + "\n", encoding="utf8", newline="\n")
 
 
 if __name__ == "__main__":

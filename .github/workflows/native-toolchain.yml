@@ -71,8 +71,8 @@ jobs:
       - name: Assembler
         shell: pwsh
         run: |
-          $version = (Get-Content native/games/index.json | ConvertFrom-Json).toolchain
-          ./native/tools/ci_toolchain.ps1 -Out "native-toolchain-$version.zip"
+          $index = Get-Content native/games/index.json | ConvertFrom-Json
+          ./native/tools/ci_toolchain.ps1 -Out "native-toolchain-$($index.toolchain).zip" -Common "native-common-$($index.common).zip"
 
       - name: Publier
         if: github.ref == 'refs/heads/experimental'
@@ -82,7 +82,7 @@ jobs:
             gh release create native-toolchain --prerelease --latest=false --title "Outils des jeux natifs" \
               --notes "Telecharges par le launcher pour generer les jeux natifs depuis la rom du joueur. Aucun code de jeu." || true
           fi
-          gh release upload native-toolchain native-toolchain-*.zip --clobber
+          gh release upload native-toolchain native-toolchain-*.zip native-common-*.zip --clobber
           # l'index des jeux : le launcher le telecharge, un jeu ou un runtime arrive sans nouveau launcher
           gh release upload native-toolchain native/games/index.json --clobber
 
@@ -105,14 +105,17 @@ jobs:
       - name: Assembler
         run: |
           version=$(python3 -c "import json; print(json.load(open('native/games/index.json'))['toolchain'])")
-          ./native/tools/ci_toolchain.sh ${{ matrix.platform }} "native-toolchain-$version-${{ matrix.platform }}.zip"
+          common=$(python3 -c "import json; print(json.load(open('native/games/index.json'))['common'])")
+          ./native/tools/ci_toolchain.sh ${{ matrix.platform }} "native-toolchain-$version-${{ matrix.platform }}.zip" "native-common-$common-${{ matrix.platform }}.zip"
 
       - name: Garder l'archive
         if: github.ref != 'refs/heads/experimental'
         uses: actions/upload-artifact@v7
         with:
           name: native-toolchain-${{ matrix.platform }}
-          path: native-toolchain-*.zip
+          path: |
+            native-toolchain-*.zip
+            native-common-*.zip
           if-no-files-found: error
 
       - name: Publier
@@ -122,4 +125,4 @@ jobs:
             gh release create native-toolchain --prerelease --latest=false --title "Outils des jeux natifs" \
               --notes "Telecharges par le launcher pour generer les jeux natifs depuis la rom du joueur. Aucun code de jeu." || true
           fi
-          gh release upload native-toolchain native-toolchain-*.zip --clobber
+          gh release upload native-toolchain native-toolchain-*.zip native-common-*.zip --clobber
