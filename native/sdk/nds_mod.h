@@ -134,6 +134,10 @@ typedef struct nds_api {
     /* ---- tout le reste : fonction ou variable du runtime par son nom, 0 si absente. Sans promesse de stabilite :
      * le nom peut disparaitre a une version suivante du runtime. */
     void *(*runtime)(const char *name);
+
+    /* ---- le corps traduit d'une fonction du jeu, sans aucune accroche de mod (ni la sienne, ni celle des autres) : pour
+     * qu'un mod passe avant tous les autres, ou appelle le jeu tel quel. 0 si ds_addr n'est pas une fonction traduite. */
+    nds_fn (*game_function)(nds_u32 ds_addr);
 } nds_api;
 
 /* le champ existe dans la table de ce runtime */

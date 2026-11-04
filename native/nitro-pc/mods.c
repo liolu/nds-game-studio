@@ -312,6 +312,7 @@ static int api_hook_insn(nds_mod *mod, u32 addr, void (*fn)(void *, nds_regs *),
 }
 
 static nds_fn api_function_at(u32 addr) { return (nds_fn)nds_call_target_or_0(addr); }
+static nds_fn api_game_function(u32 addr) { return (nds_fn)nds_hook_body(addr); }
 
 static void api_on_frame(nds_mod *m, void (*fn)(void *, u32), void *u) { cb_add(&nds_cb.frame, m, (void *)fn, u); }
 static void api_on_gx(nds_mod *m, int (*fn)(void *, u32, u32 *, u32), void *u) { cb_add(&nds_cb.gx, m, (void *)fn, u); }
@@ -368,6 +369,7 @@ static nds_api api = { /* language : au chargement, d'apres --lang */
     api_on_rom_read,
     api_input, api_take_input, api_capture_mouse, api_notice,
     api_runtime,
+    api_game_function,
 };
 
 /* ------------------------------------------------------------------ status.json */

@@ -213,10 +213,8 @@ pub fn native_args(code: &str) -> Vec<OsString> {
     features.dedup();
     for feature in features {
         match feature.as_str() {
+            // camera libre, vue a la premiere personne et skip-intro sont devenus des mods natifs (format 2) : plus rien a demander ici
             "interpolate" => args.push("--interpolate".into()),
-            "first_person" => args.push("--first-person".into()),
-            "free_camera" => args.push("--free-camera".into()),
-            "skip_intro" => args.push("--skip-intro".into()),
             "network" => {
                 args.push("--net-port".into());
                 args.push(NET_PORT.to_string().into());

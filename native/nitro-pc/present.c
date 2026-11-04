@@ -12,6 +12,7 @@ static volatile int touch_down, touch_x, touch_y;
 static void script_step(void);
 static void peek_step(void);
 static void look_step(void);
+static void hid_step(void);
 static u8 *shm;
 static volatile int cfg_scale = 1, cfg_width = 256;
 static void header_init(void);
@@ -130,10 +131,11 @@ void present_frame(void) {
     script_step();
     peek_step();
     look_step();
+    hid_step();
     /* boutons X/Y : actifs a 0 ; bit 15 a 0 = couvercle ouvert */
     {
         u32 xy = 0x2C00; /* X = bit 10, Y = bit 11, debogage = bit 13 : relaches a 1, comme KEYINPUT */
-        u32 for_game = present_free_camera() || nds_mods_input_taken ? 0 : keys_now; /* la camera libre et les mods qui les prennent gardent les touches */
+        u32 for_game = nds_mods_input_taken ? 0 : keys_now; /* un mod qui prend les touches les garde */
         if (for_game & (1 << 10)) xy &= ~(1u << 10);
         if (for_game & (1 << 11)) xy &= ~(1u << 11);
         REG16(0x027FFFA8u) = (u16)xy;
@@ -183,10 +185,6 @@ static volatile int touch_down, touch_x, touch_y;
 static volatile int mouse_x, mouse_y;
 static volatile u32 mouse_buttons, window_flags, keyboard[8];
 static volatile int wheel;
-static volatile u32 free_cam; /* bit 0 = camera libre, bit 1 = scene gelee (--free-camera) */
-#define HID_C 0x06
-#define HID_V 0x19
-#define KEY_DOWN(kb, k) ((kb)[(k) >> 5] >> ((k) & 31) & 1)
 
 void present_notice(const char *text, u32 ms) {
     if (!shm) { nds_log("message : %s", text); return; }
@@ -200,35 +198,13 @@ void present_notice(const char *text, u32 ms) {
     h->notice_seq++;
 }
 
-static void say(const char *en, const char *fr) { present_notice(lang_fr ? fr : en, 3000); }
-
-/* C et V du clavier : la camera libre du runtime (avant, le launcher les envoyait en bits 12 et 13) */
-static void free_camera_keys(const u32 *now, const u32 *before) {
-    static int on = -1;
-    if (on < 0) on = nds_arg("--free-camera", 0);
-    if (!on) return;
-    u32 was = free_cam;
-    if (KEY_DOWN(now, HID_C) && !KEY_DOWN(before, HID_C)) free_cam = free_cam ? 0 : 1;
-    else if (KEY_DOWN(now, HID_V) && !KEY_DOWN(before, HID_V)) free_cam = free_cam == 3 ? 1 : 3;
-    if (free_cam == was) return;
-    if (!free_cam) say("Free camera off", "Camera libre coupee");
-    else if (free_cam == 1) say("Free camera: mouse, arrows, L and R. V freezes the scene.", "Camera libre : souris, fleches, L et R. V gele la scene.");
-    else say("Scene frozen. V resumes, C leaves.", "Scene gelee. V reprend, C quitte.");
-}
-
 static void header_init(void) {
-    if (!shm) return;
-    ShmHeader *h = (ShmHeader *)shm;
-    h->protocol = PROTOCOL;
-    if (nds_arg("--free-camera", 0)) say("C: free camera. V: freeze the scene.", "C : camera libre. V : geler la scene.");
-    if (nds_arg("--first-person", 0)) say("The mouse moves the camera. F7 frees the cursor.", "La souris dirige la camera. F7 libere le curseur.");
+    if (shm) ((ShmHeader *)shm)->protocol = PROTOCOL;
 }
 
-/* le curseur retenu : la camera a la souris (vue a la premiere personne, camera libre) ou un mod qui le demande */
+/* le curseur retenu : un mod le demande (api->capture_mouse), par exemple pour diriger une camera a la souris */
 static void header_flags(void) {
-    if (!shm) return;
-    int want = free_cam || nds_mods_mouse_captured || nds_fp_active();
-    ((ShmHeader *)shm)->flags = want ? 1 : 0;
+    if (shm) ((ShmHeader *)shm)->flags = nds_mods_mouse_captured ? 1 : 0;
 }
 
 static void read_all(void *buf, u32 size) {
@@ -248,8 +224,6 @@ static void input_thread(void *arg) {
             /* mots de 16 bits : 0 = 0x8002, 1 touches, 2-4 stylet, 5 largeur, 6 echelle, 7-8 cumul de la souris,
              * 9 fenetre (bit 0 curseur retenu, bit 1 active), 10-11 boutons, 12-13 molette, 16-31 clavier (256 bits) */
             read_all(packet + 8, 48);
-            u32 before[8];
-            for (int i = 0; i < 8; i++) before[i] = keyboard[i];
             nds_copy((void *)keyboard, packet + 16, 32);
             keys_now = packet[1] & 0xFFF;
             touch_down = packet[2];
@@ -262,8 +236,6 @@ static void input_thread(void *arg) {
             window_flags = packet[9];
             mouse_buttons = packet[10] | (u32)packet[11] << 16;
             wheel = (s32)(packet[12] | (u32)packet[13] << 16);
-            free_camera_keys((const u32 *)keyboard, before);
-            header_flags();
             continue;
         }
         keys_now = packet[0];
@@ -288,7 +260,6 @@ static void script_step(void) {
         if (*p == ':') p++;
         while (*p >= '0' && *p <= '9') mask = mask * 10 + *p++ - '0';
         keys_now = mask & 0xFFF;
-        if (nds_arg("--free-camera", 0)) { free_cam = mask >> 12 & 3; header_flags(); }
         if (*p == '/') { /* image:masque/x/y : stylet */
             int x = 0, y = 0;
             p++;
@@ -303,6 +274,28 @@ static void script_step(void) {
         }
         if (*p == ',') p++;
         key_script = p;
+    }
+}
+
+/* essais : --hid "image:code,..." tient une touche du clavier (code HID, NDS_KEY_* de sdk/nds_mod.h), 0 = toutes relachees ;
+ * pour les mods qui lisent le clavier (api->input) */
+static void hid_step(void) {
+    static const char *hids;
+    static int ready;
+    if (!ready) {
+        ready = 1;
+        nds_arg("--hid", &hids);
+    }
+    while (hids && *hids) {
+        const char *p = hids;
+        u32 frame = 0, code = 0;
+        while (*p >= '0' && *p <= '9') frame = frame * 10 + *p++ - '0';
+        if (frame > nds_frame) break;
+        if (*p == ':') p++;
+        while (*p >= '0' && *p <= '9') code = code * 10 + *p++ - '0';
+        for (int i = 0; i < 8; i++) keyboard[i] = 0;
+        if (code && code < 256) keyboard[code >> 5] = 1u << (code & 31);
+        hids = *p == ',' ? p + 1 : p;
     }
 }
 
@@ -372,18 +365,10 @@ static void peek_step(void) {
     }
 }
 
-/* Touches vues par le jeu : rien pendant la camera libre ou si un mod les prend. Curseur retenu dans la vue a la premiere
- * personne : le clic gauche tire (bouton L). */
-u32 present_keys(void) {
-    if (present_free_camera() || nds_mods_input_taken) return 0;
-    u32 k = keys_now & 0x3FF;
-    if ((window_flags & 1) && (mouse_buttons & 1) && nds_fp_active()) k |= 1u << 9;
-    return k;
-}
+/* Touches vues par le jeu : rien si un mod les prend (api->take_input) */
+u32 present_keys(void) { return nds_mods_input_taken ? 0 : keys_now & 0x3FF; }
 
 u32 present_pad(void) { return keys_now & 0xFFF; }
-
-u32 present_free_camera(void) { return free_cam; }
 
 void present_input_extra(u32 *buttons, int *wheel_out, u32 *keys) {
     *buttons = mouse_buttons;

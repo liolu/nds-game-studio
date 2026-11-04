@@ -79,6 +79,12 @@ static int hook_find(u32 addr) {
     return lo < nds_hook_count && nds_hook_table[lo].arm == key ? (int)lo : -1;
 }
 
+/* le corps traduit, sans accroche (api->game_function des mods) ; 0 si addr n'est pas une fonction traduite */
+void *nds_hook_body(u32 addr) {
+    int i = hook_find(addr);
+    return i < 0 ? 0 : nds_hook_table[i].orig;
+}
+
 /* ce qu'un appel a addr execute maintenant : la derniere accroche, ou le corps traduit ; -1 si pas une fonction */
 int nds_hook_peek(u32 addr, void **current) {
     int i = hook_find(addr);
