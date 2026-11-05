@@ -79,7 +79,7 @@
    "play": "playable",
    "runtime": {
     "repo": "liolu/tom-and-jerry-tales-decomp",
-    "version": 1
+    "version": 2
    },
    "status": "ok"
   },
@@ -97,7 +97,7 @@
    "play": "playable",
    "runtime": {
     "repo": "liolu/lego-star-wars-ii-the-original-trilogy-decomp",
-    "version": 1
+    "version": 2
    },
    "status": "ok"
   },
@@ -133,7 +133,7 @@
    "play": "playable",
    "runtime": {
     "repo": "liolu/Rayman-RR-usa-decomp",
-    "version": 1
+    "version": 2
    },
    "status": "ok"
   },
