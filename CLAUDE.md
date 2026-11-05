@@ -59,6 +59,13 @@ Chaque jeu a son runtime dans son propre depot (`native/`, etiquette `runtime-v<
 6. Runtime du jeu : `runtime_sync.py <depot> <code> --apply [--bump]` dans un worktree du depot du jeu, exclure `native/` de pre-commit, PR, fusion sur accord, etiquette `runtime-v<n>` sur la fusion, attendre la release, puis l'entree `"runtime"` de l'index et le push du studio (l'index attend que la boite `native-toolchain-<TOOLCHAIN>` soit publiee : relancer « Native index » apres « Native toolchain »).
 7. Le launcher ne lit l'index qu'au demarrage : apres une publication, le relancer.
 
+## Notes de version (patch notes)
+
+**Tout ajout ou changement s'inscrit dans `PATCHNOTES.md`**, dans la section « Pas encore publié », dans le meme
+commit que le changement : ce que le joueur voit (ou ce qui change pour un createur de mods, pour le runtime),
+en francais simple, sans jargon. Un correctif qui ne change rien de visible s'y note aussi en une ligne. A la
+publication d'une version (`stable`), la section prend son numero et sa date et une nouvelle section vide commence.
+
 ## Branches et versions
 
 - `experimental` = branche de travail (par defaut). Chaque push publie la pre-release `experimental`.

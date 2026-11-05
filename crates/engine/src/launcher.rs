@@ -176,6 +176,9 @@ struct Launcher {
     typing_setting: Option<(String, String)>,
     /// Le réglage d'un mod attend une touche : (mod, clé).
     binding: Option<(String, String)>,
+    /// Position de la zone du bas d'un jeu, gardée quand la page se refait pour le même jeu et le même onglet.
+    page_scroll: f32,
+    page_shown: Option<(String, Tab)>,
 }
 
 /// Bilan d'un ajout de plusieurs roms : chaque message remplace le précédent, une erreur passerait
@@ -307,6 +310,10 @@ struct ActivityDecomp;
 #[derive(Component)]
 struct ActivityHistory;
 
+/// La zone du bas de la page d'un jeu, dont on garde la position.
+#[derive(Component)]
+struct PageScroll;
+
 pub struct LauncherPlugin;
 
 impl Plugin for LauncherPlugin {
@@ -315,7 +322,7 @@ impl Plugin for LauncherPlugin {
             .add_systems(Startup, setup)
             .add_systems(OnEnter(StudioState::Menu), spawn_launcher.before(crate::studio::auto_start))
             .add_systems(Update, (take_drops, poll_picker, poll_copies, poll_disk, back_key, drag_game, type_folder_name, type_mod_link, bind_mod_key, type_search, type_tag, leave_search, expire_confirm, log_clicks, rebuild, show_status).chain().run_if(in_state(StudioState::Menu)))
-            .add_systems(Update, (activity_visibility, activity_now, activity_decomp, activity_history, note_update, poll_mods, prep_log).run_if(in_state(StudioState::Menu)))
+            .add_systems(Update, (activity_visibility, activity_now, activity_decomp, activity_history, note_update, poll_mods, poll_game_options, prep_log).run_if(in_state(StudioState::Menu)))
             .add_systems(Update, (wheel, (looks, drop_looks).chain(), view_choice_looks, lang_choice_looks, base_mods_looks, version_text, redo_on_language))
             .init_resource::<UpdateOffer>()
             .add_systems(Update, (poll_covers, poll_meta, cover_choice_looks, prepare_games, update_banner.run_if(in_state(StudioState::Menu))));
@@ -780,7 +787,7 @@ fn poll_disk(mut lau: ResMut<Launcher>, mut images: ResMut<Assets<Image>>, time:
 
 fn back_key(keys: Res<ButtonInput<KeyCode>>, mut lau: ResMut<Launcher>, screens: Res<DsScreens>, windows: Query<&Window>) {
     let focused = windows.get(screens.main_window()).is_ok_and(|w| w.focused);
-    if !focused || !keys.just_pressed(KeyCode::Escape) || lau.naming.is_some() || lau.mod_link.is_some() || lau.binding.is_some() || lau.tag_input.is_some() || lau.search_focus || lau.dragging.is_some() {
+    if !focused || !keys.just_pressed(KeyCode::Escape) || lau.naming.is_some() || lau.mod_link.is_some() || lau.binding.is_some() || lau.tag_input.is_some() || lau.search_focus || lau.dragging.is_some() || crate::game_options::waiting_for_key() {
         return;
     }
     if lau.open.is_some() {
@@ -1159,6 +1166,56 @@ fn cover(c: &mut ChildSpawnerCommands, rom: &Rom, size: f32) {
     });
 }
 
+/// Fichier de chaque rom -> sa famille (versions et zones d'un même jeu, `library::families`).
+fn family_map(lau: &Launcher) -> std::collections::HashMap<String, String> {
+    let list: Vec<(String, String, String, String)> = lau.roms.iter().map(|r| (r.info.file.clone(), r.info.code.clone(), r.info.title.clone(), publisher_of(r).to_string())).collect();
+    library::families(&list)
+}
+
+/// Une carte par jeu : les autres versions et zones se rangent derrière celle choisie (la dernière ouverte).
+fn collapse_families<'a>(lau: &Launcher, roms: &[&'a Rom]) -> Vec<(&'a Rom, Vec<&'a Rom>)> {
+    let families = family_map(lau);
+    let mut order: Vec<String> = Vec::new();
+    let mut members: std::collections::HashMap<String, Vec<&'a Rom>> = std::collections::HashMap::new();
+    for rom in roms.iter().copied() {
+        let family = families.get(&rom.info.file).cloned().unwrap_or_else(|| rom.info.file.clone());
+        if !members.contains_key(&family) {
+            order.push(family.clone());
+        }
+        members.entry(family).or_default().push(rom);
+    }
+    order
+        .into_iter()
+        .map(|family| {
+            let mut roms = members.remove(&family).unwrap_or_default();
+            let front = lau.prefs.chosen.get(&family).and_then(|file| roms.iter().position(|r| r.info.file == *file)).unwrap_or(0);
+            let shown = roms.remove(front);
+            (shown, roms)
+        })
+        .collect()
+}
+
+/// Décalage de chaque jaquette cachée : elles dépassent à droite, dans la marge de la carte (la carte garde sa taille).
+const STACK_STEP: f32 = 5.0;
+const STACK_MAX: usize = 2;
+
+/// La jaquette, avec derrière elle le bord des autres versions ou zones du même jeu.
+fn cover_stack(c: &mut ChildSpawnerCommands, rom: &Rom, behind: &[&Rom], size: f32) {
+    c.spawn(Node { width: px(size), height: px(size), flex_shrink: 0.0, position_type: PositionType::Relative, ..default() }).with_children(|stack| {
+        // Les jaquettes cachées, un peu plus petites et assombries, dépassent à droite
+        for (k, other) in behind.iter().take(STACK_MAX).enumerate().rev() {
+            let shift = STACK_STEP * (k + 1) as f32;
+            // Plus petite de 2 décalages, posée 3 décalages à droite : elle dépasse d'un décalage
+            let side = size - shift * 2.0;
+            stack.spawn(Node { position_type: PositionType::Absolute, left: px(shift * 3.0), top: px(shift), ..default() }).with_children(|back| {
+                cover(back, other, side);
+                back.spawn((Node { position_type: PositionType::Absolute, left: px(0), top: px(0), width: px(side), height: px(side), border: UiRect::all(px(1)), border_radius: BorderRadius::all(px(side.min(80.0) / 8.0)), ..default() }, BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.25 + 0.15 * k as f32)), BorderColor::all(Color::srgba(1.0, 1.0, 1.0, 0.35))));
+            });
+        }
+        stack.spawn(Node { position_type: PositionType::Absolute, left: px(0), top: px(0), ..default() }).with_children(|front| cover(front, rom, size));
+    });
+}
+
 fn star(c: &mut ChildSpawnerCommands, lau: &Launcher, file: &str, size: f32) {
     let color = if lau.prefs.is_favorite(file) { GOLD } else { Color::srgb(0.38, 0.4, 0.46) };
     c.spawn((ImageNode::new(lau.star.clone()).with_color(color), Node { width: px(size), height: px(size), ..default() }));
@@ -1175,7 +1232,7 @@ fn toggle_favorite(lau: &mut Launcher, file: &str) {
 // ─────────────────────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
-fn rebuild(mut commands: Commands, mut lau: ResMut<Launcher>, registry: Res<GameRegistry>, footer: Option<Res<StudioFooter>>, children: Query<&Children>, grids: Query<&ScrollPosition, With<GridScroll>>) {
+fn rebuild(mut commands: Commands, mut lau: ResMut<Launcher>, registry: Res<GameRegistry>, footer: Option<Res<StudioFooter>>, children: Query<&Children>, grids: Query<&ScrollPosition, With<GridScroll>>, pages: Query<&ScrollPosition, With<PageScroll>>) {
     if !lau.dirty {
         return;
     }
@@ -1199,6 +1256,13 @@ fn rebuild(mut commands: Commands, mut lau: ResMut<Launcher>, registry: Res<Game
     if lau.open.as_ref().is_some_and(|file| !lau.roms.iter().any(|r| r.info.file == *file)) {
         lau.open = None;
     }
+    // Même jeu, même onglet : la zone du bas reste où elle était (réglages changés un par un)
+    let shown = lau.open.clone().map(|file| (file, lau.tab));
+    lau.page_scroll = match pages.single() {
+        Ok(position) if shown.is_some() && shown == lau.page_shown => position.0.y,
+        _ => 0.0,
+    };
+    lau.page_shown = shown;
     let lau = &*lau;
     let footer = footer.map(|f| f.0.clone()).unwrap_or_default();
     commands.entity(content).with_children(|c| {
@@ -1273,6 +1337,12 @@ fn open_game(file: String) -> impl FnMut(On<Activate>, ResMut<Launcher>) {
             return;
         }
         info!("jeu ouvert : {file}");
+        if let Some(family) = family_map(&lau).get(&file).cloned() {
+            if lau.prefs.chosen.get(&family) != Some(&file) {
+                lau.prefs.chosen.insert(family, file.clone());
+                lau.prefs.store();
+            }
+        }
         lau.open = Some(file.clone());
         lau.tab = Tab::Play;
         lau.confirm_remove = None;
@@ -1296,7 +1366,8 @@ fn spawn_library(main: &mut ChildSpawnerCommands, lau: &Launcher) {
     let font = &lau.font;
     let roms = shown_roms(lau);
     let folders = shown_folders(lau);
-    let count = roms.len();
+    // En grille, les versions et zones d'un jeu sont une seule carte
+    let count = if lau.prefs.view == LibraryView::Grid { collapse_families(lau, &roms).len() } else { roms.len() };
     let searching = !lau.search.trim().is_empty();
     let games = if count == 1 { tr("1 game", "1 jeu").to_string() } else { t!("{count} games", "{count} jeux") };
     let empty_folder = !searching && count == 0 && !lau.folder.is_empty() && folders.is_empty();
@@ -1530,12 +1601,12 @@ fn spawn_grid(area: &mut ChildSpawnerCommands, lau: &Launcher, roms: &[&Rom], fo
                     card.spawn((text(font, games_in_folder(lau, folder), 12.0, DIM), Node { width: percent(100), ..default() }));
                 });
         }
-        for rom in roms.iter().copied() {
+        for (rom, behind) in collapse_families(lau, roms) {
             button(grid, Node { width: px(190), height: px(268), flex_shrink: 0.0, flex_direction: FlexDirection::Column, align_items: AlignItems::Center, padding: UiRect::all(px(10)), row_gap: px(8), border_radius: BorderRadius::all(px(10)), overflow: Overflow::clip(), ..default() }, PANEL, ITEM_HOVER)
                 .observe(open_game(rom.info.file.clone()))
                 .observe(start_drag(rom.info.file.clone()))
                 .with_children(|card| {
-                    cover(card, rom, 170.0);
+                    cover_stack(card, rom, &behind, 170.0);
                     if lau.prefs.is_favorite(&rom.info.file) {
                         card.spawn(Node { position_type: PositionType::Absolute, top: px(16), right: px(16), ..default() }).with_children(|b| star(b, lau, &rom.info.file, 22.0));
                     }
@@ -1842,17 +1913,83 @@ fn spawn_game(main: &mut ChildSpawnerCommands, lau: &Launcher, rom: &Rom, regist
             Tab::Description => description_tab(lau, rom),
             Tab::Settings => settings_tab(lau, rom, registry),
         };
-        zone.spawn(Node { flex_shrink: 0.0, min_height: px(MAIN_PAD + COVER - HEADER_H + 14.0), flex_direction: FlexDirection::Column, row_gap: px(10), padding: UiRect::new(px(beside - 2.0), px(20), px(16), px(10)), ..default() }).with_children(|t| top(t, font));
+        zone.spawn(Node { flex_shrink: 0.0, min_height: px(MAIN_PAD + COVER - HEADER_H + 14.0), flex_direction: FlexDirection::Column, row_gap: px(10), padding: UiRect::new(px(beside - 2.0), px(20), px(16), px(10)), ..default() }).with_children(|t| {
+            spawn_variants(t, lau, rom);
+            top(t, font)
+        });
         zone.spawn((
             Node { flex_grow: 1.0, flex_basis: px(0), min_height: px(0), flex_direction: FlexDirection::Column, row_gap: px(8), padding: UiRect::new(px(20), px(20), px(4), px(70)), overflow: Overflow::scroll_y(), ..default() },
-            ScrollPosition::default(),
+            ScrollPosition(Vec2::new(0.0, lau.page_scroll)),
             Hovered::default(),
             Scrollable,
+            PageScroll,
         ))
         .with_children(|r| rest(r, font));
     });
     // L'image, par-dessus le coin de la zone du bas
     main.spawn((Node { position_type: PositionType::Absolute, top: px(MAIN_PAD), left: px(MAIN_PAD), ..default() }, GlobalZIndex(1))).with_children(|b| cover(b, rom, COVER));
+}
+
+/// Hauteur d'une ligne d'onglets de version ou de zone : la place reste prise sans eux, la page ne bouge pas d'un jeu à l'autre.
+const VARIANT_ROW_H: f32 = 32.0;
+
+/// Les onglets des autres versions (même jeu, autre code) et des autres zones (même code, autre région) de ce jeu.
+/// Sans autre version ou zone, la ligne reste là, vide.
+fn spawn_variants(t: &mut ChildSpawnerCommands, lau: &Launcher, rom: &Rom) {
+    let font = &lau.font;
+    let families = family_map(lau);
+    let family = families.get(&rom.info.file).cloned().unwrap_or_default();
+    let mut members: Vec<&Rom> = lau.roms.iter().filter(|r| families.get(&r.info.file) == Some(&family)).collect();
+    members.sort_by(|a, b| (&a.info.code, &a.info.file).cmp(&(&b.info.code, &b.info.file)));
+    let game = |r: &Rom| r.info.code.get(..3).unwrap_or(&r.info.code).to_string();
+    let this_game = game(rom);
+    // Une version = un code de jeu ; on y garde la même zone si elle existe
+    let mut versions: Vec<(String, &Rom)> = Vec::new();
+    for member in &members {
+        if versions.iter().any(|(g, _)| *g == game(member)) {
+            continue;
+        }
+        let same_zone = members.iter().find(|r| game(r) == game(member) && r.info.region() == rom.info.region()).copied().unwrap_or(member);
+        versions.push((game(member), same_zone));
+    }
+    let zones: Vec<&Rom> = members.iter().filter(|r| game(r) == this_game).copied().collect();
+    let tab_row = |t: &mut ChildSpawnerCommands, title: &str, items: Vec<(String, String, bool)>| {
+        t.spawn(Node { height: px(VARIANT_ROW_H), flex_shrink: 0.0, flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(6), overflow: Overflow::clip(), ..default() }).with_children(|row| {
+            if items.len() < 2 {
+                return;
+            }
+            row.spawn((text(font, title.to_string(), 13.0, DIM), Node { width: px(70), flex_shrink: 0.0, ..default() }));
+            for (label, file, on) in items {
+                let (normal, hover) = if on { (ITEM_ON, ITEM_ON) } else { (ITEM, ITEM_HOVER) };
+                let family = family.clone();
+                button(row, Node { height: px(VARIANT_ROW_H - 4.0), padding: UiRect::axes(px(12), px(0)), ..button_node() }, normal, hover)
+                    .observe(move |_: On<Activate>, mut lau: ResMut<Launcher>| show_variant(&mut lau, &family, &file))
+                    .with_child(text(font, label, 14.0, TEXT));
+            }
+        });
+    };
+    let versions = versions
+        .into_iter()
+        .map(|(g, r)| {
+            (library::version_name(&r.info.title, &r.info.file), r.info.file.clone(), g == this_game)
+        })
+        .collect();
+    tab_row(t, tr("Version", "Version"), versions);
+    let zones = zones.into_iter().map(|r| (r.info.region().to_string(), r.info.file.clone(), r.info.file == rom.info.file)).collect();
+    tab_row(t, tr("Zone", "Zone"), zones);
+}
+
+/// Passe à une autre version ou zone : sa page (et sa jaquette), et c'est elle que la vue des jeux montre ensuite.
+fn show_variant(lau: &mut Launcher, family: &str, file: &str) {
+    if lau.open.as_deref() == Some(file) {
+        return;
+    }
+    lau.open = Some(file.to_string());
+    lau.prefs.chosen.insert(family.to_string(), file.to_string());
+    lau.prefs.store();
+    lau.confirm_remove = None;
+    lau.tag_input = None;
+    lau.dirty = true;
 }
 
 type Top = Box<dyn FnOnce(&mut ChildSpawnerCommands, &Fonts)>;
@@ -1984,6 +2121,26 @@ fn play_tab(rom: &Rom, registry: &GameRegistry) -> (Top, Rest) {
                     t!("Mods are on: {names}. Play starts with them.", "Mods actifs : {names}. Jouer demarre avec eux.")
                 };
                 t.spawn(text(font, message, 15.0, GOLD));
+            }
+            // Accélération : du launcher, pas d'un mod, mais seulement en jouant avec des mods
+            if crate::mods::available(&code_for_state) {
+                use crate::game_options::SpeedKey;
+                let options = crate::game_options::get();
+                let on = options.speed_enabled(Some(&code_for_state));
+                let key = |which| crate::native_game::key_code_label(options.speed_key(Some(&code_for_state), which));
+                let line = t!(
+                    "Speed-up with mods: {} normal / x{}, {} faster, {} slower",
+                    "Acceleration avec les mods : {} normale / x{}, {} plus vite, {} moins vite",
+                    key(SpeedKey::Toggle),
+                    options.fast_speed(Some(&code_for_state)) as f32 / 100.0,
+                    key(SpeedKey::Faster),
+                    key(SpeedKey::Slower)
+                );
+                t.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(10), ..default() }).with_children(|row| {
+                    let code = code_for_state.clone();
+                    crate::game_options::spawn_switch(row, on).observe(move |_: On<Activate>| crate::game_options::set_speed(Some(&code), !on));
+                    row.spawn(text(font, line, 14.0, if on { TEXT } else { DIM }));
+                });
             }
             t.spawn(text(font, summary, 14.0, DIM));
         }),
@@ -2286,15 +2443,15 @@ fn spawn_mod_packs(r: &mut ChildSpawnerCommands, font: &Fonts, code: &str, rom: 
             }
             row.spawn(Node { flex_direction: FlexDirection::Row, flex_wrap: FlexWrap::Wrap, column_gap: px(8), row_gap: px(6), ..default() }).with_children(|actions| {
                 let (code_on, rom_on, id_on, enabled) = (code.to_string(), rom.to_path_buf(), pack.id.clone(), pack.enabled);
-                let (normal, hover) = if enabled { (ITEM_ON, ITEM_ON) } else { (ITEM, ITEM_HOVER) };
-                button(actions, button_node(), normal, hover)
-                    .observe(move |_: On<Activate>, mut lau: ResMut<Launcher>| {
+                actions.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: px(8), margin: UiRect::right(px(6)), ..default() }).with_children(|toggle| {
+                    crate::game_options::spawn_switch(toggle, enabled).observe(move |_: On<Activate>, mut lau: ResMut<Launcher>| {
                         if !crate::mods::running() {
                             crate::mod_packs::set_enabled(&code_on, &rom_on, &id_on, !enabled);
                             lau.dirty = true;
                         }
-                    })
-                    .with_child(text(font, if enabled { tr("On", "Actif") } else { tr("Off", "Inactif") }, 14.0, TEXT));
+                    });
+                    toggle.spawn(text(font, if enabled { tr("On", "Actif") } else { tr("Off", "Inactif") }, 14.0, if enabled { TEXT } else { DIM }));
+                });
                 // Une mise à jour trouvée s'installe depuis la liste du lien
                 if let Some(version) = mod_packs::update_for(code, &pack.id).filter(|_| !pack.source.is_empty()) {
                     let (code_up, source) = (code.to_string(), pack.source.clone());
@@ -2443,6 +2600,17 @@ fn bind_mod_key(mut lau: ResMut<Launcher>, keys: Res<ButtonInput<KeyCode>>) {
     lau.dirty = true;
 }
 
+/// Refait la page d'un jeu quand ses réglages (`game_options`) changent.
+fn poll_game_options(mut lau: ResMut<Launcher>, mut seen: Local<u64>) {
+    let now = crate::game_options::revision();
+    if now != *seen {
+        *seen = now;
+        if lau.open.is_some() {
+            lau.dirty = true;
+        }
+    }
+}
+
 /// Refait la page d'un jeu quand le travail de l'outil de mod avance.
 fn poll_mods(mut lau: ResMut<Launcher>, mut seen: Local<u64>) {
     let now = crate::mods::revision();
@@ -2564,6 +2732,9 @@ fn settings_tab(lau: &Launcher, rom: &Rom, registry: &GameRegistry) -> (Top, Res
                 .with_child(text(font, label, 15.0, TEXT));
         }),
         Box::new(move |r, font| {
+            r.spawn(text(font, tr("Keys, speed, sound and language for this game", "Touches, vitesse, son et langue de ce jeu"), 18.0, TEXT));
+            crate::game_options::spawn_editor(r, Some(code.clone()), font.latin.clone());
+            r.spawn((Node { height: px(2), margin: UiRect::vertical(px(10)), flex_shrink: 0.0, ..default() }, BackgroundColor(BORDER)));
             spawn_tags(r, font, &code, &game_tags, &known_tags, tag_input);
             if folders.is_empty() {
                 return;

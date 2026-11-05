@@ -16,7 +16,7 @@ use bevy::camera::RenderTarget;
 use bevy::ecs::system::SystemId;
 use bevy::prelude::*;
 
-use crate::input::{DsButton, DsInput, KeyMap};
+use crate::input::{DsButton, DsInput};
 use crate::screens::{DsScreens, Engine, EngineCamera2d, EngineCamera3d, Screen, ScreenLayout, SCREEN_H, SCREEN_W};
 use crate::spec::{GameSpec, ScreenMode};
 
@@ -178,7 +178,7 @@ fn reset_to_studio(world: &mut World) {
     world.insert_resource(crate::save::GameSaves::default());
     let spec = studio_spec();
     apply_spec(world, &spec, "Nds Game Studio");
-    world.insert_resource(KeyMap::default());
+    world.insert_resource(crate::game_options::keymap(None));
 }
 
 fn start_game(world: &mut World) {
