@@ -39,6 +39,9 @@ Chaque ajout ou changement s'écrit ici, dans la section « Pas encore publié �
   console. Sans ces valeurs, le runtime fait exactement comme avant. Un jeu les reçoit quand son runtime suit
   la source commune (`runtime_sync.py`) ; avant, le launcher dit que la vitesse n'est pas encore gérée.
 - À vitesse rapide, la musique garde son tempo : le son peut se décaler ou grésiller.
+- Les six jeux natifs suivent cette source : Harvest Moon DS, Heroes of Mana, Tom et Jerry, Lego Star Wars II
+  et Rayman passent à leur runtime v3, Pokémon Dash à son runtime v2. Vitesse, volume et langue y marchent donc
+  en jeu.
 
 ### Changements
 
