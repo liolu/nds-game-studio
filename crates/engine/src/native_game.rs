@@ -894,7 +894,7 @@ impl Plugin for NativeGamesPlugin {
             let spec = format!("id = \"native-{code}\"\nname = \"{code}\"\ngame_code = \"{code}\"\n");
             app.add_ds_game(&spec, start_module);
         }
-        app.add_systems(Update, (show_frames, cursor_and_notices, send_input).chain().run_if(resource_exists::<Running>))
+        app.add_systems(Update, (show_frames, cursor_and_notices, speed_keys, send_input).chain().run_if(resource_exists::<Running>))
             .add_systems(Update, poll_generation.run_if(resource_exists::<Generating>))
             .add_systems(OnExit(StudioState::Playing), stop_module);
     }
@@ -929,6 +929,11 @@ struct Running {
     /// Une nouvelle version du runtime à l'essai : confirmée après quelques secondes, rendue si le module s'arrête avant.
     trial: bool,
     started: std::time::Instant,
+    /// Vitesse en pour cent et volume (`game_options`), envoyés dans le paquet.
+    speed: u32,
+    volume: u32,
+    /// Lancé avec les mods : seule cette partie peut accélérer.
+    modded: bool,
 }
 
 #[derive(Component)]
@@ -1026,10 +1031,18 @@ fn launch(commands: &mut Commands, images: &mut Assets<Image>, code: &str, rom: 
         Some(ids) => saves.join(format!("backup-{ids}.sav")),
         None => saves.join("backup.sav"),
     };
+    // Réglages du jeu (ou généraux) : touches, langue de la console, volume ; l'accélération seulement avec les mods
+    let options = crate::game_options::get();
+    let modded = crate::mods::this_run_has_mods(code);
+    commands.insert_resource(options.keymap(Some(code)));
     let mut command = Command::new(module);
     command.arg(rom).arg("--pipe").arg("--shm").arg(&name).arg("--save").arg(save).arg("--lang").arg(lang).args(mod_args).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(log);
     if let Some(plugins) = crate::mod_packs::write_plugins(code, rom) {
         command.arg("--plugins").arg(plugins);
+    }
+    // La rom reste le premier argument (argv[1] du module)
+    if let Some(language) = crate::game_options::ds_language(code) {
+        command.arg("--ds-lang").arg(language.to_string());
     }
     if std::env::var_os("NDSGS_NATIVE_MUTE").is_some() {
         command.arg("--mute");
@@ -1057,7 +1070,7 @@ fn launch(commands: &mut Commands, images: &mut Assets<Image>, code: &str, rom: 
         commands.spawn((Sprite { image: image.clone(), custom_size: Some(size), ..default() }, NativeScreen, engine.layers(), in_game()));
     }
     let stdin = child.stdin.take();
-    commands.insert_resource(Running { code: code.to_string(), child, stdin, frames, seq: 0, top, bottom, sent: Vec::new(), wanted: false, released: false, held: false, mouse: (0, 0), wheel: 0, notice_seq: 0, trial: trial_of(code).is_some(), started: std::time::Instant::now() });
+    commands.insert_resource(Running { code: code.to_string(), child, stdin, frames, seq: 0, top, bottom, sent: Vec::new(), wanted: false, released: false, held: false, mouse: (0, 0), wheel: 0, notice_seq: 0, trial: trial_of(code).is_some(), started: std::time::Instant::now(), speed: 100, volume: options.volume(Some(code)), modded });
 }
 
 fn show_frames(mut commands: Commands, mut running: ResMut<Running>, mut images: ResMut<Assets<Image>>, mut sprites: Query<&mut Sprite, With<NativeScreen>>, mut toasts: MessageWriter<ShowToast>) {
@@ -1188,6 +1201,69 @@ pub fn key_label(hid: u8) -> String {
     }
 }
 
+/// Une touche par son nom de `KeyCode` (`"KeyX"`), celui que gardent les réglages des jeux.
+pub fn key_by_name(name: &str) -> Option<KeyCode> {
+    KEYS.iter().find(|(_, _, n)| *n == name).map(|(k, _, _)| *k)
+}
+
+/// Le nom gardé d'une touche (`"KeyX"`).
+pub fn key_name(key: KeyCode) -> &'static str {
+    KEYS.iter().find(|(k, _, _)| *k == key).map_or("?", |(_, _, n)| n)
+}
+
+/// Une touche que les réglages savent garder.
+pub fn key_known(key: KeyCode) -> bool {
+    KEYS.iter().any(|(k, _, _)| *k == key)
+}
+
+/// Ce qu'on montre d'une touche : le caractère qu'elle écrit sur le clavier de ce PC (une touche gardée par position
+/// s'affiche « A » sur la touche A d'un AZERTY, qui est KeyQ), sinon la lettre, le chiffre ou le nom.
+pub fn key_code_label(key: KeyCode) -> String {
+    if let Some(c) = layout_char(key) {
+        return c.to_uppercase().to_string();
+    }
+    hid_usage(key).map_or_else(|| format!("{key:?}"), key_label)
+}
+
+/// Code de balayage (jeu 1) des touches qui écrivent un caractère : la place de la touche, quel que soit le clavier.
+fn scan_code(key: KeyCode) -> Option<u32> {
+    use KeyCode::*;
+    Some(match key {
+        Digit1 => 0x02, Digit2 => 0x03, Digit3 => 0x04, Digit4 => 0x05, Digit5 => 0x06, Digit6 => 0x07, Digit7 => 0x08, Digit8 => 0x09, Digit9 => 0x0A, Digit0 => 0x0B,
+        Minus => 0x0C, Equal => 0x0D,
+        KeyQ => 0x10, KeyW => 0x11, KeyE => 0x12, KeyR => 0x13, KeyT => 0x14, KeyY => 0x15, KeyU => 0x16, KeyI => 0x17, KeyO => 0x18, KeyP => 0x19,
+        BracketLeft => 0x1A, BracketRight => 0x1B,
+        KeyA => 0x1E, KeyS => 0x1F, KeyD => 0x20, KeyF => 0x21, KeyG => 0x22, KeyH => 0x23, KeyJ => 0x24, KeyK => 0x25, KeyL => 0x26,
+        Semicolon => 0x27, Quote => 0x28, Backquote => 0x29, Backslash => 0x2B,
+        KeyZ => 0x2C, KeyX => 0x2D, KeyC => 0x2E, KeyV => 0x2F, KeyB => 0x30, KeyN => 0x31, KeyM => 0x32,
+        Comma => 0x33, Period => 0x34, Slash => 0x35, IntlBackslash => 0x56,
+        _ => return None,
+    })
+}
+
+#[cfg(windows)]
+fn layout_char(key: KeyCode) -> Option<char> {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetKeyboardLayout, MapVirtualKeyExW, MAPVK_VK_TO_CHAR, MAPVK_VSC_TO_VK_EX};
+    let scan = scan_code(key)?;
+    // SAFETY : fonctions sans pointeur, la disposition du clavier du fil courant
+    let (layout, vk) = unsafe {
+        let layout = GetKeyboardLayout(0);
+        (layout, MapVirtualKeyExW(scan, MAPVK_VSC_TO_VK_EX, layout))
+    };
+    if vk == 0 {
+        return None;
+    }
+    // Bit 31 = touche morte (accent) : son caractère reste lisible
+    let c = unsafe { MapVirtualKeyExW(vk, MAPVK_VK_TO_CHAR, layout) } & 0xFFFF;
+    char::from_u32(c).filter(|c| !c.is_control() && !c.is_whitespace())
+}
+
+#[cfg(not(windows))]
+fn layout_char(key: KeyCode) -> Option<char> {
+    let _ = scan_code(key);
+    None
+}
+
 /// La touche que le joueur vient d'enfoncer, en code HID (choix d'une touche dans les réglages d'un mod).
 pub fn hid_pressed(keys: &ButtonInput<KeyCode>) -> Option<u8> {
     keys.get_just_pressed().find_map(|k| hid_usage(*k))
@@ -1195,14 +1271,16 @@ pub fn hid_pressed(keys: &ButtonInput<KeyCode>) -> Option<u8> {
 
 /// Le paquet 2 : les champs du paquet 1, puis la souris, la fenêtre et le clavier entier (`input_thread` de `present.c`).
 #[allow(clippy::too_many_arguments)]
-fn packet_v2(keys: u16, touch: (u16, u16, u16), ds_width: u16, scale: u16, mouse: (i16, i16), window: u16, buttons: u32, wheel: i32, keyboard: &[u32; 8]) -> Vec<u8> {
+fn packet_v2(keys: u16, touch: (u16, u16, u16), ds_width: u16, scale: u16, mouse: (i16, i16), window: u16, buttons: u32, wheel: i32, speed: u16, volume: u16, keyboard: &[u32; 8]) -> Vec<u8> {
     let mut packet = Vec::with_capacity(PACKET_V2);
     for word in [PACKET_V2_TAG, keys, touch.0, touch.1, touch.2, ds_width, scale, mouse.0 as u16, mouse.1 as u16, window] {
         packet.extend_from_slice(&word.to_le_bytes());
     }
     packet.extend_from_slice(&buttons.to_le_bytes());
     packet.extend_from_slice(&wheel.to_le_bytes());
-    packet.resize(32, 0);
+    // Mots 14 et 15 : vitesse en pour cent, volume + 1 (0 = rien, pour les runtimes qui ne les lisent pas)
+    packet.extend_from_slice(&speed.to_le_bytes());
+    packet.extend_from_slice(&(volume + 1).to_le_bytes());
     for word in keyboard {
         packet.extend_from_slice(&word.to_le_bytes());
     }
@@ -1264,7 +1342,7 @@ fn send_input(mut running: ResMut<Running>, input: Res<DsInput>, mouse_buttons: 
         }
         let focused = windows.get(screens.main_window()).is_ok_and(|w| w.focused);
         let window = u16::from(running.held) | u16::from(focused) << 1;
-        let packet = packet_v2(keys, (down, x, y), ds_width, scale, running.mouse, window, buttons, running.wheel, &keyboard);
+        let packet = packet_v2(keys, (down, x, y), ds_width, scale, running.mouse, window, buttons, running.wheel, running.speed as u16, running.volume as u16, &keyboard);
         if packet != running.sent {
             if let Some(stdin) = running.stdin.as_mut() {
                 let _ = stdin.write_all(&packet).and_then(|_| stdin.flush());
@@ -1291,6 +1369,41 @@ fn send_input(mut running: ResMut<Running>, input: Res<DsInput>, mouse_buttons: 
     }
 }
 
+/// Les touches de vitesse : normale / rapide, plus vite, moins vite. Seulement en jouant avec des mods, et si
+/// l'accélération est permise pour ce jeu (`game_options`).
+fn speed_keys(mut running: ResMut<Running>, keys: Res<ButtonInput<KeyCode>>, mut toasts: MessageWriter<ShowToast>, mut said: Local<bool>) {
+    use crate::game_options::{step_speed, SpeedKey};
+    let options = crate::game_options::get();
+    let code = running.code.clone();
+    let pressed: Vec<SpeedKey> = SpeedKey::ALL.into_iter().filter(|k| keys.just_pressed(options.speed_key(Some(&code), *k))).collect();
+    if pressed.is_empty() || !options.speed_enabled(Some(&code)) {
+        return;
+    }
+    if !running.modded {
+        if !*said {
+            *said = true;
+            toasts.write(ShowToast(tr("Speed-up only works when you play with mods (Modding tab).", "L'acceleration ne marche qu'en jouant avec des mods (onglet Moding).").to_string()));
+        }
+        return;
+    }
+    if running.frames.header().flags & 2 == 0 {
+        toasts.write(ShowToast(tr("This game's runtime does not handle speed yet: it needs a runtime update.", "Le runtime de ce jeu ne gere pas encore la vitesse : il lui faut une mise a jour du runtime.").to_string()));
+        return;
+    }
+    let mut speed = running.speed;
+    for key in pressed {
+        speed = match key {
+            SpeedKey::Toggle => if speed == 100 { options.fast_speed(Some(&code)) } else { 100 },
+            SpeedKey::Faster => step_speed(speed, true),
+            SpeedKey::Slower => step_speed(speed, false),
+        };
+    }
+    if speed != running.speed {
+        running.speed = speed;
+        toasts.write(ShowToast(t!("Speed x{}", "Vitesse x{}", speed as f32 / 100.0)));
+    }
+}
+
 fn stop_module(mut commands: Commands, mut cursors: Query<&mut CursorOptions>) {
     for mut cursor in &mut cursors {
         if cursor.grab_mode != CursorGrabMode::None || !cursor.visible {
@@ -1312,7 +1425,7 @@ mod tests {
         let mut keyboard = [0u32; 8];
         let c = hid_usage(KeyCode::KeyC).unwrap() as usize;
         keyboard[c >> 5] |= 1 << (c & 31);
-        let p = packet_v2(0x0201, (1, 100, 50), 341, 4, (-3, 7), 3, 5, -2, &keyboard);
+        let p = packet_v2(0x0201, (1, 100, 50), 341, 4, (-3, 7), 3, 5, -2, 200, 80, &keyboard);
         assert_eq!(p.len(), PACKET_V2);
         let word = |i: usize| u16::from_le_bytes([p[2 * i], p[2 * i + 1]]);
         assert_eq!([word(0), word(1), word(2), word(3), word(4), word(5), word(6)], [0x8002, 0x0201, 1, 100, 50, 341, 4]);
@@ -1320,6 +1433,8 @@ mod tests {
         assert_eq!(word(9), 3);
         assert_eq!(u32::from_le_bytes(p[20..24].try_into().unwrap()), 5);
         assert_eq!(i32::from_le_bytes(p[24..28].try_into().unwrap()), -2);
+        // vitesse, puis volume + 1
+        assert_eq!([word(14), word(15)], [200, 81]);
         // C = 0x06 : bit 6 du premier mot du clavier, à l'octet 32
         assert_eq!(c, 0x06);
         assert_eq!(p[32], 1 << 6);

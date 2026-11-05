@@ -6,7 +6,7 @@
 //! - **Manettes** : manettes branchées et leur modèle reconnu, menu déroulant de tous les modèles,
 //!   dessin de la manette choisie ; la touche pressée sur la vraie manette s'allume et son nom
 //!   s'affiche (un clic sur une touche dessinée l'affiche aussi) ;
-//! - **Clavier** : touches du clavier et de la manette pour chaque bouton DS ;
+//! - **Jeux** : réglages généraux des jeux (`game_options`) : touches, vitesse, son, langue ;
 //! - **Sauvegardes** : les sauvegardes des jeux (`saves_page`) ;
 //! - **Développement** : recompiler et relancer à l'enregistrement, fenêtre Code, fenêtre Assets ; avec l'accès
 //!   développeur, l'app de validation des fichiers des jeux (`asset_browser::review`).
@@ -14,14 +14,13 @@
 use bevy::camera::RenderTarget;
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
-use bevy::ui::Pressed;
+use bevy::ui::{Pressed, ScrollPosition};
 use bevy::ui_widgets::{Activate, Button};
 use bevy::window::{WindowMode, WindowRef, WindowResolution};
 
 use crate::controllers::{self, first_gamepad, ControllerDef, PadButtonView};
 use crate::devtools::{DevSettings, ToggleCodeWindow};
 use crate::i18n::{lang, t, tr, Lang, Language, Tr};
-use crate::input::{pad_buttons_of, DsButton, KeyMap};
 use crate::screens::{Aspect, DsScreens, RenderStyle, ScreenLayout};
 use crate::settings::ResetSettings;
 
@@ -53,7 +52,7 @@ impl Page {
             Page::Launcher => ("Launcher", "Launcher"),
             Page::Display => ("Display", "Affichage"),
             Page::Controllers => ("Controllers", "Manettes"),
-            Page::Keyboard => ("Keyboard", "Clavier"),
+            Page::Keyboard => ("Games", "Jeux"),
             Page::Saves => ("Saves", "Sauvegardes"),
             Page::Dev => ("Development", "Developpement"),
         }
@@ -82,7 +81,7 @@ pub(crate) struct OptionsView {
     pub(crate) model_chosen: bool,
     dropdown_open: bool,
     /// Ce qui est construit dans le panneau (pour savoir quand le refaire).
-    built: Option<(Page, Option<String>, bool, Lang, bool)>,
+    built: Option<(Page, Option<String>, bool, Lang, bool, u64)>,
     /// Dernière touche pressée ou cliquée.
     press: String,
     /// L'app de validation lancée (une seule à la fois).
@@ -226,9 +225,11 @@ fn current_model(view: &OptionsView) -> &'static ControllerDef {
     view.model.as_deref().and_then(controllers::by_id).unwrap_or(&controllers::controllers()[0])
 }
 
-fn build_page(mut commands: Commands, mut view: ResMut<OptionsView>, keymap: Res<KeyMap>, language: Res<Language>, dev: Res<DevSettings>, children: Query<&Children>) {
+fn build_page(mut commands: Commands, mut view: ResMut<OptionsView>, language: Res<Language>, dev: Res<DevSettings>, children: Query<&Children>) {
     let (Some(_), Some(content)) = (view.window, view.content) else { return };
-    let key = (view.page, view.model.clone(), view.dropdown_open, language.0, dev.developer_access);
+    // La page Jeux se refait quand ses réglages changent ; les autres pages n'en dépendent pas
+    let games = if view.page == Page::Keyboard { crate::game_options::revision() } else { 0 };
+    let key = (view.page, view.model.clone(), view.dropdown_open, language.0, dev.developer_access, games);
     if view.built.as_ref() == Some(&key) {
         return;
     }
@@ -287,17 +288,14 @@ fn build_page(mut commands: Commands, mut view: ResMut<OptionsView>, keymap: Res
             c.spawn((label("", 17.0, TEXT), PressText));
         }
         Page::Keyboard => {
-            c.spawn(label(tr("Keyboard and controller", "Clavier et manette"), 24.0, TEXT));
-            c.spawn(label(tr("Keyboard keys by position (same on AZERTY and QWERTY). A game can change them in its game.toml.", "Touches du clavier par position (pareil en AZERTY et en QWERTY). Un jeu peut les changer dans son game.toml."), 13.0, DIM));
-            for button in DsButton::ALL {
-                let keys: Vec<String> = keymap.0.get(&button).map(|k| k.iter().map(|k| format!("{k:?}").replace("Key", "").replace("Arrow", tr("arrow ", "fleche "))).collect()).unwrap_or_default();
-                let pad: Vec<String> = pad_buttons_of(button).iter().map(|b| format!("{b:?}")).collect();
-                c.spawn(Node { flex_direction: FlexDirection::Row, column_gap: px(16), ..default() }).with_children(|row| {
-                    row.spawn((label(format!("{button:?}"), 16.0, TEXT), Node { width: px(90), ..default() }));
-                    row.spawn((label(t!("keyboard: {}", "clavier : {}", keys.join(tr(" or ", " ou "))), 15.0, TEXT), Node { width: px(300), ..default() }));
-                    row.spawn(label(t!("controller: {}", "manette : {}", pad.join(tr(" or ", " ou "))), 15.0, DIM));
-                });
-            }
+            c.spawn(label(tr("Games: general settings", "Jeux : reglages generaux"), 24.0, TEXT));
+            c.spawn((
+                Node { flex_grow: 1.0, flex_basis: px(0), min_height: px(0), width: percent(100), flex_direction: FlexDirection::Column, row_gap: px(8), padding: UiRect::bottom(px(30)), overflow: Overflow::scroll_y(), ..default() },
+                ScrollPosition(Vec2::new(0.0, crate::game_options::saved_scroll())),
+                Hovered::default(),
+                crate::game_options::EditScroll,
+            ))
+            .with_children(|scroll| crate::game_options::spawn_editor(scroll, None, None));
         }
         Page::Saves => crate::saves_page::spawn_page(c),
         Page::Dev => {

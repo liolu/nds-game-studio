@@ -422,6 +422,59 @@ pub fn matches_search(haystack: &str, query: &str) -> bool {
 
 const MAX_TAG: usize = 32;
 
+/// Le nom d'un jeu sans sa version : « nintendogs - Dachshund & Friends » -> « nintendogs ».
+pub fn base_title(title: &str) -> &str {
+    title.split(" - ").next().unwrap_or(title).trim()
+}
+
+/// La version dans le titre (« Dachshund & Friends »), vide s'il n'y en a pas.
+pub fn version_title(title: &str) -> &str {
+    title.split_once(" - ").map_or("", |(_, rest)| rest.trim())
+}
+
+/// Le nom d'une version : celui du titre de la rom, sinon celui du nom de fichier (« 5347 - Nintendogs - Chihuahua &
+/// Friends (Japan) (Rev 1).nds » -> « Chihuahua & Friends ») : les roms japonaises n'ont souvent que le nom du jeu.
+pub fn version_name(title: &str, file: &str) -> String {
+    let from_title = version_title(title);
+    if !from_title.is_empty() {
+        return from_title.to_string();
+    }
+    let name = last_name(file);
+    let stem = name.rsplit_once('.').map_or(name, |(stem, _)| stem);
+    // Sans ce qui est entre parenthèses ou crochets (zone, langues, révision)
+    let mut clean = String::new();
+    let mut depth = 0;
+    for c in stem.chars() {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth = (depth as i32 - 1).max(0) as usize,
+            _ if depth == 0 => clean.push(c),
+            _ => {}
+        }
+    }
+    let base = fold(base_title(title));
+    let parts: Vec<&str> = clean.split(" - ").map(str::trim).filter(|p| !p.is_empty() && !p.chars().all(|c| c.is_ascii_digit()) && fold(p) != base).collect();
+    if parts.is_empty() { title.to_string() } else { parts.join(" - ") }
+}
+
+/// Les familles de jeux : les roms d'un même jeu en plusieurs versions (même nom avant « - », même éditeur, comme les
+/// Nintendogs) ou plusieurs zones (mêmes 3 premières lettres du code). Entrée : (fichier, code, titre, éditeur) ;
+/// sortie : fichier -> famille. Une zone prend le titre de sa première rom : les titres changent de langue d'une zone
+/// à l'autre, le code non.
+pub fn families(roms: &[(String, String, String, String)]) -> std::collections::HashMap<String, String> {
+    let mut sorted: Vec<&(String, String, String, String)> = roms.iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut by_code: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for (_, code, title, publisher) in &sorted {
+        let game = code.get(..3).unwrap_or(code).to_string();
+        by_code.entry(game.clone()).or_insert_with(|| {
+            let base = fold(base_title(title));
+            if base.is_empty() { format!("code:{game}") } else { format!("{base}|{}", fold(publisher)) }
+        });
+    }
+    roms.iter().map(|(file, code, ..)| (file.clone(), by_code[code.get(..3).unwrap_or(code)].clone())).collect()
+}
+
 /// Préférences du launcher (`launcher.toml`, à part d'options.toml : réinitialiser les options ne
 /// doit pas effacer les favoris).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -439,11 +492,13 @@ pub struct LibraryPrefs {
     pub sort_reverse: bool,
     /// Tags de l'utilisateur, par code de jeu : ils suivent le jeu d'un dossier à l'autre.
     pub tags: BTreeMap<String, Vec<String>>,
+    /// Famille d'un jeu à plusieurs versions ou zones (`families`) -> la rom montrée dans la vue des jeux.
+    pub chosen: BTreeMap<String, String>,
 }
 
 impl Default for LibraryPrefs {
     fn default() -> Self {
-        LibraryPrefs { favorites: Vec::new(), view: LibraryView::default(), covers: true, update_later: String::new(), update_later_until: 0, sort: SortKey::default(), sort_reverse: false, tags: BTreeMap::new() }
+        LibraryPrefs { favorites: Vec::new(), view: LibraryView::default(), covers: true, update_later: String::new(), update_later_until: 0, sort: SortKey::default(), sort_reverse: false, tags: BTreeMap::new(), chosen: BTreeMap::new() }
     }
 }
 
@@ -636,6 +691,29 @@ mod tests {
         let names: Vec<String> = folder_stamp(&dir).into_iter().map(|(n, _)| n).collect();
         assert_eq!(names, ["jeu.dsi", "jeu.nds"]);
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2, "aucun fichier temporaire ne reste");
+    }
+
+    #[test]
+    fn versions_and_zones_are_one_family() {
+        let rom = |file: &str, code: &str, title: &str| (file.to_string(), code.to_string(), title.to_string(), "Nintendo".to_string());
+        let roms = [
+            rom("a.nds", "ADGE", "nintendogs - Dachshund & Friends"),
+            rom("b.nds", "ADGP", "nintendogs - Teckel & ses amis"),
+            rom("c.nds", "AJLE", "nintendogs - Lab & Friends"),
+            rom("d.nds", "APDE", "Pokemon Dash"),
+            rom("e.nds", "AXYE", "Pokemon Ranger - Something"),
+        ];
+        let families = families(&roms);
+        assert_eq!(families["a.nds"], families["b.nds"]);
+        assert_eq!(families["a.nds"], families["c.nds"]);
+        assert_ne!(families["a.nds"], families["d.nds"]);
+        assert_ne!(families["d.nds"], families["e.nds"]);
+        assert_eq!(base_title("nintendogs - Lab & Friends"), "nintendogs");
+        assert_eq!(version_title("nintendogs - Lab & Friends"), "Lab & Friends");
+        assert_eq!(version_title("Pokemon Dash"), "");
+        assert_eq!(version_name("nintendogs", "jp/5347 - Nintendogs - Chihuahua & Friends (Japan) (Rev 1).nds"), "Chihuahua & Friends");
+        assert_eq!(version_name("nintendogs - Lab & Friends", "x.nds"), "Lab & Friends");
+        assert_eq!(version_name("Pokemon Dash", "Pokemon Dash (USA).nds"), "Pokemon Dash");
     }
 
     #[test]

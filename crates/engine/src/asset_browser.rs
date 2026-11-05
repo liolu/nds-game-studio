@@ -181,6 +181,8 @@ pub(crate) struct AssetBrowser {
     image: Option<(Handle<Image>, UVec2)>,
     is3d: bool,
     orbit: Orbit,
+    /// Caméra libre sur les modèles 3D (bouton sous l'aperçu) : gardée d'un modèle à l'autre.
+    free_cam: bool,
     list_dirty: bool,
     preview_dirty: bool,
     controls_dirty: bool,
@@ -292,6 +294,7 @@ impl Default for AssetBrowser {
             image: None,
             is3d: false,
             orbit: Orbit::default(),
+            free_cam: false,
             list_dirty: false,
             preview_dirty: false,
             controls_dirty: false,
@@ -325,13 +328,74 @@ struct Orbit {
     distance: f32,
     target: Vec3,
     radius: f32,
+    /// Caméra libre : sa place (partie de celle de l'orbite au premier usage), la vue suit `yaw` et `pitch` ;
+    /// vitesse multipliée par la molette.
+    fly: Option<Vec3>,
+    fly_speed: f32,
 }
 
 impl Default for Orbit {
     fn default() -> Self {
-        Orbit { yaw: 0.6, pitch: 0.35, distance: 3.0, target: Vec3::ZERO, radius: 1.0 }
+        Orbit { yaw: 0.6, pitch: 0.35, distance: 3.0, target: Vec3::ZERO, radius: 1.0, fly: None, fly_speed: 1.0 }
     }
 }
+
+impl Orbit {
+    fn rotation(&self) -> Quat {
+        Quat::from_euler(EulerRot::YXZ, self.yaw, -self.pitch, 0.0)
+    }
+
+    /// La place de la caméra libre : là où était la caméra de l'orbite, qui regarde le même point.
+    fn fly_position(&mut self) -> Vec3 {
+        let eye = self.target + self.rotation() * Vec3::new(0.0, 0.0, self.distance);
+        *self.fly.get_or_insert(eye)
+    }
+}
+
+/// Touches de la caméra libre, par position : ZQSD sur un clavier AZERTY = WASD sur un QWERTY ; A et E (Q et E en
+/// QWERTY) montent et descendent ; Maj va 4 fois plus vite.
+const FLY_FORWARD: KeyCode = KeyCode::KeyW;
+const FLY_BACK: KeyCode = KeyCode::KeyS;
+const FLY_LEFT: KeyCode = KeyCode::KeyA;
+const FLY_RIGHT: KeyCode = KeyCode::KeyD;
+const FLY_UP: KeyCode = KeyCode::KeyQ;
+const FLY_DOWN: KeyCode = KeyCode::KeyE;
+const FLY_KEYS: [KeyCode; 6] = [FLY_FORWARD, FLY_BACK, FLY_LEFT, FLY_RIGHT, FLY_UP, FLY_DOWN];
+
+/// Le mouvement voulu par les touches, dans le repère de la caméra (x droite, y haut, z arrière).
+fn fly_direction(keys: &ButtonInput<KeyCode>) -> Vec3 {
+    let axis = |plus: KeyCode, minus: KeyCode| keys.pressed(plus) as i32 as f32 - keys.pressed(minus) as i32 as f32;
+    Vec3::new(axis(FLY_RIGHT, FLY_LEFT), axis(FLY_UP, FLY_DOWN), axis(FLY_BACK, FLY_FORWARD))
+}
+
+/// Déplace la caméra libre : la vitesse suit la taille du modèle (son rayon par seconde).
+fn fly_camera(mut b: ResMut<AssetBrowser>, keys: Res<ButtonInput<KeyCode>>, time: Res<Time<Real>>, windows: Query<&Window>) {
+    let Some(window) = b.window else { return };
+    if !b.free_cam || !b.is3d || !windows.get(window).is_ok_and(|w| w.focused) || b.menu != Menu::None {
+        return;
+    }
+    let mut direction = fly_direction(&keys);
+    if direction == Vec3::ZERO {
+        return;
+    }
+    direction = direction.normalize();
+    let fast = if keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]) { 4.0 } else { 1.0 };
+    let o = &mut b.orbit;
+    let position = o.fly_position();
+    // Monter et descendre restent verticaux ; avancer suit le regard
+    let rotation = o.rotation();
+    let moved = rotation * Vec3::new(direction.x, 0.0, direction.z) + Vec3::Y * direction.y;
+    o.fly = Some(position + moved * o.radius * o.fly_speed * fast * time.delta_secs());
+}
+
+fn toggle_free_cam(_: On<Activate>, mut b: ResMut<AssetBrowser>) {
+    b.free_cam = !b.free_cam;
+    b.orbit.fly = None;
+    b.controls_dirty = true;
+}
+
+#[derive(Component)]
+struct FreeCamButton;
 
 #[derive(Component)]
 struct ListRow(usize);
@@ -421,7 +485,7 @@ impl Plugin for AssetBrowserPlugin {
         }
         app.insert_resource(browser).add_message::<ToggleAssets>().add_systems(
             Update,
-            (redo_on_language, toggle_window, poll_scan, type_filter, rebuild_menu, rebuild_list, render_preview, play_preview, update_grid, show_preview_text, rebuild_controls, refresh_texts, fit_image, place_camera, looks, update_bars, update_speed).chain(),
+            (redo_on_language, toggle_window, poll_scan, type_filter, rebuild_menu, rebuild_list, render_preview, play_preview, update_grid, show_preview_text, rebuild_controls, refresh_texts, fit_image, fly_camera, place_camera, looks, update_bars, update_speed).chain(),
         );
     }
 }
@@ -1247,6 +1311,18 @@ fn type_filter(mut b: ResMut<AssetBrowser>, mut typed: MessageReader<KeyboardInp
             continue;
         }
         let b = &mut *b;
+        // Caméra libre : ses touches déplacent la vue au lieu d'écrire dans le filtre, Échap la quitte
+        if b.free_cam && b.is3d && !in_menu {
+            if FLY_KEYS.contains(&key.key_code) || matches!(key.key_code, KeyCode::ShiftLeft | KeyCode::ShiftRight) {
+                continue;
+            }
+            if key.logical_key == Key::Escape {
+                b.free_cam = false;
+                b.orbit.fly = None;
+                b.controls_dirty = true;
+                continue;
+            }
+        }
         let query = if in_menu { &mut b.menu_query } else { &mut b.filter };
         match &key.logical_key {
             Key::Backspace => {
@@ -1657,7 +1733,16 @@ fn rebuild_controls(mut commands: Commands, mut b: ResMut<AssetBrowser>, childre
         steps.push((Ctl::Textures, t!("Textures: {tex}", "Textures : {tex}")));
     }
     let has_sound = b.sound.is_some() || b.video.is_some();
+    let (is3d, free_cam) = (b.is3d, b.free_cam);
     commands.entity(controls).with_children(|row| {
+        if is3d {
+            let (color, text) = if free_cam {
+                (ITEM_ON, tr("Free camera: on (ZQSD / WASD, A/E up/down, drag to look, wheel = speed, Esc leaves)", "Camera libre : active (ZQSD / WASD, A/E monter/descendre, glisser pour regarder, molette = vitesse, Echap quitte)"))
+            } else {
+                (ITEM, tr("Free camera", "Camera libre"))
+            };
+            row.spawn((Button, Hovered::default(), item_node(), BackgroundColor(color), FreeCamButton)).observe(toggle_free_cam).with_child(label(text, 14.0, TEXT));
+        }
         if has_sound {
             row.spawn((Button, Hovered::default(), item_node(), BackgroundColor(ITEM), PlayButton)).observe(toggle_sound).with_child(label(tr("Play / Stop", "Jouer / Arreter"), 14.0, TEXT));
         }
@@ -1930,6 +2015,7 @@ fn preview(b: &mut AssetBrowser, sel: usize, commands: &mut Commands, images: &m
             let radius = ((Vec3::from(animation.max) - Vec3::from(animation.min)).length() / 2.0).max(0.01);
             b.orbit = Orbit { target: center, radius, distance: radius * 2.6, ..Orbit::default() };
             b.is3d = true;
+            b.controls_dirty = true;
             b.image = Some((b.view3d.clone(), UVec2::new(VIEW_W, VIEW_H)));
             b.info = t!("3D animation ({})  -  {}: {} frames, on the model {}", "animation 3D ({})  -  {} : {} images, sur le modele {}", size_text(size), animation.name, animation.frames.len(), m.name);
             b.model_anim = Some(ModelAnim { meshes: handles, frames: animation.frames, seconds_per_frame: animation.step as f32 / 60.0, shown: usize::MAX });
@@ -1960,6 +2046,7 @@ fn preview(b: &mut AssetBrowser, sel: usize, commands: &mut Commands, images: &m
             let radius = ((Vec3::from(m.max) - Vec3::from(m.min)).length() / 2.0).max(0.01);
             b.orbit = Orbit { target: center, radius, distance: radius * 2.6, ..Orbit::default() };
             b.is3d = true;
+            b.controls_dirty = true;
             b.image = Some((b.view3d.clone(), UVec2::new(VIEW_W, VIEW_H)));
             let warn = if m.warnings.is_empty() { String::new() } else { format!("\n! {}", m.warnings.join(" ; ")) };
             b.info = t!("3D model ({})  -  {}: {} triangles, {} vertices, {} materials, {own_textures} textures in the file{warn}", "modele 3D ({})  -  {} : {} triangles, {} sommets, {} materiaux, {own_textures} textures dans le fichier{warn}", size_text(size), m.name, m.triangle_count, m.vertex_count, m.materials.len());
@@ -2072,7 +2159,15 @@ fn orbit_drag(drag: On<PointerDrag>, mut b: ResMut<AssetBrowser>) {
         return;
     }
     let d = drag.delta;
+    let free = b.free_cam;
     let o = &mut b.orbit;
+    if free {
+        // Regarder autour de soi : la caméra tourne sur place
+        o.fly_position();
+        o.yaw -= d.x * 0.005;
+        o.pitch = (o.pitch + d.y * 0.005).clamp(-1.55, 1.55);
+        return;
+    }
     match drag.button {
         PointerButton::Primary => {
             o.yaw -= d.x * 0.008;
@@ -2094,20 +2189,34 @@ fn orbit_zoom(scroll: On<PointerScroll>, mut b: ResMut<AssetBrowser>) {
         MouseScrollUnit::Line => scroll.y,
         MouseScrollUnit::Pixel => scroll.y / 40.0,
     };
+    if b.free_cam {
+        let o = &mut b.orbit;
+        o.fly_speed = (o.fly_speed * 1.25f32.powf(lines)).clamp(0.05, 50.0);
+        return;
+    }
     let o = &mut b.orbit;
     o.distance = (o.distance * 0.88f32.powf(lines)).clamp(o.radius * 0.05, o.radius * 50.0);
 }
 
-fn place_camera(b: Res<AssetBrowser>, mut cameras: Query<(&mut Transform, &mut Projection), With<Camera3d>>, mut lights: Query<&mut Transform, (With<DirectionalLight>, Without<Camera3d>)>) {
+fn place_camera(mut b: ResMut<AssetBrowser>, mut cameras: Query<(&mut Transform, &mut Projection), With<Camera3d>>, mut lights: Query<&mut Transform, (With<DirectionalLight>, Without<Camera3d>)>) {
     let (Some(camera), Some(light)) = (b.camera3d, b.light) else { return };
     if !b.is3d {
         return;
     }
-    let o = &b.orbit;
-    let rot = Quat::from_euler(EulerRot::YXZ, o.yaw, -o.pitch, 0.0);
+    let free = b.free_cam;
+    let o = &mut b.orbit;
+    let rot = o.rotation();
     let eye = o.target + rot * Vec3::new(0.0, 0.0, o.distance);
+    let fly = if free { Some(o.fly_position()) } else { None };
+    let o = &b.orbit;
     if let Ok((mut transform, mut projection)) = cameras.get_mut(camera) {
-        *transform = Transform::from_translation(eye).looking_at(o.target, Vec3::Y);
+        let wanted = match fly {
+            Some(position) => Transform::from_translation(position).with_rotation(rot),
+            None => Transform::from_translation(eye).looking_at(o.target, Vec3::Y),
+        };
+        if *transform != wanted {
+            *transform = wanted;
+        }
         let near = (o.radius * 0.01).max(0.0005);
         let wanted = Projection::Perspective(PerspectiveProjection { near, far: o.radius * 200.0 + o.distance, ..default() });
         if let (Projection::Perspective(p), Projection::Perspective(w)) = (&*projection, &wanted) {
@@ -2119,6 +2228,39 @@ fn place_camera(b: Res<AssetBrowser>, mut cameras: Query<(&mut Transform, &mut P
     // La lumière vient de derrière l'épaule de la caméra
     if let Ok(mut transform) = lights.get_mut(light) {
         *transform = Transform::from_rotation(rot * Quat::from_euler(EulerRot::YXZ, 0.5, -0.6, 0.0));
+    }
+}
+
+#[cfg(test)]
+mod fly_tests {
+    use super::*;
+
+    #[test]
+    fn free_camera_keys_by_position() {
+        let mut keys = ButtonInput::<KeyCode>::default();
+        // Z en AZERTY = W en QWERTY : avancer (vers -z, devant la caméra)
+        keys.press(KeyCode::KeyW);
+        assert_eq!(fly_direction(&keys), Vec3::new(0.0, 0.0, -1.0));
+        // A en AZERTY (Q en QWERTY) : monter ; E : descendre
+        keys.release(KeyCode::KeyW);
+        keys.press(KeyCode::KeyQ);
+        assert_eq!(fly_direction(&keys), Vec3::Y);
+        keys.press(KeyCode::KeyE);
+        assert_eq!(fly_direction(&keys), Vec3::ZERO);
+        keys.release_all();
+        // Q en AZERTY = A en QWERTY : gauche
+        keys.press(KeyCode::KeyA);
+        assert_eq!(fly_direction(&keys), Vec3::new(-1.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn the_free_camera_starts_where_the_orbit_was() {
+        let mut orbit = Orbit { target: Vec3::new(1.0, 2.0, 3.0), distance: 5.0, ..Orbit::default() };
+        let start = orbit.fly_position();
+        assert!((start.distance(orbit.target) - 5.0).abs() < 1e-4);
+        // Regarder devant soi (-z de la caméra) vise la cible
+        let forward = orbit.rotation() * Vec3::NEG_Z;
+        assert!((start + forward * 5.0).distance(orbit.target) < 1e-3);
     }
 }
 
