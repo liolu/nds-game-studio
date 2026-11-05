@@ -15,7 +15,9 @@
   },
   "functions": {
    "nds_open_screen": "func_0205ecc4"
-  }
+  },
+  "arm_stack": true,
+  "lift_parts": 4
  },
  "APDE": {
   "names": {
@@ -103,5 +105,13 @@
   },
   "lift_parts": 8,
   "arm_stack": true
+ },
+ "AJTP": {
+  "arm_stack": true,
+  "lift_parts": 4
+ },
+ "AR5E": {
+  "arm_stack": true,
+  "lift_parts": 4
  }
 }
