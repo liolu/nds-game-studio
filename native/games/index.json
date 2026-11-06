@@ -170,6 +170,10 @@
    "code": 14.11,
    "data": 97.66,
    "play": "playable",
+   "runtime": {
+    "repo": "liolu/sims-2-the-decomp",
+    "version": 1
+   },
    "status": "ok"
   },
   "ASSE": {
