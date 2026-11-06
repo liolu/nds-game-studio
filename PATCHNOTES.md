@@ -7,6 +7,12 @@ Chaque ajout ou changement s'écrit ici, dans la section « Pas encore publié �
 
 ### Ajouts
 
+- **Les Sims 2 (ASJP) jouable en natif**, sans émulateur : intro, Create-a-Sim, puis Strangetown. Le jeu prend son
+  runtime dans son propre dépôt (liolu/sims-2-the-decomp, runtime-v1). Pour ce jeu seulement, le traducteur sait
+  maintenant fusionner un assembleur écrit à la main que la décompilation avait coupé (`merge`), déclarer une
+  fonction collée à la précédente (`entries`), lire les tables de sauts Thumb et les fins de fonction partagées du
+  compilateur armcc (`armcc_thumb`), et garder les numéros de commandes de son récents avec un vieux SDK
+  (`nds_snd_new_ids`). Pas encore essayés : la sauvegarde, le son ; un écran bleu vu une fois, pas reproduit.
 - **Réglages des jeux, généraux et par jeu** : touches, vitesse, son et langue. Les réglages généraux sont dans
   Options > Jeux (l'ancienne page Clavier). Chaque jeu a les siens dans son onglet Paramètres : une valeur choisie
   pour un jeu passe avant la générale, « Comme le général » la retire, et une ligne dit d'où vient chaque valeur
@@ -33,7 +39,12 @@ Chaque ajout ou changement s'écrit ici, dans la section « Pas encore publié �
   ZQSD (WASD en QWERTY) pour se déplacer, A / E (Q / E en QWERTY) pour monter et descendre, Maj pour aller
   4 fois plus vite, glisser pour regarder autour, molette pour la vitesse, Échap pour revenir à l'orbite.
 
-### Runtime natif (source commune, `TOOLCHAIN` 18)
+### Runtime natif (source commune, `TOOLCHAIN` 19)
+
+- Traducteur : les jeux à vraies exceptions C++ (Pokémon Dash, Les Sims 2) ne compilaient plus avec la source
+  commune (`\&\&` écrit à la place de `&&`). Le code traduit des autres jeux ne change pas.
+- Débogage, dans les modules instrumentés seulement : `--ringat <image>` donne les derniers appels à cette image,
+  avec l'endroit d'où chacun vient ; `--watch` ne note plus que les valeurs non nulles.
 
 - Le paquet des touches porte la vitesse (mot 14) et le volume (mot 15), et `--ds-lang` donne la langue de la
   console. Sans ces valeurs, le runtime fait exactement comme avant. Un jeu les reçoit quand son runtime suit

@@ -113,5 +113,47 @@
  "AR5E": {
   "arm_stack": true,
   "lift_parts": 4
+ },
+ "ASJP": {
+  "names": {
+   "0x020fa240": "OS_SelectThread",
+   "0x020fa740": "OS_InitContext",
+   "0x020fa7a4": "OS_SaveContext",
+   "0x020fa7f0": "OS_LoadContext",
+   "0x020fff8c": "FSi_ReadRomCallback",
+   "0x021016a8": "TP_Init",
+   "0x021015fc": "TP_GetUserInfo",
+   "0x02101414": "TP_RequestSamplingAsync",
+   "0x021013bc": "TP_WaitCalibratedResult",
+   "0x02100f8c": "TP_GetCalibratedPoint",
+   "0x02100f74": "TP_WaitBusy",
+   "0x02103360": "RTC_Init",
+   "0x021031e4": "RTC_GetTime",
+   "0x02110444": "nds_eh_resume",
+   "0x02103110": "RTC_GetDateTime",
+   "0x021032a4": "RTC_GetDate",
+   "0x02103154": "RTC_GetDateTimeAsync"
+  },
+  "data": {
+   "OSi_ThreadInfo": "0x02145ff4",
+   "OSi_IrqThreadQueue": "0x027e0000"
+  },
+  "values": {
+   "nds_old_sdk": "1",
+   "nds_snd_new_ids": "1"
+  },
+  "hooks": {
+   "0x020fbf1c": "nds_hook_game_halt"
+  },
+  "eh_end_catch": "0x02110850",
+  "overlays": "multi",
+  "lift_parts": 8,
+  "entries": {
+   "0x020dafa0": "0x48"
+  },
+  "armcc_thumb": true,
+  "merge": {
+   "0x01ff8000": "0x330"
+  }
  }
 }

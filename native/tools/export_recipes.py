@@ -17,9 +17,9 @@ import native_build
 import recipe
 
 GAMES = HERE.parent / "games"
-PLAYABLE = {"AJTP", "AR5E", "AL7E", "APDE", "ABCE", "AHEP"}
+PLAYABLE = {"AJTP", "AR5E", "AL7E", "APDE", "ABCE", "AHEP", "ASJP"}
 # A augmenter quand le runtime, le traducteur ou les recettes changent : le launcher retelecharge et regenere.
-TOOLCHAIN = 18
+TOOLCHAIN = 19
 # Boite commune (GCC, Python, Capstone) des jeux qui ont leur propre runtime : a augmenter quand elle change.
 COMMON = 2
 # Hote Luau des mods en script (native/luau-host), publie avec la boite a outils.

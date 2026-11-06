@@ -348,6 +348,12 @@ static void peek_step(void) {
         nds_arg("--peek", &peeks);
         nds_arg("--poke", &pokes);
     }
+#ifdef NDS_INSTRUMENT
+    { /* --ringat image : derniers appels a cette image (versions instrumentees) */
+      static const char *ringat; static int ring_ready;
+      if (!ring_ready) { ring_ready = 1; nds_arg("--ringat", &ringat); }
+      if (ringat) { const char *p = ringat; if (script_number(&p, 0) == nds_frame) nds_fatal("--ringat image %u", nds_frame); } }
+#endif
     while (pokes && *pokes) {
         const char *p = pokes;
         u32 frame = script_number(&p, 0);

@@ -183,6 +183,7 @@ class Lifter:
         self.gosub_funcs = set()  # fonctions avec des sous-routines internes (bl dans la fonction, registres partages)
         self.sizes = {}
         self.debug_pc = False
+        self.armcc_thumb = False  # cle "armcc_thumb" du jeu : code Thumb d armcc (tables de demi-mots, epilogues partages)
         self.eh_end_catch = None  # adresse de __end_catch : le jeu lance de vraies exceptions C++ (NDS_EH du PRELUDE)
         self.hook_all = False  # chaque fonction traduite passe par HOOK_ENTRY : un mod peut la remplacer
         self.hooked = {}  # (adresse, nom) -> (nom, k) : nds_hook_slot[k] de la fonction (deux overlays peuvent avoir la meme adresse)
@@ -541,6 +542,13 @@ class Lifter:
 
     def branch(self, ins, mn, ops, labels):
         cond = ins.cc not in (ARM_CC_AL, 0)
+        if self.armcc_thumb and self.cur_thumb and mn in ("b", "bl") and ops[0].type in (ARM_OP_IMM, ARM_OP_PIMM):
+            # armcc : saut (b ou bl) vers l'epilogue d'une autre fonction (add sp ; pop ; bx) = le sien, copie ici
+            target = ops[0].imm & 0xFFFFFFFF
+            size = self.sizes.get(self.entry, 0)
+            if not self.entry <= target < self.entry + size and target not in self.symbols and self.is_epilogue(target):
+                labels.add(target)
+                return "goto L%08x;" % target, not cond
         if mn == "bl" and ops[0].type in (ARM_OP_IMM, ARM_OP_PIMM):
             target = ops[0].imm & 0xFFFFFFFF
             size = self.sizes.get(self.entry, 0)
@@ -567,6 +575,10 @@ class Lifter:
                     return self.gosub_ret("lr"), ins.cc in (ARM_CC_AL, 0)
                 return RET, True
             name = self.rv(ins, r)
+            if self.armcc_thumb and self.cur_thumb:
+                text = self.thumb_table(r, name, labels)
+                if text:
+                    return text, True
             if self.prev_set_lr:
                 return "CALLF(nds_call_target(%s));" % name, False
             return "if (%s==MAGIC_LR) { %s } CALLF(nds_call_target(%s)); %s" % (name, RET, name, RET), True
@@ -602,6 +614,63 @@ class Lifter:
             if prev.mnemonic.startswith("cmp") and prev.operands[1].type == ARM_OP_IMM:
                 return prev.operands[0].reg, prev.operands[1].imm + 1
         return None, None
+
+    def is_epilogue(self, at):
+        """Thumb : add sp, #n / pop {...} jusqu'a pop {..., pc} ou bx rX, rien d'autre."""
+        for _ in range(6):
+            i = self.decode(at, True)
+            if i is None:
+                return False
+            if i.mnemonic == "bx" or (i.mnemonic == "pop" and "pc" in i.op_str):
+                return True
+            if not (i.mnemonic == "pop" or (i.mnemonic == "add" and i.op_str.startswith("sp, #"))):
+                return False
+            at += i.size
+        return False
+
+    def thumb_table(self, r, name, labels):
+        """Table de demi-mots Thumb (cle "armcc_thumb" du jeu) : add rX, pc ; ldrh rX, [rX, #k] ; add rX, pc ; bx rX.
+        rX vaut deja l'adresse visee (bit Thumb compris) : on aiguille sur elle."""
+        if len(self.recent) < 3:
+            return None
+        a1, ld, a2 = self.recent[-3:]
+        def add_pc(i):
+            return i.mnemonic == "add" and len(i.operands) == 2 and i.operands[0].reg == r and i.operands[1].reg == ARM_REG_PC
+        if not (add_pc(a1) and add_pc(a2) and ld.mnemonic == "ldrh" and ld.operands[1].mem.base == r):
+            return None
+        # borne : "adds rX, rI, rI" juste avant, puis "cmp rI, #n" dans les quelques instructions d'avant (souvent
+        # atteint par un bls/bhi, donc absent de self.recent)
+        count = None
+        dbl = self.decode(a1.address - 2, True)
+        if dbl is not None and dbl.mnemonic.startswith("add") and len(dbl.operands) == 3 and dbl.operands[1].reg == dbl.operands[2].reg:
+            idx = dbl.operands[1].reg
+            for back in range(4, 20, 2):
+                c = self.decode(a1.address - back, True)
+                if c is not None and c.mnemonic == "cmp" and c.operands[0].reg == idx and c.operands[1].type == ARM_OP_IMM:
+                    count = c.operands[1].imm + 1
+                    break
+        base, pc2 = a1.address + 4 + ld.operands[1].mem.disp, a2.address + 4
+        if not count or count < 2:
+            # borne sur un autre registre (index = rX - k) : la table s'arrete au code de la premiere cible,
+            # ou a une cible hors de la fonction
+            size = self.sizes.get(self.entry, 0)
+            first, count = None, 0
+            while count < 256 and (first is None or base + 2 * count < first):
+                t = (pc2 + int.from_bytes(self.memory(base + 2 * count, 2), "little")) & ~1
+                if not (self.entry <= t < self.entry + size) or t <= a2.address:
+                    break
+                first = t if first is None else min(first, t)
+                count += 1
+        if not count or count > 512:
+            return None
+        cases = []
+        for i in range(count):
+            target = (pc2 + int.from_bytes(self.memory(base + 2 * i, 2), "little")) & ~1
+            if "case 0x%xu:" % target not in " ".join(cases):
+                cases.append("case 0x%xu: goto L%08x;" % (target, target))
+            labels.add(target)
+            self.extra_starts.append(target)
+        return "switch (%s & ~1u) { %s default: nds_unhandled(__func__, %s); }" % (name, " ".join(cases), name)
 
     def jump_table(self, ins, ops, labels):
         idx = ops[-1] if len(ops) >= 2 else None
@@ -750,7 +819,7 @@ class Lifter:
             head[2] = head[2].replace("r4=0,r5=0,r6=0,r7=0,r8=0,r9=0,r10=0,r11=0,", "r4=nds_cs[0],r5=nds_cs[1],r6=nds_cs[2],r7=nds_cs[3],r8=nds_cs[4],r9=nds_cs[5],r10=nds_cs[6],r11=nds_cs[7],")
             head[3] = "  u32 lr0_ = lr;"
             text = re.sub(r"\((\w+)==MAGIC_LR\)", r"(\1==MAGIC_LR||\1==lr0_)", text)
-            text = re.sub(r"\((\w+) != MAGIC_LR\)", r"(\1 != MAGIC_LR\&\&\1 != lr0_)", text)
+            text = re.sub(r"\((\w+) != MAGIC_LR\)", r"(\1 != MAGIC_LR&&\1 != lr0_)", text)
             if pads:
                 cases = " ".join("case 0x%xu: goto L%08x;" % (p, p) for p in pads)
                 head.append("  u32 eh_key_ = nds_eh_enter(0x%xu, 0x%xu, sp);" % (entry, self.sizes.get(entry, 0)))

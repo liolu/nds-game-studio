@@ -71,7 +71,7 @@ void nds_fatal(const char *fmt, ...) {
     va_end(ap);
 #ifdef NDS_INSTRUMENT
     { extern u32 nds_ring[4096], nds_ring_pos; extern u32 nds_pc; nds_log("arm=%x, derniers appels :", nds_pc);
-      for (int i = 4096 - 120; i < 4096; i++) nds_log("  appel %8x", nds_ring[(nds_ring_pos + i) & 4095]); }
+      extern u32 nds_ring_c[4096]; for (int i = 0; i < 4096; i++) nds_log("  appel %8x de %8x", nds_ring[(nds_ring_pos + i) & 4095], nds_ring_c[(nds_ring_pos + i) & 4095]); }
 #endif
     nds_mods_crash_note();
     os_exit(3);
@@ -105,10 +105,10 @@ int nds_arg(const char *name, const char **value) {
 u32 nds_watch = 1;
 void nds_watch_hit(u32 a, u32 v) {
     static u32 hits;
-    if (hits++ < 12) nds_log("ecriture %x = %x par arm=%x, r0=%x r1=%x r2=%x r3=%x image %u", a, v, nds_pc, nds_r[0], nds_r[1], nds_r[2], nds_r[3], nds_frame);
+    if (v && hits++ < 40) nds_log("ecriture %x = %x par arm=%x, r0=%x r1=%x r2=%x r3=%x image %u", a, v, nds_pc, nds_r[0], nds_r[1], nds_r[2], nds_r[3], nds_frame);
 }
-u32 nds_ring[4096], nds_ring_pos;
-void __cyg_profile_func_enter(void *f, void *c) { nds_ring[nds_ring_pos++ & 4095] = (u32)(uptr)f; } /* 64 bits : 32 bits bas */
+u32 nds_ring[4096], nds_ring_c[4096], nds_ring_pos;
+void __cyg_profile_func_enter(void *f, void *c) { nds_ring_c[nds_ring_pos & 4095] = (u32)(uptr)c; nds_ring[nds_ring_pos++ & 4095] = (u32)(uptr)f; } /* 64 bits : 32 bits bas */
 void __cyg_profile_func_exit(void *f, void *c) {}
 #if !NDS_IDENTITY
 /* HOST2DS des versions instrumentees : un pointeur hors de la fenetre veut dire du code du jeu sur une pile etrangere */

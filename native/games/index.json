@@ -169,8 +169,8 @@
    "c": 14.59,
    "code": 14.11,
    "data": 97.66,
-   "play": "stuck",
-   "status": "experimental"
+   "play": "playable",
+   "status": "ok"
   },
   "ASSE": {
    "c": 13.1,
@@ -445,5 +445,5 @@
   }
  },
  "luau_host": 1,
- "toolchain": 18
+ "toolchain": 19
 }

@@ -198,7 +198,7 @@ def game_patches(code):
 
 
 # Toujours definies : les autres jeux gardent 0, et le runtime sait que la fonction n'existe pas pour eux
-PATCH_VALUES = ["nds_net_screens", "nds_net_menu_screen", "nds_old_sdk", "nds_stack_margin", "nds_stack_reuse", "nds_long_args"]
+PATCH_VALUES = ["nds_net_screens", "nds_net_menu_screen", "nds_old_sdk", "nds_stack_margin", "nds_stack_reuse", "nds_long_args", "nds_snd_new_ids"]
 
 
 def has_asm(text):
@@ -446,6 +446,24 @@ def main():
             v = int.from_bytes(raw, "little") if raw and len(raw) == 4 else 0
             if lo <= v < hi and not v & 3 and v not in game.functions:
                 game.functions[v] = ("func_%08x" % v, 0, False)
+    # "entries" : {adresse: taille} fonctions que le projet a collees a la precedente (saut terminal juste avant),
+    # appelees par une table de pointeurs ; la fonction qui la contenait s'arrete a cette adresse
+    for at, size in patches.get("entries", {}).items():
+        at, size = int(at, 16), int(size, 16)
+        for f, (name, fsize, thumb) in list(game.functions.items()):
+            if f < at < f + fsize:
+                game.functions[f] = (name, at - f, thumb)
+        game.functions[at] = ("func_%08x" % at, size, False)
+        game.main_addrs.add(at)
+    # "merge" : {adresse: taille} assembleur ecrit a la main que le projet a coupe en plusieurs fonctions qui se sautent
+    # dedans (sous-routines internes qui se passent registres et drapeaux) : une seule fonction, les bl deviennent internes
+    for at, size in patches.get("merge", {}).items():
+        at, size = int(at, 16), int(size, 16)
+        for f in [f for f in game.functions if at < f < at + size]:
+            del game.functions[f]
+            game.main_addrs.discard(f)
+        name, _, thumb = game.functions[at]
+        game.functions[at] = (name, size, thumb)
 
     # 1. runtime : ce qu'il definit remplace le jeu
     rt_srcs = runtime_sources()
@@ -533,6 +551,7 @@ def main():
     # assembleur ecrit a la main qui se passe des registres d'une fonction a l'autre : [[debut, fin], ...]
     lifter.shared_ranges = [(int(lo, 16), int(hi, 16)) for lo, hi in patches.get("shared_regs", [])]
     lifter.arm_stack = bool(patches.get("arm_stack")) and lifter.eh_end_catch is None
+    lifter.armcc_thumb = bool(patches.get("armcc_thumb"))
     plan = overlay_plan(game) if multi else None
     protos = set()
     if multi:

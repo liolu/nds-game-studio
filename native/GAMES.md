@@ -52,7 +52,7 @@ La colonne « Essai » vient d'un relevé sous Windows ; la colonne « macOS » 
 | simanimals | CM3P | 0 | ok | tourne, image 0, rien a l'ecran | pas essaye |
 | simcity-creator | YC2P | 16 | ok | plante : acces memoire invalide 83e589b9 (ecriture) eip=10009d80 esp=20fff6e0 a, rien a l'ecran | pas essaye |
 | simpsons-game | YSZE | 2 | ok | plante : saut vers une adresse DS sans fonction : 2002c28, rien a l'ecran | pas essaye |
-| sims-2-the | ASJP | 19 | ok | tourne, image 0, rien a l'ecran | pas essaye |
+| sims-2-the | ASJP | 19 | ok | essaye jusqu'en jeu : Create-a-Sim, Strangetown, dialogues ; vieux SDK, exceptions C++, overlays multi, decompresseur ITCM fusionne (merge), tables Thumb d'armcc ; un ecran bleu vu une fois par le joueur, pas reproduit | pas essaye |
 | spider-man-2-eu | AS2P | 0 | ok | tourne, image 0, rien a l'ecran | pas essaye |
 | spider-man-2-usa | AS2E | 0 | ok | tourne, image 0, rien a l'ecran | pas essaye |
 | spider-man-shattered-dimensions | B3PP | 0 | ok | plante : instruction non traduite func_0210ece4 @210ecf4, rien a l'ecran | pas essaye |
