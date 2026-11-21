@@ -43,7 +43,7 @@ Chaque jeu peut partager un format avec d'autres et en differer sur un detail. R
 
 ## Runtime natif : un runtime par jeu
 
-Chaque jeu a son runtime dans son propre depot (`native/`, etiquette `runtime-v<n>`, `native/tools/runtime_sync.py`). Le `native/` du studio n'est que la source commune. Regles :
+Chaque jeu a son runtime dans son propre depot (`native/`, etiquette `runtime-v<n>`, `native/tools/runtime_sync.py`), ou dans son dossier de liolu/All-nds-decomp-games (`games/<L>/<jeu>/native/`, etiquette `<jeu>/runtime-v<n>`, entree de l'index avec `"tag"`) : Harvest Moon, Heroes of Mana, Pokemon Dash, Rayman, Tom et Jerry ; Lego et Les Sims 2 gardent leur depot. Le `native/` du studio n'est que la source commune. Regles :
 
 1. Un changement fait pour un jeu ne change jamais un autre jeu : dans le runtime, tout nouveau comportement est desactive par defaut et s'active par une valeur de ce jeu dans `native/games/patches.json` (`values` : `nds_old_sdk`, `nds_stack_margin`, `nds_stack_reuse`, `nds_long_args`...) ; dans le traducteur, par une cle de ce jeu (`overlays`, `shared_regs`, `stack_args`, `gates`). Sans la cle, le code genere et le module des autres jeux restent identiques.
 2. Les autres jeux ne se reessaient pas sans raison et leurs depots ne se resynchronisent pas sans demande : chaque jeu choisit quand il suit le studio.
@@ -57,6 +57,7 @@ Chaque jeu a son runtime dans son propre depot (`native/`, etiquette `runtime-v<
 4. Essais sans fenetre (`run_game.sh`, `--keys`, `--dump`, `--peek` avant `--keys`), puis notification a l'utilisateur pour qu'il joue dans le launcher (`decomp\JOUER HM HOM.cmd` comme modele) pendant qu'on lit `runtime.log` et qu'on corrige.
 5. Verifier qu'un jeu sans les nouvelles cles garde un `lifted.c` identique (Tom et Jerry), tests sans rom (`native/tests/runtime_check.py`, `arm2c_test.py`), `TOOLCHAIN` + 1.
 6. Runtime du jeu : `runtime_sync.py <depot> <code> --apply [--bump]` dans un worktree du depot du jeu, exclure `native/` de pre-commit, PR, fusion sur accord, etiquette `runtime-v<n>` sur la fusion, attendre la release, puis l'entree `"runtime"` de l'index et le push du studio (l'index attend que la boite `native-toolchain-<TOOLCHAIN>` soit publiee : relancer « Native index » apres « Native toolchain »).
+   Jeu de liolu/All-nds-decomp-games : `runtime_sync.py <All-nds-decomp-games>/games/<L>/<jeu> <code> --apply --bump` (verrou `build/pipeline.lock` du jeu ; pas de CI copiee, celle du depot sert a tous les jeux), commit avec le chemin `games/<L>/<jeu>/native` seulement (d'autres sessions travaillent dans ce depot), puis `git tag <jeu>/runtime-v<n>` et `git push origin main <jeu>/runtime-v<n>` : la CI « Native runtime » verifie et publie la release (une etiquette a la fois : GitHub ne lance rien quand plus de trois etiquettes sont poussees ensemble). L'entree de l'index est celle que le script affiche : `{"repo": "liolu/All-nds-decomp-games", "version": n, "tag": "<jeu>/runtime-v<n>"}`. Un launcher d'avant `"tag"` chercherait `runtime-v<n>` et echouerait : ne publier une telle entree qu'une fois le launcher qui lit `"tag"` sorti en `stable`.
 7. Le launcher ne lit l'index qu'au demarrage : apres une publication, le relancer.
 
 ## Notes de version (patch notes)

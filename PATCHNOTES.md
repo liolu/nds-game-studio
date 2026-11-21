@@ -53,6 +53,14 @@ Chaque ajout ou changement s'écrit ici, dans la section « Pas encore publié �
 - Les six jeux natifs suivent cette source : Harvest Moon DS, Heroes of Mana, Tom et Jerry, Lego Star Wars II
   et Rayman passent à leur runtime v3, Pokémon Dash à son runtime v2. Vitesse, volume et langue y marchent donc
   en jeu.
+- **Runtimes venus d'un dépôt de plusieurs jeux** : une entrée de l'index peut donner l'étiquette de sa release
+  (`"tag": "heroes-of-mana/runtime-v4"`). Harvest Moon, Heroes of Mana, Pokémon Dash, Rayman et Tom et Jerry
+  vivent maintenant dans liolu/All-nds-decomp-games, qui publie `<jeu>/runtime-v<n>` : leurs prochaines versions
+  arriveront ainsi, sans autre mise à jour du launcher. Sans `"tag"`, rien ne change : les versions déjà
+  installées et les anciens dépôts restent comme avant. `runtime_sync.py` accepte le dossier d'un jeu dans
+  ce dépôt (`games/<L>/<jeu>`) et affiche l'étiquette et l'entrée de l'index à écrire.
+- Une mise à jour du runtime se télécharge depuis le dépôt de l'index qui l'annonce, et non plus depuis celui
+  de la version d'avant (un jeu qui change de dépôt).
 
 ### Changements
 
