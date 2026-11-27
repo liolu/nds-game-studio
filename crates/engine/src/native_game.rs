@@ -261,6 +261,21 @@ struct GameRuntime {
     /// `propriétaire/dépôt` sur GitHub.
     repo: String,
     version: u32,
+    /// L'étiquette de la release quand ce n'est pas `runtime-v<version>` : un dépôt qui porte plusieurs jeux
+    /// (liolu/All-nds-decomp-games) publie `<jeu>/runtime-v<version>`. Sans, rien ne change.
+    #[serde(default)]
+    tag: Option<String>,
+}
+
+impl GameRuntime {
+    fn release_tag(&self) -> String {
+        self.tag.clone().unwrap_or_else(|| format!("runtime-v{}", self.version))
+    }
+
+    /// Le dossier de la release : `<base>/<dépôt>/releases/download/<étiquette>`. GitHub accepte le `/` d'une étiquette tel quel.
+    fn release_url(&self, base: &str) -> String {
+        format!("{base}/{}/releases/download/{}", self.repo, self.release_tag())
+    }
 }
 
 /// État d'un jeu : montré sur sa page. Pourcentages du code identique à l'original, du code écrit en C
@@ -352,6 +367,22 @@ fn runtime_of(code: &str) -> Option<GameRuntime> {
 fn latest_runtime(code: &str) -> Option<u32> {
     let fresh = FRESH.lock().unwrap().as_ref().and_then(|i| Some(i.games.get(code)?.runtime.as_ref()?.version));
     fresh.or_else(|| runtime_of(code).map(|r| r.version))
+}
+
+/// Où se télécharge la version `version` du runtime de ce jeu : le dépôt et l'étiquette de l'entrée qui annonce cette version
+/// (l'index lu au démarrage, puis le dernier gardé). Une mise à jour peut ainsi venir d'un autre dépôt que la version installée.
+fn runtime_release(code: &str, version: u32) -> Option<GameRuntime> {
+    let fresh = FRESH.lock().unwrap().as_ref().and_then(|i| i.games.get(code)?.runtime.clone());
+    pick_release(version, fresh, runtime_of(code))
+}
+
+/// L'entrée qui annonce `version` ; sinon, comme avant l'étiquette : la release `runtime-v<version>` du dépôt du dernier index gardé.
+fn pick_release(version: u32, fresh: Option<GameRuntime>, kept: Option<GameRuntime>) -> Option<GameRuntime> {
+    let announced = |r: &GameRuntime| r.version == version;
+    if let Some(found) = fresh.filter(announced).or_else(|| kept.clone().filter(announced)) {
+        return Some(found);
+    }
+    kept.map(|r| GameRuntime { version, tag: None, ..r })
 }
 
 /// La version du runtime installée pour un jeu (`native/<code>.json`) : celle qu'on joue tant qu'on n'accepte pas une mise à jour.
@@ -699,20 +730,27 @@ fn ensure_common(state: &Mutex<Generation>) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-/// Le runtime de ce jeu, version `version` : release `runtime-v<version>` de son dépôt, contrôlée par `SHA256SUMS`. Une seule
-/// version par dossier : une mise à jour ne touche ni aux autres versions, ni aux autres jeux.
-fn ensure_runtime(code: &str, repo: &str, version: u32, state: &Mutex<Generation>) -> Result<PathBuf, String> {
-    let dir = crate::save::data_dir().join("native-runtime").join(format!("{code}-r{version}"));
-    if dir.join("installed").exists() {
-        return Ok(dir);
-    }
+/// Le runtime de ce jeu, version `release.version` : release `runtime-v<version>` de son dépôt (ou l'étiquette `tag` de
+/// l'index), contrôlée par `SHA256SUMS`. Une seule version par dossier : une mise à jour ne touche ni aux autres versions,
+/// ni aux autres jeux.
+fn ensure_runtime(code: &str, release: &GameRuntime, state: &Mutex<Generation>) -> Result<PathBuf, String> {
+    let dir = crate::save::data_dir().join("native-runtime").join(format!("{code}-r{}", release.version));
     let base = std::env::var("NDSGS_GITHUB_DOWNLOAD").unwrap_or_else(|_| "https://github.com".to_string());
-    let release = format!("{base}/{repo}/releases/download/runtime-v{version}");
+    fetch_runtime(&dir, &base, release, state)?;
+    Ok(dir)
+}
+
+/// Télécharge `SHA256SUMS` puis l'archive de la release dans `dir`, une fois.
+fn fetch_runtime(dir: &Path, base: &str, release: &GameRuntime, state: &Mutex<Generation>) -> Result<(), String> {
+    if dir.join("installed").exists() {
+        return Ok(());
+    }
+    let (version, tag, url) = (release.version, release.release_tag(), release.release_url(base));
     let name = format!("native-runtime-{version}.zip");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let sums = dir.join("SHA256SUMS");
     say(state, t!("Downloading this game's runtime (version {version})...", "Telechargement du runtime de ce jeu (version {version})..."));
-    download(&format!("{release}/SHA256SUMS"), &sums)?;
+    download(&format!("{url}/SHA256SUMS"), &sums)?;
     let text = std::fs::read_to_string(&sums).map_err(|e| e.to_string())?;
     let expected = text
         .lines()
@@ -720,9 +758,8 @@ fn ensure_runtime(code: &str, repo: &str, version: u32, state: &Mutex<Generation
             let (hash, file) = line.split_once(char::is_whitespace)?;
             (file.trim().trim_start_matches('*') == name).then(|| hash.to_lowercase())
         })
-        .ok_or_else(|| t!("SHA256SUMS of runtime-v{version} does not list {name}.", "SHA256SUMS de runtime-v{version} ne donne pas {name}."))?;
-    install_archive(&dir, &format!("{release}/{name}"), None, Some(&expected), state, t!("Downloading this game's runtime (version {version})...", "Telechargement du runtime de ce jeu (version {version})..."))?;
-    Ok(dir)
+        .ok_or_else(|| t!("SHA256SUMS of {tag} does not list {name}.", "SHA256SUMS de {tag} ne donne pas {name}."))?;
+    install_archive(dir, &format!("{url}/{name}"), None, Some(&expected), state, t!("Downloading this game's runtime (version {version})...", "Telechargement du runtime de ce jeu (version {version})..."))
 }
 
 /// Sous macOS, le compilateur est celui des Command Line Tools : le jeu est compilé chez le joueur, et le SDK d'Apple
@@ -770,8 +807,8 @@ fn insn_hook_args(code: &str) -> Vec<String> {
 fn generate(code: &str, rom: &Path, runtime: Option<u32>, state: &Mutex<Generation>) -> Result<PathBuf, String> {
     check_compiler()?;
     // Les outils (Python, compilateur) et le traducteur avec son runtime : ensemble dans la boîte commune, ou séparés
-    let (tools, sources) = match (runtime, runtime_of(code)) {
-        (Some(version), Some(game)) => (ensure_common(state)?, ensure_runtime(code, &game.repo, version, state)?),
+    let (tools, sources) = match (runtime, runtime.and_then(|version| runtime_release(code, version))) {
+        (Some(_), Some(release)) => (ensure_common(state)?, ensure_runtime(code, &release, state)?),
         _ => {
             let tools = ensure_toolchain(state)?;
             (tools.clone(), tools)
@@ -1493,5 +1530,124 @@ mod tests {
         assert_eq!(tom.play, "playable");
         assert!(tom.code.unwrap() > 50.0 && tom.data.unwrap() > 50.0 && tom.c.unwrap() > 0.0);
         assert!(is_experimental("BW7E") && !is_experimental("AL7E"));
+    }
+
+    fn entry(json: &str) -> GameRuntime {
+        serde_json::from_str(json).unwrap()
+    }
+
+    /// Sans `tag`, l'adresse est celle d'avant ; avec, celle de l'étiquette d'un dépôt qui porte plusieurs jeux.
+    #[test]
+    fn l_etiquette_de_l_index_donne_la_release() {
+        let old = entry(r#"{"repo": "liolu/heroes-of-mana-decomp", "version": 3}"#);
+        assert_eq!(old.release_url("https://github.com"), "https://github.com/liolu/heroes-of-mana-decomp/releases/download/runtime-v3");
+        let new = entry(r#"{"repo": "liolu/All-nds-decomp-games", "version": 4, "tag": "heroes-of-mana/runtime-v4"}"#);
+        assert_eq!(new.release_url("https://github.com"), "https://github.com/liolu/All-nds-decomp-games/releases/download/heroes-of-mana/runtime-v4");
+        // un index avec étiquette se lit entier : le reste des jeux ne change pas
+        let index: Index = serde_json::from_str(
+            r#"{"toolchain": 19, "common": 2, "games": {
+                "AHEP": {"status": "ok", "runtime": {"repo": "liolu/All-nds-decomp-games", "version": 4, "tag": "heroes-of-mana/runtime-v4"}},
+                "AJTP": {"status": "ok", "runtime": {"repo": "liolu/tom-and-jerry-tales-decomp", "version": 3}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(index.games["AHEP"].runtime.as_ref().unwrap().release_tag(), "heroes-of-mana/runtime-v4");
+        assert_eq!(index.games["AJTP"].runtime.as_ref().unwrap().release_tag(), "runtime-v3");
+    }
+
+    /// La version téléchargée prend le dépôt et l'étiquette de l'entrée qui l'annonce, pas ceux d'une autre version.
+    #[test]
+    fn chaque_version_se_telecharge_depuis_son_entree() {
+        let kept = entry(r#"{"repo": "liolu/heroes-of-mana-decomp", "version": 3}"#);
+        let fresh = entry(r#"{"repo": "liolu/All-nds-decomp-games", "version": 4, "tag": "heroes-of-mana/runtime-v4"}"#);
+        assert_eq!(pick_release(4, Some(fresh.clone()), Some(kept.clone())), Some(fresh.clone()));
+        assert_eq!(pick_release(3, Some(fresh.clone()), Some(kept.clone())), Some(kept.clone()));
+        // l'index d'avant a déjà l'étiquette, celui du démarrage n'a pas pu être lu
+        assert_eq!(pick_release(4, None, Some(fresh.clone())), Some(fresh.clone()));
+        // une version que personne n'annonce : la release runtime-v<n> du dépôt gardé, comme avant
+        assert_eq!(pick_release(5, Some(fresh), Some(kept)).map(|r| r.release_url("https://github.com")), Some("https://github.com/liolu/heroes-of-mana-decomp/releases/download/runtime-v5".to_string()));
+        assert_eq!(pick_release(3, None, None), None);
+    }
+
+    /// Un petit serveur, rangé comme les releases de GitHub : il sert `files` et note les chemins demandés.
+    fn serve(files: Vec<(String, Vec<u8>)>) -> (String, Arc<Mutex<Vec<String>>>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let seen = asked.clone();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().map_while(Result::ok) {
+                let mut request = Vec::new();
+                let mut byte = [0u8; 1];
+                while !request.ends_with(b"\r\n\r\n") && stream.read(&mut byte).is_ok_and(|n| n == 1) {
+                    request.push(byte[0]);
+                }
+                let line = String::from_utf8_lossy(&request).lines().next().unwrap_or_default().to_string();
+                let path = line.split(' ').nth(1).unwrap_or_default().to_string();
+                seen.lock().unwrap().push(path.clone());
+                let (status, body) = match files.iter().find(|(p, _)| *p == path) {
+                    Some((_, body)) => ("200 OK", body.clone()),
+                    None => ("404 Not Found", Vec::new()),
+                };
+                let _ = write!(stream, "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                let _ = stream.write_all(&body);
+            }
+        });
+        (base, asked)
+    }
+
+    fn runtime_zip(version: &str) -> Vec<u8> {
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zip.start_file("native/VERSION", zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored)).unwrap();
+        zip.write_all(version.as_bytes()).unwrap();
+        zip.finish().unwrap().into_inner()
+    }
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// Une entrée avec `tag` télécharge `SHA256SUMS` et l'archive sous l'étiquette, contrôle l'archive et la décompresse une fois.
+    #[test]
+    fn un_runtime_avec_etiquette_se_telecharge() {
+        let archive = runtime_zip("4\n");
+        let folder = "/liolu/All-nds-decomp-games/releases/download/heroes-of-mana/runtime-v4";
+        let (base, asked) = serve(vec![
+            (format!("{folder}/SHA256SUMS"), format!("{}  native-runtime-4.zip\n", sha256_hex(&archive)).into_bytes()),
+            (format!("{folder}/native-runtime-4.zip"), archive),
+        ]);
+        let release = entry(r#"{"repo": "liolu/All-nds-decomp-games", "version": 4, "tag": "heroes-of-mana/runtime-v4"}"#);
+        let dir = std::env::temp_dir().join(format!("ndsgs-runtime-tag-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = Mutex::new(Generation::default());
+        fetch_runtime(&dir, &base, &release, &state).expect("runtime téléchargé");
+        assert_eq!(std::fs::read_to_string(dir.join("native").join("VERSION")).unwrap(), "4\n");
+        assert!(dir.join("installed").exists());
+        assert_eq!(*asked.lock().unwrap(), [format!("{folder}/SHA256SUMS"), format!("{folder}/native-runtime-4.zip")]);
+        // déjà installé : plus rien n'est demandé
+        fetch_runtime(&dir, &base, &release, &state).unwrap();
+        assert_eq!(asked.lock().unwrap().len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Une archive qui ne correspond pas à `SHA256SUMS` est refusée et rien ne reste installé ; une étiquette absente échoue.
+    #[test]
+    fn une_archive_fausse_ou_absente_est_refusee() {
+        let folder = "/liolu/All-nds-decomp-games/releases/download/heroes-of-mana/runtime-v4";
+        let (base, _) = serve(vec![
+            (format!("{folder}/SHA256SUMS"), format!("{}  native-runtime-4.zip\n", sha256_hex(b"autre chose")).into_bytes()),
+            (format!("{folder}/native-runtime-4.zip"), runtime_zip("4\n")),
+        ]);
+        let dir = std::env::temp_dir().join(format!("ndsgs-runtime-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = Mutex::new(Generation::default());
+        let tagged = entry(r#"{"repo": "liolu/All-nds-decomp-games", "version": 4, "tag": "heroes-of-mana/runtime-v4"}"#);
+        assert!(fetch_runtime(&dir, &base, &tagged, &state).unwrap_err().contains("SHA256SUMS"));
+        assert!(!dir.join("installed").exists());
+        // la même version sans étiquette cherche runtime-v4 à la racine des releases : absente ici
+        let untagged = entry(r#"{"repo": "liolu/All-nds-decomp-games", "version": 4}"#);
+        assert!(fetch_runtime(&dir, &base, &untagged, &state).is_err());
+        assert!(!dir.join("installed").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

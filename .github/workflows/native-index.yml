@@ -1,5 +1,6 @@
 # Index des jeux natifs (native/games/index.json) : publie seul dans la release native-toolchain, que le launcher relit a
-# chaque demarrage. Une mise a jour du runtime d'un jeu (etiquette runtime-v<n> dans son depot, puis "version" ici) n'a
+# chaque demarrage. Une mise a jour du runtime d'un jeu (etiquette runtime-v<n> dans son depot, ou <jeu>/runtime-v<n> dans
+# liolu/All-nds-decomp-games avec "tag", puis "version" ici) n'a
 # besoin que de ce fichier : ni nouveau launcher (experimental.yml ignore native/), ni nouvelle boite a outils.
 # Avant de publier, tout ce que l'index annonce doit deja exister : sinon le launcher proposerait un telechargement en 404.
 name: Native index
@@ -48,7 +49,8 @@ jobs:
               runtime = game.get("runtime")
               if not runtime:
                   continue
-              tag = "runtime-v%d" % runtime["version"]
+              # "tag" : un depot qui porte plusieurs jeux (liolu/All-nds-decomp-games) publie <jeu>/runtime-v<n>
+              tag = runtime.get("tag") or "runtime-v%d" % runtime["version"]
               have = assets(runtime["repo"], tag)
               for name in ("native-runtime-%d.zip" % runtime["version"], "SHA256SUMS"):
                   if have is None or name not in have:
